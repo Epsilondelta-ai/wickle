@@ -37,7 +37,7 @@ impl ProfileResolver for Catalog {
                 capabilities: BTreeSet::new(),
                 required_capabilities: BTreeSet::new(),
                 required_connections: BTreeSet::new(),
-                model_name: None,
+                model_name: (reference.kind == ComponentKind::Tool).then(|| reference.id.clone()),
                 hook_position: None,
                 exports: vec![],
             })

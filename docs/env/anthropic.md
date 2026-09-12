@@ -2,7 +2,7 @@
 
 [환경변수 안내](README.md) · [전체 예제](../../.env.example)
 
-Claude Console에서 발급한 API 키와 직접 API의 모델 ID를 준비합니다. 아래 설정은 Host와 모델별 검사를 위한 규약입니다. Wickle 코어가 `.env`를 자동으로 읽지는 않으며, 제공 경로 어댑터와 실제 연결 검사 runner는 아직 완성되지 않았습니다.
+Claude Console에서 발급한 API 키와 직접 API의 모델 ID를 준비합니다. 아래 설정은 모델별 실제 연결 테스트 전용 규약입니다. Wickle 코어가 `.env`를 자동으로 읽지는 않으며, 제공 경로 어댑터와 실제 연결 검사 runner는 아직 완성되지 않았습니다.
 
 ```dotenv
 ANTHROPIC_API_KEY=

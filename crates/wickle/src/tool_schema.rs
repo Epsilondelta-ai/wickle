@@ -710,7 +710,7 @@ impl jsonschema::Retrieve for NoSchemaRetrieval {
         Err("external schema retrieval is disabled".into())
     }
 }
-fn compile_validator(schema: &Value) -> Result<jsonschema::Validator, ContractError> {
+pub(crate) fn compile_validator(schema: &Value) -> Result<jsonschema::Validator, ContractError> {
     jsonschema::draft202012::options()
         .should_validate_formats(true)
         .with_retriever(NoSchemaRetrieval)

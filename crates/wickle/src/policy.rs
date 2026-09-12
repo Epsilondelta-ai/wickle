@@ -87,6 +87,23 @@ pub enum PolicyAction {
     ReadRecord {},
     /// Use scoped data in model context.
     UseContext {},
+    /// Read one registered system key before the final target value is known.
+    ResolveSystemInput {
+        /// Exact tool requesting the lookup.
+        tool: VersionedRef,
+        /// Logical call whose binding is being prepared.
+        call_id: Id,
+        /// Pinned tool descriptor identity.
+        descriptor_digest: JsonDigest,
+        /// Compiled input contract identity.
+        compiled_digest: JsonDigest,
+        /// Exact registry key, never a path expression.
+        key: Id,
+        /// Pinned system-input definition revision.
+        definition_version: Id,
+        /// Exact read-only resolver implementation.
+        resolver_ref: VersionedRef,
+    },
     /// Send input to a selected model route.
     InvokeModel {
         /// Immutable selected route identity.
