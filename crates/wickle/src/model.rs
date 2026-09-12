@@ -117,6 +117,10 @@ pub enum ModelFailureKind {
     Authentication,
     /// Required functionality is unsupported.
     Unsupported,
+    /// The selected target is no longer available.
+    Unavailable,
+    /// Current model/deployment metadata differs from the pinned route.
+    VersionDrift,
 }
 
 /// Selection request; the router returns data and does not invoke a model.
@@ -243,6 +247,13 @@ pub struct ModelInvocationRecord {
     pub request_digest: JsonDigest,
     /// Invocation state.
     pub state: ModelAttemptState,
+    /// Protected current-target inspection, distinct from provider response metadata.
+    #[serde(
+        default,
+        deserialize_with = "optional",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub inspection_ref: Option<RecordRef>,
     /// Protected complete or failed response, including bounded partial text.
     /// This is retained even when a later recovery reservation is exhausted.
     #[serde(

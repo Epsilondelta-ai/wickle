@@ -1,5 +1,7 @@
 # Register versioned models
 
+For selection and execution, see [Route and dispatch model calls](model-routing.md).
+
 `wickle` defines model catalog contracts. `wickle-model-router` provides
 `ImmutableModelCatalog`, an in-process implementation that a Host can construct
 from a validated snapshot. The catalog contains metadata and connection

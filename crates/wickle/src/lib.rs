@@ -21,8 +21,10 @@ mod input_binding;
 mod message;
 mod model;
 mod model_catalog;
+mod model_dispatch;
 mod model_execution;
 mod model_protocol;
+mod model_routing;
 mod policy;
 mod profile;
 mod resolution;
@@ -55,6 +57,10 @@ pub use model_protocol::{
     ModelResponseLimits, ModelResponseMetadata, ModelRole, ModelTool, OpaqueContinuation,
     ProposedToolCall, ToolCallValidation, collect_model_response,
 };
+pub use model_routing::{
+    MAX_ROUTE_FALLBACKS, MAX_ROUTING_RULES, ModelRouter, ROUTING_SNAPSHOT_VERSION, RouteSelection,
+    RouteSelectionReason, RoutingPolicy, RoutingRule, RoutingSnapshot,
+};
 pub use policy::{
     ApprovalChallenge, Guarded, PolicyAction, PolicyContext, PolicyDecision, PolicyGate,
     PolicyPort, PolicyRequest, ToolPolicyInput,
@@ -83,8 +89,13 @@ pub use model::{
     ModelUsage, ResolvedModelRoute, RouteRequest, UsageMeasurement, VersionPolicy,
     VersionSemantics,
 };
+pub use model_dispatch::{
+    ModelDispatcher, ModelInspectionContext, ModelRouteAvailability, ModelRouteInspector,
+    ModelRouteObservation,
+};
 pub use model_execution::{
-    ModelExchange, ModelExchangeOutcome, ModelRetryPolicy, StoredModelResponse,
+    ModelExchange, ModelExchangeOutcome, ModelProjectionContext, ModelRequestProjector,
+    ModelRetryPolicy, ProjectedModelRequest, RoutedModelInput, StoredModelResponse,
 };
 pub use profile::{
     AdapterBindingRef, AgentProfile, CatalogHookRef, CatalogSourceRef, CatalogToolRef,

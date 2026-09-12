@@ -277,6 +277,22 @@ impl fmt::Debug for ModelRequest {
 }
 
 impl ModelRequest {
+    /// Capabilities implied by the prepared request: `text`, plus `tool_calling`
+    /// for tool schemas and `json_output` for a structured output contract.
+    /// Host requirements may add further registered features.
+    pub fn required_capabilities(&self) -> std::collections::BTreeSet<Id> {
+        let mut features = std::collections::BTreeSet::from([
+            Id::new("text").expect("static capability identifier")
+        ]);
+        if !self.tools.is_empty() {
+            features.insert(Id::new("tool_calling").expect("static capability identifier"));
+        }
+        if matches!(self.output, ModelOutput::JsonSchema { .. }) {
+            features.insert(Id::new("json_output").expect("static capability identifier"));
+        }
+        features
+    }
+
     /// Hash the complete prepared request, without introducing runtime credentials.
     pub fn digest(&self) -> JsonDigest {
         data_digest(self)
