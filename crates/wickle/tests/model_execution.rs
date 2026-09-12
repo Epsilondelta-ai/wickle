@@ -55,6 +55,7 @@ fn request(provider: &str) -> ModelRequest {
         tools: vec![],
         output: ModelOutput::Text {},
         max_output_tokens: 32.try_into().unwrap(),
+        options: JsonObject::new(),
         limits: ModelResponseLimits {
             max_input_bytes: 8192,
             max_response_bytes: 4096,
@@ -296,7 +297,8 @@ async fn each_retry_has_its_own_saved_attempt_and_rechecks_policy() {
         vec![Reply::Fail(ModelFailureKind::RateLimited), Reply::Complete],
     );
     let exchange = fixture.exchange(model.clone(), 2);
-    let original = request("first");
+    let mut original = request("first");
+    original.options = JsonObject::from([("reasoning_effort".into(), json!("high"))]);
     let result = exchange
         .generate(&original, &fixture.context, &fixture.budget)
         .await
@@ -332,6 +334,7 @@ async fn each_retry_has_its_own_saved_attempt_and_rechecks_policy() {
             assert_eq!(&request.request_id, attempt);
             assert_eq!(request.route, original.route);
             assert_eq!(request.messages, original.messages);
+            assert_eq!(request.options, original.options);
             // A real Host value exists but no model request surface automatically copies it.
             assert!(
                 !serde_json::to_string(request)

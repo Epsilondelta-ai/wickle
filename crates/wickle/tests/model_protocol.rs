@@ -61,6 +61,7 @@ fn request() -> ModelRequest {
         }],
         output: ModelOutput::Text {},
         max_output_tokens: 128.try_into().unwrap(),
+        options: JsonObject::new(),
         limits: ModelResponseLimits {
             max_input_bytes: 16_384,
             max_response_bytes: 4096,
@@ -538,4 +539,33 @@ async fn preflight_rejects_mismatched_port_bindings_and_oversized_input() {
     let mut oversized = request;
     oversized.limits.max_input_bytes = 1;
     assert!(oversized.validate().is_err());
+}
+
+#[test]
+fn host_options_affect_request_identity_and_bounds_without_changing_empty_request_encoding() {
+    let mut request = request();
+    let mut legacy = serde_json::to_value(&request).unwrap();
+    legacy.as_object_mut().unwrap().remove("options");
+    let restored: ModelRequest = serde_json::from_value(legacy.clone()).unwrap();
+    assert_eq!(restored.digest(), canonical_digest(&legacy));
+    assert_eq!(restored, request);
+    let original_digest = request.digest();
+    request
+        .options
+        .insert("reasoning_effort".into(), json!("high"));
+    request.validate().unwrap();
+    assert_ne!(request.digest(), original_digest);
+    let high_digest = request.digest();
+    request
+        .options
+        .insert("reasoning_effort".into(), json!("low"));
+    assert_ne!(request.digest(), high_digest);
+    request.options.insert(
+        "reasoning_effort".into(),
+        json!("x".repeat(request.limits.max_input_bytes)),
+    );
+    assert_eq!(
+        request.validate().unwrap_err().path,
+        "model_request.input_size"
+    );
 }

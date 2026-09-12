@@ -87,6 +87,7 @@ pub async fn admission(
         session_id: id(session),
         input: vec![InputContent::Text { text: text.into() }],
         trigger: RunTrigger::User {},
+        model_options: JsonObject::new(),
         output_contract: None,
     };
     let request_record = ProtectedRecord::new(

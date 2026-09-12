@@ -92,6 +92,13 @@ adapter version, and Host connection revision. Credentials remain in the adapter
 Host binding. `ModelRequest` contains an explicit model projection and finite
 input/response limits; execution context and system tool inputs are not copied in.
 
+`RunRequest.model_options` pins Host-authorized, request-specific options at
+admission. `RouteRequest.options` carries them as candidate constraints, and
+`ProjectionInput.options` becomes `ModelRequest.options` unchanged. Empty maps
+remain omitted in saved JSON. Model options are included in request digests and
+byte limits; same-route retries preserve them. See the [context guide](context.md)
+for catalog validation and the explicit adapter-mapping boundary.
+
 `collect_model_response` accepts complete text and tool proposals only after the
 whole stream passes protocol validation. Missing completion, malformed or ambiguous
 JSON, duplicate call IDs, contradictory finish reasons, and exceeded limits return

@@ -9,9 +9,9 @@ use serde_json::{Value, json};
 
 use crate::{
     AgentProfile, CompiledTool, ComponentKind, ContentBlock, ContractError, ErrorCode, Id,
-    InputContent, Instructions, JsonDigest, Message, MessageOrigin, MessageRole, ModelContent,
-    ModelMessage, ModelOutput, ModelPurpose, ModelRequest, ModelResponseLimits, ModelRole,
-    ModelTool, OpaqueContinuation, RecordRef, ResolvedComponent, ResolvedModelRoute,
+    InputContent, Instructions, JsonDigest, JsonObject, Message, MessageOrigin, MessageRole,
+    ModelContent, ModelMessage, ModelOutput, ModelPurpose, ModelRequest, ModelResponseLimits,
+    ModelRole, ModelTool, OpaqueContinuation, RecordRef, ResolvedComponent, ResolvedModelRoute,
     ResolvedProfile, RunRequest, Scope, ToolBindingRef, ToolResultStatus, VersionedRef, Visibility,
     parse_json, serialization::data_digest,
 };
@@ -552,6 +552,9 @@ pub struct ProjectionInput<'a> {
     pub output: ModelOutput,
     /// Provider output-token request, not an estimate of input bytes.
     pub max_output_tokens: NonZeroU64,
+    /// Host-owned logical options preserved in the final ModelRequest, outside prompt content.
+    /// The selected catalog schemas and adapter define supported keys and wire mapping.
+    pub options: JsonObject,
     /// Provider request/response decoding bounds.
     pub response_limits: ModelResponseLimits,
     /// Byte/item projection bounds, not a tokenizer or model context-window check.
@@ -720,6 +723,7 @@ impl ContextAssembler {
                     .collect(),
                 output: input.output.clone(),
                 max_output_tokens: input.max_output_tokens,
+                options: input.options.clone(),
                 limits: input.response_limits.clone(),
             }
         };
