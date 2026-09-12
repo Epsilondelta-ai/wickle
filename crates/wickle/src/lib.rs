@@ -26,6 +26,7 @@ mod resolution;
 mod run;
 mod serialization;
 mod state;
+mod tool_schema;
 mod views;
 
 pub use budget::{AttemptReservation, ReservationKind, RunBudget, RunTiming};
@@ -43,6 +44,10 @@ pub use policy::{
 pub use state::{
     AdmissionInput, AdmissionResult, CommitInput, EventPage, MAX_EVENT_PAGE_SIZE, MemoryStateStore,
     ProtectedRecord, RunLease, StateStore, StateStoreCapabilities, StoredRun,
+};
+pub use tool_schema::{
+    CompiledTool, SchemaCompiler, SystemInputDefinition, SystemInputRegistry, SystemInputSource,
+    TOOL_SCHEMA_COMPILER_VERSION, ToolConcurrency, ToolDescriptor, ToolRetryPolicy, ToolSideEffect,
 };
 pub use views::{ArtifactView, EventView, RunView};
 

@@ -80,6 +80,9 @@ the saved digest consistency. Use `ensure_matches` to reject a different profile
 or scope and `ensure_same_resolution` to reject changed component metadata.
 These checks do not replace authentication or the authoritative store.
 
+Tool schemas and system input definitions are described in
+[Compile tool input schemas](tool-inputs.md).
+
 ## Model calls and response assembly
 
 `ModelPort` is a `Send + Sync` trait whose `generate` method returns a boxed stream

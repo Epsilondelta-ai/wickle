@@ -27,6 +27,14 @@ pub enum ErrorCode {
     InvalidJson,
     /// Input does not match a data contract.
     InvalidContract,
+    /// Tool exposure, binding metadata, or a registered input schema is inconsistent.
+    InvalidToolInputContract,
+    /// The compiler cannot safely project this input schema or reference form.
+    UnsupportedInputProjection,
+    /// Model-owned or assembled tool arguments do not satisfy their input contract.
+    InvalidArguments,
+    /// A supplied system value does not satisfy its registered input contract.
+    SystemInputInvalid,
     /// The document format is not supported.
     UnsupportedSchemaVersion,
     /// A reference or binding is missing or inconsistent.
