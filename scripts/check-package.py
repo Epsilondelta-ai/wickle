@@ -36,6 +36,7 @@ def main():
 
     workspace = metadata(ROOT)
     core = next(p for p in workspace["packages"] if p["name"] == "wickle")
+    versions = {d["name"]: d["req"] for d in core["dependencies"] if d["kind"] is None}
     for dep in core["dependencies"]:
         if dep["kind"] != "dev":
             if dep["name"] not in CORE_DEPENDENCIES or dep.get("path"):
@@ -61,7 +62,9 @@ def main():
         (consumer / "Cargo.toml").write_text(
             '[package]\nname = "wickle-package-consumer"\nversion = "0.0.0"\n'
             'edition = "2024"\npublish = false\n\n[workspace]\n\n'
-            f'[dependencies]\nwickle = {{ path = "../{package_name}" }}\n',
+            f'[dependencies]\nwickle = {{ path = "../{package_name}" }}\n'
+            f'serde_json = "{versions["serde_json"]}"\n'
+            f'tokio = {{ version = "{versions["tokio"]}", features = ["rt", "macros"] }}\n',
             encoding="utf-8",
         )
         shutil.copyfile(ROOT / "tests/support/consumer.rs", consumer / "src/main.rs")
@@ -77,7 +80,7 @@ def main():
                     raise RuntimeError(f"Consumer depends on an external path: {manifest}")
         subprocess.run(["cargo", "run", "--locked", "--offline"],
                        cwd=consumer, env=env, check=True)
-    print("Independent package consumer: passed (crate import only)", flush=True)
+    print("Independent package consumer: passed (profile validation and restore)", flush=True)
 
 
 if __name__ == "__main__":
