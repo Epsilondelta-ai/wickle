@@ -20,11 +20,16 @@ mod profile;
 mod resolution;
 mod run;
 mod serialization;
+mod state;
 mod views;
 
 pub use policy::{
     ApprovalChallenge, Guarded, PolicyAction, PolicyContext, PolicyDecision, PolicyGate,
     PolicyPort, PolicyRequest, ToolPolicyInput,
+};
+pub use state::{
+    AdmissionInput, AdmissionResult, CommitInput, EventPage, MAX_EVENT_PAGE_SIZE, MemoryStateStore,
+    ProtectedRecord, RunLease, StateStore, StateStoreCapabilities, StoredRun,
 };
 pub use views::{ArtifactView, EventView, RunView};
 
