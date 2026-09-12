@@ -363,14 +363,53 @@ async fn an_event_cannot_announce_a_wait_absent_from_the_committed_snapshot() {
 
 #[tokio::test]
 async fn uncertain_tool_effects_keep_the_original_attempt_and_idempotency_key() {
-    let store = MemoryStateStore::new();
-    store
-        .admit(
-            &scope(),
-            admission("run", "request", "session", "input", "1").await,
-        )
+    struct StationaryClock;
+    impl Clock for StationaryClock {
+        fn now(&self) -> Result<ClockReading, ContractError> {
+            Ok(ClockReading {
+                utc_ms: 102,
+                monotonic_ms: 0,
+            })
+        }
+        fn sleep_until<'a>(&'a self, _: u64) -> PortFuture<'a, ()> {
+            Box::pin(std::future::pending())
+        }
+    }
+    struct AllowPolicy;
+    impl PolicyPort for AllowPolicy {
+        fn authorize<'a>(
+            &'a self,
+            _: &'a PolicyRequest,
+            _: PolicyContext<'a>,
+        ) -> PortFuture<'a, PolicyDecision> {
+            Box::pin(async { Ok(PolicyDecision::Allow {}) })
+        }
+    }
+    let store = Arc::new(MemoryStateStore::new());
+    let registry = Arc::new(SystemInputRegistry::default());
+    let compiled = SchemaCompiler::new().compile(ToolDescriptor {
+        tool: VersionedRef { id: id("tool"), version: id("1") }, name: id("tool"), description: "Write a record".into(),
+        input_schema: json!({"type":"object","properties":{},"required":[],"additionalProperties":false}), agent_parameters: vec![], system_bindings: None,
+        output_schema: json!(true), side_effect: ToolSideEffect::Write, concurrency: ToolConcurrency::Serial, retry: ToolRetryPolicy::Never, reconcile: true, max_output_bytes: 1024.try_into().unwrap(),
+    }, &registry).unwrap();
+    let mut input = admission("run", "request", "session", "input", "1").await;
+    let mut profile = input.snapshot.profile.profile().clone();
+    profile.tools.push(ToolBindingRef::Catalog(CatalogToolRef {
+        tool_id: id("tool"),
+        version: id("1"),
+        bindings: None,
+        config: None,
+    }));
+    input.snapshot.profile = ProfileValidator::new(&Catalog { revision: "1" })
+        .validate(&profile, &scope())
         .await
         .unwrap();
+    input.snapshot.request_digest =
+        admission_digest(&input.snapshot.request, &input.snapshot.profile, None);
+    if let RunEventPayload::RunStarted { profile_digest, .. } = &mut input.events[0].payload {
+        *profile_digest = input.snapshot.profile.profile_digest().clone();
+    }
+    store.admit(&scope(), input).await.unwrap();
     let before = store.load(&scope(), &id("run")).await.unwrap();
     let lease = store
         .acquire_lease(&scope(), &id("run"), &id("owner"), 100, 100)
@@ -383,7 +422,7 @@ async fn uncertain_tool_effects_keep_the_original_attempt_and_idempotency_key() 
         provider_call_id: id("provider-call"),
         tool_name: id("tool"),
         model_inputs: Default::default(),
-        descriptor_digest: canonical_digest(&json!("descriptor")),
+        descriptor_digest: compiled.descriptor_digest().clone(),
         bound_input_ref: None,
     };
     let call_record =
@@ -404,16 +443,53 @@ async fn uncertain_tool_effects_keep_the_original_attempt_and_idempotency_key() 
         },
     ));
     plan.records.push(call_record);
-    let planned = store.commit(&scope(), &id("run"), plan).await.unwrap();
-    let bound = ProtectedRecord::new(id("bound-input"), 1, json!({"target":"record"}));
+    store.commit(&scope(), &id("run"), plan).await.unwrap();
+    let context = ExecutionContext::new(
+        ExecutionContextData {
+            scope: scope(),
+            principal_ref: id("caller"),
+            capability_grant_ref: id("grant"),
+            trace_context: None,
+            system_inputs: None,
+        },
+        Default::default(),
+    );
+    let budget = RunBudget::attach(
+        store.clone(),
+        Arc::new(StationaryClock),
+        Arc::new(RandomIdSource),
+        scope(),
+        id("run"),
+        lease.clone(),
+        context.cancellation.clone(),
+    )
+    .await
+    .unwrap();
+    let binder = InputBinder::new(
+        registry,
+        None,
+        Arc::new(
+            PolicyGate::new(Arc::new(AllowPolicy), std::time::Duration::from_secs(1)).unwrap(),
+        ),
+        Arc::new(RandomIdSource),
+    );
+    binder
+        .bind(&compiled, &id("call"), &context, &budget)
+        .await
+        .unwrap();
+    let reservation = budget
+        .reserve(ReservationKind::Tool {
+            call_id: id("call"),
+        })
+        .await
+        .unwrap();
+    let planned = store.load(&scope(), &id("run")).await.unwrap();
     let mut dispatch = prepared(&planned.snapshot, lease.clone(), 102);
     dispatch.snapshot.phase = RunPhase::Tool;
-    dispatch.snapshot.tool_ledger[0].call.bound_input_ref = Some(bound.reference().clone());
     dispatch.snapshot.tool_ledger[0].state = ToolCallState::Dispatching {
-        attempt_id: id("attempt-a"),
+        attempt_id: reservation.attempt_id.clone(),
         idempotency_key: id("effect-key"),
     };
-    dispatch.records.push(bound);
     let dispatched = store.commit(&scope(), &id("run"), dispatch).await.unwrap();
     let mut lost = prepared(&dispatched.snapshot, lease.clone(), 103);
     lost.snapshot.phase = RunPhase::Tool;
@@ -432,12 +508,12 @@ async fn uncertain_tool_effects_keep_the_original_attempt_and_idempotency_key() 
     let mut lost = prepared(&dispatched.snapshot, lease, 103);
     lost.snapshot.phase = RunPhase::Tool;
     lost.snapshot.tool_ledger[0].state = ToolCallState::Unknown {
-        attempt_id: id("attempt-a"),
+        attempt_id: reservation.attempt_id.clone(),
         idempotency_key: id("effect-key"),
     };
     let saved = store.commit(&scope(), &id("run"), lost).await.unwrap();
     assert!(
-        matches!(&saved.snapshot.tool_ledger[0].state, ToolCallState::Unknown { attempt_id, idempotency_key } if attempt_id == &id("attempt-a") && idempotency_key == &id("effect-key"))
+        matches!(&saved.snapshot.tool_ledger[0].state, ToolCallState::Unknown { attempt_id, idempotency_key } if attempt_id == &reservation.attempt_id && idempotency_key == &id("effect-key"))
     );
 }
 

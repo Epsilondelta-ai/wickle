@@ -72,6 +72,9 @@ multiple fields are rejected instead of being silently removed. When every field
 is model-owned, supported original root conditions remain in the projection.
 Conditions entirely inside a selected object parameter remain model-owned.
 
+Actual value capture, lookup, and persistence are described in
+[Bind system tool inputs](input-binding.md).
+
 ## Preserve a compiled definition
 
 `CompiledTool` owns its validated descriptor, selected system definitions, and

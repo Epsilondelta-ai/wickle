@@ -35,6 +35,16 @@ pub enum ErrorCode {
     InvalidArguments,
     /// A supplied system value does not satisfy its registered input contract.
     SystemInputInvalid,
+    /// A required registered system value is absent; the model must not invent it.
+    SystemInputMissing,
+    /// A read-only system-value resolver is unavailable or failed safely.
+    SystemInputUnavailable,
+    /// Supplied/resumed values or pinned input metadata differ from the saved snapshot.
+    SystemInputsMismatch,
+    /// Lookup permission requires separate Host approval before a target is known.
+    SystemInputApprovalRequired,
+    /// Resolver-count or serialized input-size bounds were exceeded.
+    InputBindingLimitExceeded,
     /// Context identity, provenance structure, or call/result protocol is invalid.
     InvalidContext,
     /// Context scope, pinned assets, or protected-record identity does not match.

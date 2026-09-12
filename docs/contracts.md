@@ -81,7 +81,8 @@ or scope and `ensure_same_resolution` to reject changed component metadata.
 These checks do not replace authentication or the authoritative store.
 
 Tool schemas and system input definitions are described in
-[Compile tool input schemas](tool-inputs.md).
+[Compile tool input schemas](tool-inputs.md) and
+[Bind system tool inputs](input-binding.md).
 
 ## Model calls and response assembly
 

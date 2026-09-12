@@ -17,6 +17,7 @@ mod clock;
 mod context;
 mod context_projection;
 mod error;
+mod input_binding;
 mod message;
 mod model;
 mod model_execution;
@@ -36,6 +37,11 @@ pub use context_projection::{
     CONTEXT_ASSEMBLER_VERSION, ContextAssembler, ContextItem, ContextLifetime, ContextOrigin,
     ContextPriority, ContextProjection, InstructionAssetContent, PinnedPromptTool, ProjectionInput,
     ProjectionLimits, PromptSnapshot, PromptToolBinding, ScopedOpaque, SkillManifest,
+};
+pub use input_binding::{
+    BoundSystemInput, BoundToolInput, InputBinder, InputBindingLimits, ResolvedSystemInput,
+    RunSystemInputs, SystemInputResolveContext, SystemInputResolveRequest, SystemInputResolver,
+    ToolBindingResult,
 };
 pub use model_protocol::{
     ModelCallContext, ModelContent, ModelEvent, ModelFinish, ModelMessage, ModelOutput, ModelPort,

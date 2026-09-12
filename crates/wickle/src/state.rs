@@ -799,9 +799,18 @@ fn validate_snapshot_refs(
     snapshot: &RunSnapshot,
 ) -> Result<(), ContractError> {
     let mut references = Vec::new();
-    if let Some(inputs) = &snapshot.system_inputs {
-        references.push(&inputs.snapshot_ref);
-    }
+    let run_inputs = snapshot
+        .system_inputs
+        .as_ref()
+        .map(|inputs| {
+            crate::RunSystemInputs::from_value(
+                record_value(state, additions, &inputs.snapshot_ref)?,
+                inputs,
+                &snapshot.scope,
+            )
+            .map_err(|_| error(ErrorCode::InvalidSnapshot, "system_inputs"))
+        })
+        .transpose()?;
     for invocation in &snapshot.model_ledger {
         if let Some(reference) = &invocation.response_ref {
             validate_model_response(state, additions, invocation, reference)?;
@@ -810,12 +819,17 @@ fn validate_snapshot_refs(
     references.extend(snapshot.assembly_ref.iter());
     references.extend(&snapshot.context_batches);
     references.extend(snapshot.source_states.iter().map(|s| &s.batch_ref));
-    references.extend(
-        snapshot
-            .tool_ledger
-            .iter()
-            .filter_map(|entry| entry.call.bound_input_ref.as_ref()),
-    );
+    for entry in &snapshot.tool_ledger {
+        if let Some(reference) = &entry.call.bound_input_ref {
+            crate::input_binding::validate_bound_record(
+                record_value(state, additions, reference)?,
+                snapshot,
+                &entry.call,
+                run_inputs.as_ref(),
+            )
+            .map_err(|_| error(ErrorCode::InvalidSnapshot, "bound_input"))?;
+        }
+    }
     for entry in &snapshot.tool_ledger {
         if let ToolCallState::Settled { result } = &entry.state {
             references.extend(tool_result_refs(result));

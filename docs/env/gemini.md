@@ -2,7 +2,7 @@
 
 [환경변수 안내](README.md) · [전체 예제](../../.env.example)
 
-Google AI Studio에서 발급한 Gemini API 키와 해당 키로 사용할 모델을 준비합니다. 아래는 Host와 모델별 검사를 위한 설정 규약이며, Wickle의 Gemini 어댑터와 실제 연결 검사 runner는 아직 완성되지 않았습니다.
+Google AI Studio에서 발급한 Gemini API 키와 해당 키로 사용할 모델을 준비합니다. 아래는 모델별 실제 연결 테스트 전용 설정 규약이며, Wickle의 Gemini 어댑터와 실제 연결 검사 runner는 아직 완성되지 않았습니다.
 
 ```dotenv
 GEMINI_API_KEY=
@@ -14,7 +14,7 @@ GEMINI_MODEL_1_VERSION=
 ```
 
 1. [Google AI Studio API Keys](https://aistudio.google.com/apikey)에서 사용할 프로젝트를 선택하고 키를 생성합니다. 기존 프로젝트가 보이지 않으면 **Dashboard → Projects → Import projects**에서 가져옵니다. 키는 해당 Google Cloud 프로젝트의 사용량·결제 설정과 연결됩니다. [프로젝트와 키 준비](https://ai.google.dev/gemini-api/docs/api-key).
-2. 새로 생성한 **auth key**를 `GEMINI_API_KEY`에 넣습니다. 공식 문서는 기존 Standard key의 전환을 안내하므로, 오래된 키를 재사용한다면 Key Type과 현재 제한 조건도 확인합니다. Google SDK는 `GOOGLE_API_KEY`가 함께 설정되면 이를 우선할 수 있어, Host는 선택한 `GEMINI_API_KEY`를 명시적으로 전달해야 합니다. [키 유형·환경변수 우선순위](https://ai.google.dev/gemini-api/docs/api-key).
+2. 새로 생성한 **auth key**를 `GEMINI_API_KEY`에 넣습니다. 공식 문서는 기존 Standard key의 전환을 안내하므로, 오래된 키를 재사용한다면 Key Type과 현재 제한 조건도 확인합니다. Google SDK는 `GOOGLE_API_KEY`가 함께 설정되면 이를 우선할 수 있어, 테스트 실행기는 선택한 `GEMINI_API_KEY`를 SDK 클라이언트에 명시적으로 전달해야 합니다. [키 유형·환경변수 우선순위](https://ai.google.dev/gemini-api/docs/api-key).
 3. AI Studio의 모델 선택 화면과 [Models API](https://ai.google.dev/api/models)에서 사용할 모델의 ID·버전·지원 작업을 확인합니다. `name`이 `models/…` 형식이면 `models/` 뒤의 정확한 모델 식별자를 `GEMINI_MODEL_1_ID`에 넣습니다. `supportedGenerationMethods`에 필요한 생성 방식이 있는지도 확인합니다.
 4. 공급자가 공개한 버전 정보를 `GEMINI_MODEL_1_VERSION`에 기록합니다. Models API의 `version` 값은 공급자 버전 metadata이며, 이 값만으로 ID가 고정 snapshot이라는 의미가 되지는 않습니다. 선택한 ID의 release·alias 의미를 함께 확인합니다. [모델 metadata](https://ai.google.dev/api/models#Model).
 
