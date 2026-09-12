@@ -729,6 +729,7 @@ async fn snapshot() -> RunSnapshot {
             unresolved_effects: vec![],
         }),
         assembly_ref: Some(record("protected-assembly")),
+        routing_snapshot_ref: None,
         context_batches: vec![record("protected-context-batch")],
         source_states: vec![],
         revision: 3,

@@ -1,7 +1,13 @@
-//! Immutable, scope-bound model catalog for Wickle applications.
+//! Immutable, scope-bound model catalogs and static routing for Wickle applications.
 //!
 //! Catalog lookups do not invoke models, load environment variables, or select a
-//! fallback. Metadata contracts live in `wickle`; this crate depends on the core.
+//! fallback. Routers select only configured targets; they do not dispatch calls.
+//! Metadata contracts live in `wickle`; this crate depends on the core.
+
+mod dispatcher;
+mod routing;
+pub use dispatcher::{ModelDispatcherEntry, RegistryModelDispatcher};
+pub use routing::{FixedModelRouter, PolicyModelRouter};
 
 use serde::{Serialize, Serializer};
 use wickle::{

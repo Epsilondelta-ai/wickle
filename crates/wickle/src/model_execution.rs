@@ -2,6 +2,11 @@ use std::{panic::AssertUnwindSafe, sync::Arc};
 
 use futures_util::FutureExt;
 
+mod routed;
+pub use routed::{
+    ModelProjectionContext, ModelRequestProjector, ProjectedModelRequest, RoutedModelInput,
+};
+
 use crate::{
     CommitInput, ContractError, ErrorCode, ExecutionContext, Guarded, Id, ModelAttemptState,
     ModelCallContext, ModelFailureKind, ModelInvocationRecord, ModelPort, ModelProtocolError,
@@ -54,19 +59,55 @@ pub struct StoredModelResponse {
 /// budget and invocation ledger; an adapter still performs exactly one request.
 /// This does not run tools, choose fallback routes, or advance an agent loop.
 pub struct ModelExchange {
-    model: Arc<dyn ModelPort>,
+    models: Models,
     policy: Arc<PolicyGate>,
     retry: ModelRetryPolicy,
+    inspector: Option<(Arc<dyn crate::ModelRouteInspector>, std::time::Duration)>,
+}
+
+enum Models {
+    Single(Arc<dyn ModelPort>),
+    Dispatcher(Arc<dyn crate::ModelDispatcher>),
 }
 
 impl ModelExchange {
     /// Bind one adapter and current policy gate, with physical retries disabled.
     pub fn new(model: Arc<dyn ModelPort>, policy: Arc<PolicyGate>) -> Self {
         Self {
-            model,
+            models: Models::Single(model),
             policy,
             retry: ModelRetryPolicy::default(),
+            inspector: None,
         }
+    }
+
+    /// Use an exact scoped adapter registry without inventing a shared credential binding.
+    pub fn with_dispatcher(
+        dispatcher: Arc<dyn crate::ModelDispatcher>,
+        policy: Arc<PolicyGate>,
+    ) -> Self {
+        Self {
+            models: Models::Dispatcher(dispatcher),
+            policy,
+            retry: ModelRetryPolicy::default(),
+            inspector: None,
+        }
+    }
+
+    /// Require bounded current metadata inspection for routed calls and their retries.
+    pub fn with_route_inspector(
+        mut self,
+        inspector: Arc<dyn crate::ModelRouteInspector>,
+        timeout: std::time::Duration,
+    ) -> Result<Self, ContractError> {
+        if timeout.is_zero() {
+            return Err(ContractError::new(
+                ErrorCode::InvalidConfiguration,
+                "model.inspection_timeout",
+            ));
+        }
+        self.inspector = Some((inspector, timeout));
+        Ok(self)
     }
 
     /// Configure finite same-route recovery. Run model/recovery limits still apply.
@@ -88,14 +129,45 @@ impl ModelExchange {
         context: &ExecutionContext,
         budget: &RunBudget,
     ) -> Result<Guarded<ModelExchangeOutcome>, ContractError> {
+        if budget
+            .store()
+            .load(budget.scope(), budget.run_id())
+            .await?
+            .snapshot
+            .routing_snapshot_ref
+            .is_some()
+        {
+            return Err(ContractError::new(
+                ErrorCode::ModelRoutingMismatch,
+                "model.routing_required",
+            ));
+        }
+        self.generate_inner(request, context, budget, None).await
+    }
+
+    async fn generate_inner(
+        &self,
+        request: &ModelRequest,
+        context: &ExecutionContext,
+        budget: &RunBudget,
+        routed: Option<(&crate::RouteSelection, crate::VersionPolicy)>,
+    ) -> Result<Guarded<ModelExchangeOutcome>, ContractError> {
         for retry_number in 0..=self.retry.max_retries {
-            self.validate(request, context, budget)?;
+            let model = self.resolve_model(request, context, budget)?;
             budget.check_boundary().await?;
             if let Guarded::ApprovalRequired(challenge) =
                 self.authorize(request, context, budget).await?
             {
                 return Ok(Guarded::ApprovalRequired(challenge));
             }
+            let observation = if let Some((_, version_policy)) = routed {
+                Some(
+                    self.inspect_route(request, version_policy, context, budget)
+                        .await?,
+                )
+            } else {
+                None
+            };
             let reservation = budget
                 .reserve(ReservationKind::Model {
                     purpose: request.purpose,
@@ -103,29 +175,44 @@ impl ModelExchange {
                 .await?;
             let mut physical_request = request.clone();
             physical_request.request_id = reservation.attempt_id.clone();
+            let inspection_record = observation
+                .map(|observation| {
+                    Ok::<_, ContractError>(ProtectedRecord::new(
+                        Id::new(format!("model-inspection-{}", reservation.attempt_id))?,
+                        1,
+                        serde_json::to_value(observation).map_err(|_| revision_error())?,
+                    ))
+                })
+                .transpose()?;
             let invocation = ModelInvocationRecord {
                 run_id: budget.run_id().clone(),
                 model_step_id: request.request_id.clone(),
                 attempt_id: reservation.attempt_id.clone(),
                 purpose: request.purpose,
                 route: request.route.clone(),
-                selection_reason: Id::new(if retry_number == 0 {
-                    "requested_route"
-                } else {
+                selection_reason: Id::new(if retry_number != 0 {
                     "same_route_retry"
+                } else if let Some((selection, _)) = routed {
+                    routed::reason_code(selection.reason)
+                } else {
+                    "requested_route"
                 })?,
                 request_digest: physical_request.digest(),
                 state: ModelAttemptState::Reserved {},
+                inspection_ref: inspection_record
+                    .as_ref()
+                    .map(|record| record.reference().clone()),
                 response_ref: None,
                 provider_request_id: None,
                 reported_model_id: None,
                 reported_model_version: None,
                 usage: None,
             };
-            self.record_start(budget, invocation).await?;
+            self.record_start(budget, invocation, inspection_record)
+                .await?;
             // Neither a saved reservation nor earlier authorization grants lasting
             // permission. Check the physical request and current policy again.
-            self.validate(&physical_request, context, budget)?;
+            self.validate(&physical_request, context, budget, model.as_ref())?;
             if let Guarded::ApprovalRequired(challenge) =
                 self.authorize(&physical_request, context, budget).await?
             {
@@ -149,7 +236,7 @@ impl ModelExchange {
             let attempt = AssertUnwindSafe(async {
                 collect_model_response(
                     &physical_request,
-                    self.model.generate(&physical_request, &call_context),
+                    model.generate(&physical_request, &call_context),
                 )
                 .await
             })
@@ -244,18 +331,37 @@ impl ModelExchange {
         request: &ModelRequest,
         context: &ExecutionContext,
         budget: &RunBudget,
+        model: &dyn ModelPort,
     ) -> Result<(), ContractError> {
         if &context.data.scope != budget.scope() {
             return Err(ContractError::new(ErrorCode::AccessDenied, "scope"));
         }
         request.validate()?;
-        if !self.model.binding().matches_route(&request.route) {
+        if !model.binding().matches_route(&request.route) {
             return Err(ContractError::new(
                 ErrorCode::InvalidReference,
                 "model.binding",
             ));
         }
         Ok(())
+    }
+
+    fn resolve_model(
+        &self,
+        request: &ModelRequest,
+        context: &ExecutionContext,
+        budget: &RunBudget,
+    ) -> Result<Arc<dyn ModelPort>, ContractError> {
+        if &context.data.scope != budget.scope() {
+            return Err(ContractError::new(ErrorCode::AccessDenied, "scope"));
+        }
+        let model = std::panic::catch_unwind(AssertUnwindSafe(|| match &self.models {
+            Models::Single(model) => Ok(model.clone()),
+            Models::Dispatcher(dispatcher) => dispatcher.resolve(budget.scope(), &request.route),
+        }))
+        .map_err(|_| ContractError::new(ErrorCode::ComponentUnavailable, "model.dispatcher"))??;
+        self.validate(request, context, budget, model.as_ref())?;
+        Ok(model)
     }
 
     async fn authorize(
@@ -268,7 +374,7 @@ impl ModelExchange {
             owner_scope: budget.scope().clone(),
             resource_id: budget.run_id().clone(),
             action: PolicyAction::InvokeModel {
-                route_digest: request.route.digest(),
+                route: Box::new(request.route.clone()),
                 purpose: request.purpose,
             },
         };
@@ -286,6 +392,7 @@ impl ModelExchange {
         &self,
         budget: &RunBudget,
         invocation: ModelInvocationRecord,
+        inspection: Option<ProtectedRecord>,
     ) -> Result<(), ContractError> {
         let saved = budget.store().load(budget.scope(), budget.run_id()).await?;
         let mut snapshot = saved.snapshot;
@@ -325,6 +432,8 @@ impl ModelExchange {
             },
         };
         snapshot.model_ledger.push(invocation);
+        let mut records = vec![record];
+        records.extend(inspection);
         budget
             .store()
             .commit(
@@ -337,7 +446,7 @@ impl ModelExchange {
                     snapshot,
                     messages: vec![],
                     events: vec![event],
-                    records: vec![record],
+                    records,
                 },
             )
             .await?;

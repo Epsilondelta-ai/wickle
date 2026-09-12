@@ -629,6 +629,13 @@ pub struct RunSnapshot {
         skip_serializing_if = "Option::is_none"
     )]
     pub assembly_ref: Option<RecordRef>,
+    /// Immutable catalog and routing policy used by this run's model calls.
+    #[serde(
+        default,
+        deserialize_with = "optional",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub routing_snapshot_ref: Option<RecordRef>,
     /// Committed context batches.
     pub context_batches: Vec<RecordRef>,
     /// Saved collection positions.

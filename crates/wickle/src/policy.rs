@@ -106,8 +106,8 @@ pub enum PolicyAction {
     },
     /// Send input to a selected model route.
     InvokeModel {
-        /// Immutable selected route identity.
-        route_digest: JsonDigest,
+        /// Exact provider, target, model and connection metadata for current authorization.
+        route: Box<crate::ResolvedModelRoute>,
         /// Purpose being authorized.
         purpose: ModelPurpose,
     },

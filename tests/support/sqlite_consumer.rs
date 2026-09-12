@@ -152,6 +152,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         wait: None,
         outcome: None,
         assembly_ref: None,
+        routing_snapshot_ref: None,
         context_batches: vec![],
         source_states: vec![],
         revision: 0,

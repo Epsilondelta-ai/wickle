@@ -956,9 +956,11 @@ dependencies = [
 name = "wickle-model-router"
 version = "0.1.0"
 dependencies = [
+ "futures-util",
  "serde",
  "serde_json",
  "tokio",
+ "tokio-util",
  "wickle",
 ]
 

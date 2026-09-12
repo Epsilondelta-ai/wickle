@@ -519,6 +519,7 @@ fn validate_history(
                     || old.route != current.route
                     || old.selection_reason != current.selection_reason
                     || old.request_digest != current.request_digest
+                    || old.inspection_ref != current.inspection_ref
                     || old.route.digest() != *route_digest
                     || (matches!(
                         old.state,

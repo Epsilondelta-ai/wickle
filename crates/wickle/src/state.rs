@@ -804,6 +804,50 @@ fn validate_snapshot_refs(
     snapshot: &RunSnapshot,
 ) -> Result<(), ContractError> {
     let mut references = Vec::new();
+    if let Some(reference) = &snapshot.routing_snapshot_ref {
+        let value = record_value(state, additions, reference)?;
+        let routing = crate::RoutingSnapshot::restore(
+            &serde_json::to_string(value)
+                .map_err(|_| error(ErrorCode::InvalidSnapshot, "routing"))?,
+            &snapshot.scope,
+            &reference.digest,
+        )?;
+        for invocation in &snapshot.model_ledger {
+            routing.validate_route(&invocation.route)?;
+            if invocation.inspection_ref.is_none()
+                || !routing.policy().rules.iter().any(|rule| {
+                    rule.model_binding == snapshot.profile.profile().model_binding
+                        && rule.purpose == invocation.purpose
+                        && (rule.primary == invocation.route.binding
+                            || rule.fallbacks.contains(&invocation.route.binding))
+                })
+            {
+                return Err(error(ErrorCode::InvalidSnapshot, "routing.invocation"));
+            }
+            let reference = invocation
+                .inspection_ref
+                .as_ref()
+                .ok_or_else(|| error(ErrorCode::InvalidSnapshot, "routing.inspection"))?;
+            let observation: crate::ModelRouteObservation =
+                serde_json::from_value(record_value(state, additions, reference)?.clone())
+                    .map_err(|_| error(ErrorCode::InvalidSnapshot, "routing.inspection"))?;
+            let require_pinned = invocation.route.version_semantics
+                == crate::VersionSemantics::Pinned
+                || routing.policy().rules.iter().any(|rule| {
+                    rule.model_binding == snapshot.profile.profile().model_binding
+                        && rule.purpose == invocation.purpose
+                        && rule.version_policy == crate::VersionPolicy::RequirePinned
+                });
+            observation.validate(
+                &invocation.route,
+                if require_pinned {
+                    crate::VersionPolicy::RequirePinned
+                } else {
+                    crate::VersionPolicy::AllowMutable
+                },
+            )?;
+        }
+    }
     let run_inputs = snapshot
         .system_inputs
         .as_ref()
@@ -817,6 +861,16 @@ fn validate_snapshot_refs(
         })
         .transpose()?;
     for invocation in &snapshot.model_ledger {
+        if let Some(reference) = invocation
+            .inspection_ref
+            .as_ref()
+            .filter(|_| snapshot.routing_snapshot_ref.is_none())
+        {
+            let observation: crate::ModelRouteObservation =
+                serde_json::from_value(record_value(state, additions, reference)?.clone())
+                    .map_err(|_| error(ErrorCode::InvalidSnapshot, "model.inspection"))?;
+            observation.validate(&invocation.route, crate::VersionPolicy::AllowMutable)?;
+        }
         if let Some(reference) = &invocation.response_ref {
             validate_model_response(state, additions, invocation, reference)?;
         }
@@ -1156,6 +1210,11 @@ fn validate_transition(previous: &RunSnapshot, next: &RunSnapshot) -> Result<(),
                 .checked_add(1)
                 .ok_or_else(|| error(ErrorCode::RevisionConflict, "revision"))?
         || (previous.assembly_ref.is_some() && previous.assembly_ref != next.assembly_ref)
+        || (previous.routing_snapshot_ref.is_some()
+            && previous.routing_snapshot_ref != next.routing_snapshot_ref)
+        || (previous.routing_snapshot_ref.is_none()
+            && next.routing_snapshot_ref.is_some()
+            && previous.usage.model_calls != 0)
     {
         return Err(error(
             ErrorCode::InvalidTransition,
@@ -1221,6 +1280,7 @@ fn validate_transition(previous: &RunSnapshot, next: &RunSnapshot) -> Result<(),
                     || old.route != new.route
                     || old.selection_reason != new.selection_reason
                     || old.request_digest != new.request_digest
+                    || old.inspection_ref != new.inspection_ref
                     || (matches!(
                         old.state,
                         ModelAttemptState::Completed {} | ModelAttemptState::Failed { .. }

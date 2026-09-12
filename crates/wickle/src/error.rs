@@ -37,10 +37,24 @@ pub enum ErrorCode {
     ModelOptionUnsupported,
     /// The model or deployment is not verified immutable under the requested policy.
     ModelVersionUnpinned,
+    /// Current observed model or deployment metadata differs from the pinned route.
+    ModelVersionDrift,
+    /// A bounded target inspection failed or could not establish availability.
+    ModelInspectionUnavailable,
+    /// A prior physical attempt has no known result and needs explicit recovery.
+    ModelAttemptUnresolved,
     /// The selected release is retired or otherwise unavailable.
     ModelUnavailable,
     /// Catalog scope-independent revision, identity or serialized integrity differs.
     ModelCatalogMismatch,
+    /// Static routing configuration has duplicate, missing or unsupported constraints.
+    ModelRoutingInvalid,
+    /// Saved routing metadata, request identity or selected route differs.
+    ModelRoutingMismatch,
+    /// Static routing constraints forbid this target or fallback reason.
+    ModelRouteDenied,
+    /// No eligible candidate remains in the finite permitted fallback list.
+    ModelRoutesExhausted,
     /// Required support evidence is absent, failed, or of an insufficient kind.
     ModelSupportInsufficient,
     /// Estimated input plus reserved output exceeds this model/binding context budget.
