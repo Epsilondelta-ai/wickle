@@ -236,6 +236,33 @@ impl ResumeCommand {
     }
 }
 
+/// Durable acceptance of one resume command and the segment it continued.
+/// Values and references are protected run data, not public event payloads.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResumeReceipt {
+    /// Exact command, including the decision or answer used for deduplication.
+    pub command: ResumeCommand,
+    /// Protected immutable copy used by the resumed event.
+    pub command_ref: RecordRef,
+    /// Revision at which this command was accepted and its new segment began.
+    pub accepted_revision: u64,
+    /// Whether the original wait or Run deadline had already elapsed at acceptance.
+    /// An expired approval is not execution authority.
+    #[serde(default)]
+    pub expired: bool,
+    /// Start revision of the preceding segment; zero identifies the initial segment.
+    pub previous_segment_start_revision: u64,
+    /// Original saved Waiting outcome returned by handles for the preceding segment.
+    pub previous_outcome_ref: RecordRef,
+    /// Last durable event in the preceding segment.
+    pub previous_last_event_seq: u64,
+    /// Authenticated actor who authorized this command.
+    pub actor_ref: Id,
+    /// Current Host grant used when accepting the command.
+    pub capability_grant_ref: Id,
+}
+
 /// Public run status categories.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -470,6 +497,16 @@ pub enum ToolCallState {
         /// Frozen effect key reused if execution is later authorized.
         idempotency_key: Id,
     },
+    /// A no-effect input request is awaiting an answer instead of reentering its executor.
+    InputPending {
+        /// Charged attempt that requested the input.
+        attempt_id: Id,
+        /// Original effect identity, retained while the call is incomplete.
+        idempotency_key: Id,
+        /// Core-generated question tied to this call. Its exact compiled output
+        /// schema validates the answer when schema_ref is absent.
+        request: InputRequest,
+    },
     /// Result was recorded.
     Settled {
         /// Paired tool result.
@@ -604,6 +641,9 @@ pub struct RunSnapshot {
     pub timing: RunTiming,
     /// Append-only charged attempt reservations, preserved across errors and resume.
     pub reservations: Vec<AttemptReservation>,
+    /// Append-only resume acceptances and prior segment outcomes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub resume_receipts: Vec<ResumeReceipt>,
     /// Physical model attempt records.
     pub model_ledger: Vec<ModelInvocationRecord>,
     /// Saved tool plans and states.
@@ -725,6 +765,22 @@ impl RunSnapshot {
                 }
             }
         }
+        let mut commands = BTreeSet::new();
+        let mut segment = 0;
+        for receipt in &self.resume_receipts {
+            if receipt.command.run_id != self.run_id
+                || !commands.insert(&receipt.command.command_id)
+                || receipt.accepted_revision > self.revision
+                || receipt.command.expected_revision.checked_add(1)
+                    != Some(receipt.accepted_revision)
+                || receipt.previous_segment_start_revision != segment
+                || receipt.command.expected_revision < segment
+                || receipt.previous_last_event_seq > self.last_event_seq
+            {
+                return Err(invalid("resume_receipts"));
+            }
+            segment = receipt.accepted_revision;
+        }
         let mut calls = BTreeSet::new();
         for entry in &self.tool_ledger {
             if !calls.insert(&entry.call.call_id) {
@@ -749,19 +805,24 @@ impl RunSnapshot {
                 return Err(invalid("tool_ledger.unregistered"));
             }
             match &entry.state {
-                ToolCallState::Dispatching { attempt_id, .. } | ToolCallState::Unknown { attempt_id, .. } | ToolCallState::ApprovalPending { attempt_id, .. }
+                ToolCallState::Dispatching { attempt_id, .. } | ToolCallState::Unknown { attempt_id, .. } | ToolCallState::ApprovalPending { attempt_id, .. } | ToolCallState::InputPending { attempt_id, .. }
                     if !self.reservations.iter().any(|reservation| &reservation.attempt_id == attempt_id
                         && matches!(&reservation.kind, ReservationKind::Tool { call_id } if call_id == &entry.call.call_id)) =>
                 {
                     return Err(invalid("tool_ledger.reservation"));
                 }
-                ToolCallState::Dispatching { .. } | ToolCallState::Unknown { .. } | ToolCallState::ApprovalPending { .. }
+                ToolCallState::Dispatching { .. } | ToolCallState::Unknown { .. } | ToolCallState::ApprovalPending { .. } | ToolCallState::InputPending { .. }
                     if entry.call.bound_input_ref.is_none() =>
                 {
                     return Err(invalid("tool_ledger.bound_input_ref"));
                 }
                 ToolCallState::Settled { result } if result.call_id != entry.call.call_id => {
                     return Err(invalid("tool_ledger.result.call_id"));
+                }
+                ToolCallState::InputPending { request, .. }
+                    if request.call_id != entry.call.call_id || request.question.trim().is_empty() =>
+                {
+                    return Err(invalid("tool_ledger.input_request"));
                 }
                 _ => {}
             }

@@ -380,6 +380,7 @@ impl StateStore for MemoryStateStore {
                 || !input.snapshot.model_ledger.is_empty()
                 || !input.snapshot.tool_ledger.is_empty()
                 || !input.snapshot.reservations.is_empty()
+                || !input.snapshot.resume_receipts.is_empty()
                 || input.snapshot.usage != BudgetUsage::default()
             {
                 return Err(error(ErrorCode::InvalidSnapshot, "admission"));
@@ -599,6 +600,35 @@ impl StateStore for MemoryStateStore {
                 return Err(error(ErrorCode::RevisionConflict, "revision"));
             }
             validate_transition(&run.snapshot, &input.snapshot)?;
+            if input.events.iter().any(|event| {
+                matches!(event.payload, RunEventPayload::RunResumed { .. })
+                    && event.timestamp_ms > input.now_ms
+            }) {
+                return Err(error(ErrorCode::InvalidEvent, "events.resume_time"));
+            }
+            if let Some(receipt) = input
+                .snapshot
+                .resume_receipts
+                .last()
+                .filter(|receipt| receipt.accepted_revision == input.snapshot.revision)
+            {
+                let expired = input.now_ms >= run.snapshot.timing.deadline_at_ms
+                    || run
+                        .snapshot
+                        .wait
+                        .as_ref()
+                        .and_then(|wait| wait.expires_at_ms)
+                        .is_some_and(|deadline| input.now_ms >= deadline);
+                // A durable adapter may advance the lease-check time after
+                // queue/lock delay. Crossing expiry must not turn a stale
+                // on-time decision into an accepted approval.
+                if receipt.expired != expired {
+                    return Err(error(
+                        ErrorCode::DeadlineExceeded,
+                        "resume.acceptance_expiry",
+                    ));
+                }
+            }
             let additions = validate_records(state, &input.records)?;
             validate_snapshot_refs(state, &additions, &input.snapshot)?;
             validate_events(
@@ -625,6 +655,9 @@ impl StateStore for MemoryStateStore {
                 &input.messages,
             )?;
             let mut session_snapshot = session.snapshot.clone();
+            let history: Vec<_> = run.events.iter().chain(&input.events).collect();
+            let transcript: Vec<_> = session.messages.iter().chain(&input.messages).collect();
+            validate_resume_history(state, &additions, &input.snapshot, &history, &transcript)?;
             session_snapshot.transcript_revision = transcript_revision;
             if input.snapshot.status.is_terminal() {
                 session_snapshot.active_run_id = None;
@@ -840,6 +873,24 @@ fn validate_snapshot_refs(
     snapshot: &RunSnapshot,
 ) -> Result<(), ContractError> {
     let mut references = Vec::new();
+    for receipt in &snapshot.resume_receipts {
+        let command: ResumeCommand = event_record(state, additions, &receipt.command_ref)?;
+        let outcome: crate::RunOutcome =
+            event_record(state, additions, &receipt.previous_outcome_ref)?;
+        let crate::OutcomeResult::Waiting { wait } = &outcome.result else {
+            return Err(error(ErrorCode::InvalidSnapshot, "resume_receipts.outcome"));
+        };
+        outcome.validate()?;
+        if command != receipt.command
+            || outcome.checkpoint_revision != command.expected_revision
+            || !action_matches_wait(wait, &command.action)
+        {
+            return Err(error(ErrorCode::InvalidSnapshot, "resume_receipts.records"));
+        }
+        for reference in &outcome.unresolved_effects {
+            record_value(state, additions, reference)?;
+        }
+    }
     if let Some(reference) = &snapshot.routing_snapshot_ref {
         let value = record_value(state, additions, reference)?;
         let routing = crate::RoutingSnapshot::restore(
@@ -1025,10 +1076,33 @@ fn validate_messages(
             return Err(error(ErrorCode::InvalidMessage, "messages"));
         }
         for content in &message.content {
+            if matches!(content, ContentBlock::ToolResultCorrection { .. }) {
+                let mut history: Vec<_> = state
+                    .sessions
+                    .values()
+                    .flat_map(|session| &session.messages)
+                    .filter(|prior| prior.run_id == *run_id && prior.sequence <= message.sequence)
+                    .cloned()
+                    .collect();
+                for addition in messages
+                    .iter()
+                    .filter(|addition| addition.sequence <= message.sequence)
+                {
+                    if !history
+                        .iter()
+                        .any(|prior| prior.message_id == addition.message_id)
+                    {
+                        history.push(addition.clone());
+                    }
+                }
+                history.sort_by_key(|item| item.sequence);
+                crate::message::tool_corrections(&history)?;
+            }
             let references = match content {
                 ContentBlock::Content { .. } => Vec::new(),
                 ContentBlock::ToolCall { call } => call.bound_input_ref.iter().collect(),
-                ContentBlock::ToolResult { result } => tool_result_refs(result),
+                ContentBlock::ToolResult { result }
+                | ContentBlock::ToolResultCorrection { result, .. } => tool_result_refs(result),
                 ContentBlock::ProviderOpaque { data_ref, .. } => vec![data_ref],
             };
             for reference in references {
@@ -1103,6 +1177,29 @@ fn validate_events(
     let mut seen = BTreeSet::new();
     let mut started = 0;
     let mut finished = 0;
+    let mut resumed = 0;
+    for message in messages {
+        for content in &message.content {
+            if let ContentBlock::ToolResultCorrection { result, .. } = content {
+                let previous = state.runs.get(&snapshot.run_id).ok_or_else(not_found)?;
+                if !matches!(previous.snapshot.wait.as_ref().map(|wait| &wait.target), Some(WaitTarget::External { call_id, .. }) if call_id == &result.call_id)
+                    || !snapshot.resume_receipts.last().is_some_and(|receipt| {
+                        receipt.accepted_revision == snapshot.revision
+                            && matches!(receipt.command.action, ResumeAction::External { .. })
+                    })
+                    || !events.iter().any(|event| match &event.payload {
+                        RunEventPayload::ToolSettled { result_ref } => {
+                            event_record::<ToolResult>(state, additions, result_ref)
+                                .is_ok_and(|saved| saved == *result)
+                        }
+                        _ => false,
+                    })
+                {
+                    return Err(error(ErrorCode::InvalidEvent, "events.tool_correction"));
+                }
+            }
+        }
+    }
     for event in events {
         sequence = sequence
             .checked_add(1)
@@ -1163,6 +1260,13 @@ fn validate_events(
                 }) {
                     return Err(error(ErrorCode::InvalidEvent, "events.tool_settled"));
                 }
+                if state.runs.get(&snapshot.run_id).is_some_and(|previous| previous.snapshot.tool_ledger.iter()
+                    .any(|entry| entry.call.call_id == result.call_id && matches!(entry.state, ToolCallState::Unknown { .. })))
+                    && !messages.iter().flat_map(|message| &message.content)
+                        .any(|content| matches!(content, ContentBlock::ToolResultCorrection { result: corrected, .. } if corrected == &result))
+                {
+                    return Err(error(ErrorCode::InvalidEvent, "events.tool_correction_missing"));
+                }
                 validate_tool_pair(state, snapshot, messages, &result)?;
                 result_ref
             }
@@ -1211,14 +1315,31 @@ fn validate_events(
                 wait_ref
             }
             RunEventPayload::RunResumed { command_ref } => {
+                resumed += 1;
                 let command: ResumeCommand = event_record(state, additions, command_ref)?;
                 let previous = state.runs.get(&snapshot.run_id).ok_or_else(not_found)?;
                 if snapshot.status != RunStatus::Running
                     || command.run_id != snapshot.run_id
                     || command.expected_revision != previous.snapshot.revision
                     || !resume_target_matches(&previous.snapshot, &command.action)
+                    || !snapshot.resume_receipts.last().is_some_and(|receipt| {
+                        receipt.command_ref == *command_ref
+                            && receipt.command == command
+                            && receipt.accepted_revision == snapshot.revision
+                    })
                 {
                     return Err(error(ErrorCode::InvalidEvent, "events.run_resumed"));
+                }
+                let receipt = snapshot
+                    .resume_receipts
+                    .last()
+                    .expect("receipt checked above");
+                let prior: crate::RunOutcome =
+                    event_record(state, additions, &receipt.previous_outcome_ref)?;
+                if previous.snapshot.outcome.as_ref() != Some(&prior)
+                    || event.timestamp_ms != snapshot.timing.last_observed_at_ms
+                {
+                    return Err(error(ErrorCode::InvalidEvent, "events.resume_outcome"));
                 }
                 match &command.action {
                     ResumeAction::External { receipt_ref, .. } => {
@@ -1253,8 +1374,70 @@ fn validate_events(
     if sequence != snapshot.last_event_seq
         || (admission && (started != 1 || events.len() != 1))
         || (snapshot.status.is_terminal() && finished != 1)
+        || (!admission
+            && resumed
+                != snapshot.resume_receipts.len().saturating_sub(
+                    state
+                        .runs
+                        .get(&snapshot.run_id)
+                        .ok_or_else(not_found)?
+                        .snapshot
+                        .resume_receipts
+                        .len(),
+                ))
     {
         return Err(error(ErrorCode::InvalidEvent, "events"));
+    }
+    if !admission {
+        let previous = &state
+            .runs
+            .get(&snapshot.run_id)
+            .ok_or_else(not_found)?
+            .snapshot;
+        for old in &previous.tool_ledger {
+            let Some(new) = snapshot
+                .tool_ledger
+                .iter()
+                .find(|entry| entry.call.call_id == old.call.call_id)
+            else {
+                continue;
+            };
+            if !matches!(old.state, ToolCallState::Unknown { .. })
+                || !matches!(new.state, ToolCallState::Settled { .. })
+            {
+                continue;
+            }
+            if !snapshot.resume_receipts.last().is_some_and(|receipt| {
+                    receipt.accepted_revision == snapshot.revision
+                        && matches!(receipt.command.action, ResumeAction::External { .. })
+                        && matches!(previous.wait.as_ref().map(|wait| &wait.target), Some(WaitTarget::External { call_id, .. }) if call_id == &old.call.call_id)
+                }) || !messages.iter().any(|message| matches!(message.content.as_slice(),
+                    [ContentBlock::ToolResultCorrection { result, .. }] if result.call_id == old.call.call_id))
+            { return Err(error(ErrorCode::InvalidEvent, "events.tool_correction_missing")); }
+        }
+        if snapshot
+            .resume_receipts
+            .last()
+            .is_some_and(|receipt| receipt.accepted_revision == snapshot.revision)
+        {
+            let target = match &previous.wait.as_ref().ok_or_else(not_found)?.target {
+                WaitTarget::Input { request } => Some((&request.call_id, Some(request))),
+                WaitTarget::Approval {
+                    target: ApprovalTarget::Tool { call_id, .. },
+                } => Some((call_id, None)),
+                _ => None,
+            };
+            if let Some((call_id, input)) = target {
+                let old = previous
+                    .tool_ledger
+                    .iter()
+                    .find(|entry| &entry.call.call_id == call_id)
+                    .ok_or_else(|| error(ErrorCode::InvalidSnapshot, "resume.call"))?;
+                if input.is_some_and(|request| !matches!(&old.state, ToolCallState::InputPending { request: pending, .. } if pending == request))
+                    || (input.is_none() && !matches!(old.state, ToolCallState::Planned {} | ToolCallState::ApprovalPending { .. }))
+                { return Err(error(ErrorCode::InvalidTransition, "resume.call_state")); }
+            }
+        }
     }
     Ok(())
 }
@@ -1268,22 +1451,286 @@ fn event_record<T: DeserializeOwned>(
         .map_err(|_| error(ErrorCode::InvalidEvent, "events.record"))
 }
 
+/// Replay the causal facts shared by live commits and durable checkpoint restore.
+/// A receipt does not by itself authorize rewriting a result: its preceding wait,
+/// intervening settlement, and transcript observation must identify the same call.
+fn validate_resume_history(
+    state: &ScopeState,
+    additions: &BTreeMap<RecordKey, ProtectedRecord>,
+    snapshot: &RunSnapshot,
+    events: &[&RunEvent],
+    messages: &[&Message],
+) -> Result<(), ContractError> {
+    let invalid = || error(ErrorCode::InvalidSnapshot, "resume.history");
+    let resumed: Vec<_> = events
+        .iter()
+        .copied()
+        .filter(|event| matches!(event.payload, RunEventPayload::RunResumed { .. }))
+        .collect();
+    if resumed.len() != snapshot.resume_receipts.len() {
+        return Err(invalid());
+    }
+    let mut previous_resume_seq = 0;
+    let mut corrected_calls = BTreeSet::new();
+    let mut authorized_corrections = BTreeSet::new();
+    for (event, receipt) in resumed.into_iter().zip(&snapshot.resume_receipts) {
+        let RunEventPayload::RunResumed { command_ref } = &event.payload else {
+            unreachable!()
+        };
+        if command_ref != &receipt.command_ref
+            || event.seq.get() <= receipt.previous_last_event_seq
+            || receipt.previous_last_event_seq <= previous_resume_seq
+            || event.timestamp_ms > snapshot.timing.last_observed_at_ms
+        {
+            return Err(invalid());
+        }
+        previous_resume_seq = event.seq.get();
+        let prior: crate::RunOutcome =
+            event_record(state, additions, &receipt.previous_outcome_ref)?;
+        let OutcomeResult::Waiting { wait } = &prior.result else {
+            return Err(invalid());
+        };
+        let waiting_event = events
+            .iter()
+            .find(|event| event.seq.get() == receipt.previous_last_event_seq)
+            .ok_or_else(invalid)?;
+        let RunEventPayload::RunWaiting { wait_ref } = &waiting_event.payload else {
+            return Err(invalid());
+        };
+        let saved_wait: WaitState = event_record(state, additions, wait_ref)?;
+        let expired = event.timestamp_ms >= snapshot.timing.deadline_at_ms
+            || wait
+                .expires_at_ms
+                .is_some_and(|deadline| event.timestamp_ms >= deadline);
+        if &saved_wait != wait
+            || receipt.expired != expired
+            || waiting_event.timestamp_ms > event.timestamp_ms
+        {
+            return Err(invalid());
+        }
+        let between: Vec<_> = events
+            .iter()
+            .copied()
+            .filter(|candidate| {
+                candidate.seq.get() > receipt.previous_last_event_seq && candidate.seq < event.seq
+            })
+            .collect();
+        // Approval records permission only; execution belongs to the following
+        // segment. Candidate verification has its separate runtime contract.
+        if matches!(receipt.command.action, ResumeAction::Approve { .. })
+            || matches!(
+                wait.target,
+                WaitTarget::Approval {
+                    target: ApprovalTarget::Candidate { .. }
+                }
+            )
+        {
+            if !between.is_empty() {
+                return Err(invalid());
+            }
+            if let WaitTarget::Approval {
+                target:
+                    ApprovalTarget::Tool {
+                        call_id,
+                        binding_digest,
+                    },
+            } = &wait.target
+            {
+                validate_resume_binding(state, additions, snapshot, call_id, binding_digest)?;
+            }
+            continue;
+        }
+        if receipt.expired && between.is_empty() {
+            continue;
+        }
+        let [settled] = between.as_slice() else {
+            return Err(invalid());
+        };
+        let RunEventPayload::ToolSettled { result_ref } = &settled.payload else {
+            return Err(invalid());
+        };
+        let result: ToolResult = event_record(state, additions, result_ref)?;
+        if !snapshot.tool_ledger.iter().any(|entry| {
+            matches!(&entry.state,
+            ToolCallState::Settled { result: current } if current == &result)
+        }) {
+            return Err(invalid());
+        }
+        match (&receipt.command.action, &wait.target) {
+            (ResumeAction::Input { answer, .. }, WaitTarget::Input { request }) => {
+                if result.call_id != request.call_id
+                    || result.status != crate::ToolResultStatus::Succeeded
+                    || result.effect != crate::ToolEffect::NotApplied
+                    || result.content
+                        != [crate::InputContent::Json {
+                            value: answer.clone(),
+                        }]
+                    || result.error.is_some()
+                    || result.effect_receipt_ref.is_some()
+                {
+                    return Err(invalid());
+                }
+                validate_resume_result_message(snapshot, messages, &result)?;
+            }
+            (
+                ResumeAction::Deny { .. },
+                WaitTarget::Approval {
+                    target:
+                        ApprovalTarget::Tool {
+                            call_id,
+                            binding_digest,
+                        },
+                },
+            ) => {
+                validate_resume_binding(state, additions, snapshot, call_id, binding_digest)?;
+                if &result.call_id != call_id
+                    || result.status != crate::ToolResultStatus::Denied
+                    || result.effect != crate::ToolEffect::NotApplied
+                    || !result.content.is_empty()
+                    || result.effect_receipt_ref.is_some()
+                {
+                    return Err(invalid());
+                }
+                validate_resume_result_message(snapshot, messages, &result)?;
+            }
+            (
+                ResumeAction::External { receipt_ref, .. },
+                WaitTarget::External {
+                    call_id,
+                    effect_key,
+                },
+            ) => {
+                record_value(state, additions, receipt_ref)?;
+                if &result.call_id != call_id
+                    || result.effect == crate::ToolEffect::Unknown
+                    || result.status == crate::ToolResultStatus::Unknown
+                {
+                    return Err(invalid());
+                }
+                let unknown_event = events.iter().rev().find(|candidate| {
+                    candidate.seq.get() < receipt.previous_last_event_seq
+                        && matches!(&candidate.payload, RunEventPayload::ToolUnresolved { result_ref, idempotency_key, .. }
+                            if idempotency_key == effect_key && event_record::<ToolResult>(state, additions, result_ref)
+                                .is_ok_and(|unknown| &unknown.call_id == call_id))
+                }).ok_or_else(invalid)?;
+                let RunEventPayload::ToolUnresolved { result_ref, .. } = &unknown_event.payload
+                else {
+                    unreachable!()
+                };
+                let unknown: ToolResult = event_record(state, additions, result_ref)?;
+                let digest =
+                    canonical_digest(&serde_json::to_value(&unknown).map_err(|_| invalid())?);
+                let matching: Vec<_> = messages.iter().filter(|message| {
+                    message.run_id == snapshot.run_id && matches!(message.content.as_slice(),
+                        [ContentBlock::ToolResultCorrection { previous_message_id, previous_result_digest, result: corrected }]
+                        if corrected == &result && previous_result_digest == &digest
+                            && messages.iter().any(|prior| prior.message_id == *previous_message_id
+                                && prior.run_id == snapshot.run_id && matches!(prior.content.as_slice(),
+                                    [ContentBlock::ToolResult { result: previous }] if previous == &unknown)))
+                }).collect();
+                let [correction] = matching.as_slice() else {
+                    return Err(invalid());
+                };
+                if !authorized_corrections.insert(correction.message_id.clone())
+                    || !corrected_calls.insert(call_id.clone())
+                {
+                    return Err(invalid());
+                }
+            }
+            _ => return Err(invalid()),
+        }
+    }
+    for message in messages
+        .iter()
+        .filter(|message| message.run_id == snapshot.run_id)
+    {
+        if message
+            .content
+            .iter()
+            .any(|content| matches!(content, ContentBlock::ToolResultCorrection { .. }))
+            && !authorized_corrections.contains(&message.message_id)
+        {
+            return Err(invalid());
+        }
+    }
+    for event in events {
+        if let RunEventPayload::ToolUnresolved { result_ref, .. } = &event.payload {
+            let unknown: ToolResult = event_record(state, additions, result_ref)?;
+            if snapshot.tool_ledger.iter().any(|entry| {
+                entry.call.call_id == unknown.call_id
+                    && matches!(entry.state, ToolCallState::Settled { .. })
+            }) && !corrected_calls.contains(&unknown.call_id)
+            {
+                return Err(invalid());
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_resume_binding(
+    state: &ScopeState,
+    additions: &BTreeMap<RecordKey, ProtectedRecord>,
+    snapshot: &RunSnapshot,
+    call_id: &Id,
+    binding_digest: &crate::JsonDigest,
+) -> Result<(), ContractError> {
+    let invalid = || error(ErrorCode::InvalidSnapshot, "resume.binding");
+    let reference = snapshot
+        .tool_ledger
+        .iter()
+        .find(|entry| &entry.call.call_id == call_id)
+        .and_then(|entry| entry.call.bound_input_ref.as_ref())
+        .ok_or_else(invalid)?;
+    // validate_snapshot_refs already validates this typed protected binding.
+    if record_value(state, additions, reference)?.get("binding_digest")
+        != Some(&serde_json::to_value(binding_digest).map_err(|_| invalid())?)
+    {
+        return Err(invalid());
+    }
+    Ok(())
+}
+
+fn validate_resume_result_message(
+    snapshot: &RunSnapshot,
+    messages: &[&Message],
+    result: &ToolResult,
+) -> Result<(), ContractError> {
+    let count = messages.iter().filter(|message| message.run_id == snapshot.run_id
+        && message.role == crate::MessageRole::Tool && message.origin == crate::MessageOrigin::Tool
+        && matches!(message.content.as_slice(), [ContentBlock::ToolResult { result: saved }] if saved == result)).count();
+    if count != 1 {
+        return Err(error(ErrorCode::InvalidSnapshot, "resume.result_message"));
+    }
+    Ok(())
+}
+
 fn resume_target_matches(previous: &RunSnapshot, action: &ResumeAction) -> bool {
+    if let ResumeAction::Recover { .. } = action {
+        return previous.status == RunStatus::Running;
+    }
+    previous
+        .wait
+        .as_ref()
+        .is_some_and(|wait| action_matches_wait(wait, action))
+}
+
+fn action_matches_wait(wait: &WaitState, action: &ResumeAction) -> bool {
     match action {
-        ResumeAction::Recover { .. } => previous.status == RunStatus::Running,
+        ResumeAction::Recover { .. } => false,
         ResumeAction::Approve { wait_id, target }
         | ResumeAction::Deny {
             wait_id, target, ..
-        } => previous.wait.as_ref().is_some_and(|wait| {
+        } => {
             &wait.wait_id == wait_id
                 && matches!(&wait.target, WaitTarget::Approval { target: saved } if saved == target)
-        }),
-        ResumeAction::Input { wait_id, .. } => previous.wait.as_ref().is_some_and(|wait| {
+        }
+        ResumeAction::Input { wait_id, .. } => {
             &wait.wait_id == wait_id && matches!(wait.target, WaitTarget::Input { .. })
-        }),
-        ResumeAction::External { wait_id, .. } => previous.wait.as_ref().is_some_and(|wait| {
+        }
+        ResumeAction::External { wait_id, .. } => {
             &wait.wait_id == wait_id && matches!(wait.target, WaitTarget::External { .. })
-        }),
+        }
     }
 }
 
@@ -1293,6 +1740,34 @@ fn validate_transition(previous: &RunSnapshot, next: &RunSnapshot) -> Result<(),
     }
     next.validate()?;
     crate::budget::validate_budget_transition(previous, next)?;
+    if !next.resume_receipts.starts_with(&previous.resume_receipts)
+        || next.resume_receipts.len() > previous.resume_receipts.len() + 1
+    {
+        return Err(error(ErrorCode::InvalidTransition, "resume_receipts"));
+    }
+    let resumed = next.resume_receipts.len() != previous.resume_receipts.len();
+    if resumed {
+        let receipt = next.resume_receipts.last().expect("new receipt");
+        if previous.status != RunStatus::Waiting
+            || next.status != RunStatus::Running
+            || next.outcome.is_some()
+            || next.wait.is_some()
+            || receipt.accepted_revision != next.revision
+            || receipt.command.expected_revision != previous.revision
+            || receipt.previous_last_event_seq != previous.last_event_seq
+            || !resume_target_matches(previous, &receipt.command.action)
+        {
+            return Err(error(
+                ErrorCode::InvalidTransition,
+                "resume_receipts.acceptance",
+            ));
+        }
+    } else if previous.status == RunStatus::Waiting && next.status == RunStatus::Running {
+        return Err(error(
+            ErrorCode::InvalidTransition,
+            "resume_receipts.missing",
+        ));
+    }
     if previous.run_id != next.run_id
         || previous.request != next.request
         || previous.request_digest != next.request_digest
@@ -1334,11 +1809,22 @@ fn validate_transition(previous: &RunSnapshot, next: &RunSnapshot) -> Result<(),
                 ToolCallState::Dispatching { .. }
                     | ToolCallState::Unknown { .. }
                     | ToolCallState::ApprovalPending { .. }
+                    | ToolCallState::InputPending { .. }
             ) && matches!(new.state, ToolCallState::Planned { .. }))
             || (matches!(old.state, ToolCallState::Unknown { .. })
                 && matches!(new.state, ToolCallState::ApprovalPending { .. }))
             || (matches!(old.state, ToolCallState::ApprovalPending { .. })
                 && matches!(new.state, ToolCallState::Unknown { .. }))
+            || (matches!(old.state, ToolCallState::InputPending { .. })
+                && !matches!(
+                    new.state,
+                    ToolCallState::InputPending { .. } | ToolCallState::Settled { .. }
+                ))
+            || (matches!(new.state, ToolCallState::InputPending { .. })
+                && !matches!(
+                    old.state,
+                    ToolCallState::Dispatching { .. } | ToolCallState::InputPending { .. }
+                ))
         {
             return Err(error(ErrorCode::InvalidTransition, "tool_ledger"));
         }
@@ -1354,6 +1840,11 @@ fn validate_transition(previous: &RunSnapshot, next: &RunSnapshot) -> Result<(),
             | ToolCallState::ApprovalPending {
                 attempt_id: old_attempt,
                 idempotency_key: old_key,
+            }
+            | ToolCallState::InputPending {
+                attempt_id: old_attempt,
+                idempotency_key: old_key,
+                ..
             },
             ToolCallState::Dispatching {
                 attempt_id: new_attempt,
@@ -1366,6 +1857,11 @@ fn validate_transition(previous: &RunSnapshot, next: &RunSnapshot) -> Result<(),
             | ToolCallState::ApprovalPending {
                 attempt_id: new_attempt,
                 idempotency_key: new_key,
+            }
+            | ToolCallState::InputPending {
+                attempt_id: new_attempt,
+                idempotency_key: new_key,
+                ..
             },
         ) = (&old.state, &new.state)
         {
@@ -1375,6 +1871,20 @@ fn validate_transition(previous: &RunSnapshot, next: &RunSnapshot) -> Result<(),
             ) && matches!(new.state, ToolCallState::Dispatching { .. });
             if old_key != new_key || (!retry && old_attempt != new_attempt) {
                 return Err(error(ErrorCode::InvalidTransition, "tool_ledger.attempt"));
+            }
+        }
+        if let (
+            ToolCallState::InputPending {
+                request: before, ..
+            },
+            ToolCallState::InputPending { request: after, .. },
+        ) = (&old.state, &new.state)
+        {
+            if before != after {
+                return Err(error(
+                    ErrorCode::InvalidTransition,
+                    "tool_ledger.input_request",
+                ));
             }
         }
     }

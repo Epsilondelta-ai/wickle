@@ -735,6 +735,7 @@ async fn checkpoint() -> RunSnapshot {
         request,
         scope: scope(),
         timing: RunTiming::new(0, p.profile().limits.max_elapsed_ms.get()).unwrap(),
+        resume_receipts: vec![],
         reservations: vec![AttemptReservation {
             attempt_id: id("first-model-attempt"),
             kind: ReservationKind::Model {

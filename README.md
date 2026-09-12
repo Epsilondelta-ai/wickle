@@ -12,4 +12,4 @@ Wickle is an agent engine being developed in Rust by EpsilonDelta. It aims to pr
 
 Its design uses Agent Profiles to configure agent behavior and adapters to connect different models and tools.
 
-**Status:** In development. Agents support serial model/tool loops, persisted outcomes, event replay, and explicit cancellation. Registered `ToolExecutor` implementations receive validated model inputs combined with separate Host `SystemInputs`. Approval requirements or unknown write effects pause execution in `Waiting`; `resume` is not yet supported. [Run an agent](docs/agents.md) · [Data contracts](docs/contracts.md).
+**Status:** In development. Agents support serial model/tool loops, separate system inputs, persisted outcomes, event replay, cancellation, and resuming saved approval, input, or external-effect waits. Resume commands are deduplicated; external effects require Host verification. General interruption recovery and candidate verification remain unsupported. [Run an agent](docs/agents.md) · [Data contracts](docs/contracts.md).

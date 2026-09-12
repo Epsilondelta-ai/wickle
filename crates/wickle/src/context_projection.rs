@@ -840,6 +840,7 @@ fn project_transcript(
     snapshot: &PromptSnapshot,
     input: &ProjectionInput<'_>,
 ) -> Result<Vec<RunGroup>, ContractError> {
+    let corrections = crate::message::tool_corrections(input.transcript)?;
     let mut groups = Vec::new();
     let mut seen_messages = BTreeSet::new();
     let mut seen_runs = BTreeSet::new();
@@ -932,6 +933,9 @@ fn project_transcript(
                         }
                     }
                     ContentBlock::ToolResult { result } => {
+                        let result = corrections
+                            .get(&message.message_id)
+                            .map_or(result, |(_, result)| result);
                         if message.role != MessageRole::Tool
                             || message.origin != MessageOrigin::Tool
                         {
@@ -1030,7 +1034,10 @@ fn project_transcript(
                         "source_message_id":message.message_id, "content":values}),
                     }];
                 }
-                projected.push((message.message_id.clone(), ModelMessage { role, content }));
+                let source_id = corrections
+                    .get(&message.message_id)
+                    .map_or(&message.message_id, |(source_id, _)| source_id);
+                projected.push((source_id.clone(), ModelMessage { role, content }));
             }
         }
         if !pending.is_empty() {

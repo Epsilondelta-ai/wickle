@@ -1,14 +1,28 @@
 use super::*;
 
 impl Agent {
-    pub(super) fn tool_round(&self) -> Result<SerialToolRound, ContractError> {
+    pub(super) async fn tool_round(
+        &self,
+        budget: &RunBudget,
+    ) -> Result<SerialToolRound, ContractError> {
         let bindings = &self.inner.bindings;
         let registry = match &bindings.tools {
             Some(registry) => registry.clone(),
             None => Arc::new(ToolRegistry::new(bindings.scope.clone(), vec![])?),
         };
+        let saved = bindings.state.load(budget.scope(), budget.run_id()).await?;
+        let definitions = if let Some(reference) = &saved.snapshot.system_inputs {
+            let record = bindings
+                .state
+                .read_record(budget.scope(), &reference.snapshot_ref)
+                .await?;
+            let inputs = RunSystemInputs::from_value(record.value(), reference, budget.scope())?;
+            SystemInputRegistry::new(inputs.definitions().values().cloned().collect())?
+        } else {
+            bindings.system_inputs.clone()
+        };
         let binder = Arc::new(InputBinder::new(
-            Arc::new(bindings.system_inputs.clone()),
+            Arc::new(definitions),
             bindings.system_input_resolver.clone(),
             bindings.policy.clone(),
             bindings.ids.clone(),
@@ -219,6 +233,7 @@ impl Agent {
                     vec![result_ref],
                 )
             }
+            ToolRoundOutcome::InputRequired { request } => (WaitTarget::Input { request }, vec![]),
             ToolRoundOutcome::Completed => {
                 return Err(fail(ErrorCode::InvalidTransition, "agent.tool_wait"));
             }
@@ -254,7 +269,9 @@ impl Agent {
             .filter(|entry| {
                 matches!(
                     entry.state,
-                    ToolCallState::Planned {} | ToolCallState::ApprovalPending { .. }
+                    ToolCallState::Planned {}
+                        | ToolCallState::ApprovalPending { .. }
+                        | ToolCallState::InputPending { .. }
                 )
             })
             .map(|entry| entry.call.model_request_id.clone())
@@ -262,7 +279,7 @@ impl Agent {
         if requests.is_empty() {
             return Ok(());
         }
-        let round = self.tool_round()?;
+        let round = self.tool_round(budget).await?;
         for request in requests {
             round
                 .settle_unstarted(

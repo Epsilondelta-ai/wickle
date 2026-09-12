@@ -69,7 +69,7 @@ pub use model_routing::{
 };
 pub use policy::{
     ApprovalChallenge, Guarded, PolicyAction, PolicyContext, PolicyDecision, PolicyGate,
-    PolicyPort, PolicyRequest, ToolPolicyInput,
+    PolicyPort, PolicyRequest, ToolApproval, ToolPolicyInput,
 };
 pub use state::{
     AdmissionInput, AdmissionResult, CommitInput, EventPage, MAX_EVENT_PAGE_SIZE, MemoryStateStore,
@@ -77,8 +77,10 @@ pub use state::{
     StateStoreCheckpoint, StoredRun,
 };
 pub use tool_execution::{
-    SerialToolRound, ToolEffect, ToolExecutionContext, ToolExecutionLimits, ToolExecutionOutcome,
-    ToolExecutionResult, ToolExecutor, ToolRegistration, ToolRegistry, ToolRoundOutcome,
+    ExternalReceiptContext, ExternalReceiptRequest, ExternalReceiptVerifier,
+    PreparedToolResolution, SerialToolRound, ToolEffect, ToolExecutionContext, ToolExecutionLimits,
+    ToolExecutionOutcome, ToolExecutionResult, ToolExecutor, ToolRegistration, ToolRegistry,
+    ToolRoundOutcome,
 };
 pub use tool_schema::{
     CompiledTool, SchemaCompiler, SystemInputDefinition, SystemInputRegistry, SystemInputSource,
@@ -121,10 +123,11 @@ pub use resolution::{
 pub use run::{
     ApprovalTarget, BudgetKind, BudgetUsage, CompletionBasis, EphemeralEvent, InputRequest,
     OutcomeResult, RUN_EVENT_SCHEMA_VERSION, RUN_SNAPSHOT_SCHEMA_VERSION, ResumeAction,
-    ResumeCommand, RunEvent, RunEventPayload, RunEventSchemaVersion, RunOutcome, RunPhase,
-    RunRequest, RunSnapshot, RunSnapshotSchemaVersion, RunStatus, RunTrigger, SessionSchemaVersion,
-    SessionSnapshot, SourceExecutionState, SystemInputSnapshotRef, ToolCallState, ToolLedgerEntry,
-    VerificationSummary, VerificationVerdict, WaitState, WaitTarget, admission_digest,
+    ResumeCommand, ResumeReceipt, RunEvent, RunEventPayload, RunEventSchemaVersion, RunOutcome,
+    RunPhase, RunRequest, RunSnapshot, RunSnapshotSchemaVersion, RunStatus, RunTrigger,
+    SessionSchemaVersion, SessionSnapshot, SourceExecutionState, SystemInputSnapshotRef,
+    ToolCallState, ToolLedgerEntry, VerificationSummary, VerificationVerdict, WaitState,
+    WaitTarget, admission_digest,
 };
 pub use serialization::{
     Id, JsonDigest, JsonObject, canonical_digest, canonical_digest_json, parse_json,

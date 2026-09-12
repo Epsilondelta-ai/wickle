@@ -434,6 +434,28 @@ impl BoundToolInput {
             },
         }
     }
+    pub(crate) fn policy_request_for_run(&self, snapshot: &crate::RunSnapshot) -> PolicyRequest {
+        let mut input = self.policy_input();
+        if snapshot.scope == self.data.scope && snapshot.run_id == self.data.run_id {
+            let receipt = snapshot.resume_receipts.iter().rev().find(|receipt| {
+                matches!(&receipt.command.action,
+                    crate::ResumeAction::Approve { target: crate::ApprovalTarget::Tool { call_id, binding_digest }, .. }
+                    | crate::ResumeAction::Deny { target: crate::ApprovalTarget::Tool { call_id, binding_digest }, .. }
+                    if call_id == &self.data.call_id && binding_digest == &self.binding_digest)
+            });
+            if let Some(receipt) = receipt.filter(|receipt| {
+                !receipt.expired
+                    && matches!(receipt.command.action, crate::ResumeAction::Approve { .. })
+            }) {
+                input = input.with_approval(receipt);
+            }
+        }
+        PolicyRequest {
+            owner_scope: self.data.scope.clone(),
+            resource_id: self.data.run_id.clone(),
+            action: PolicyAction::ExecuteTool { input },
+        }
+    }
     /// Restore protected inputs using the saved ledger call's exact record reference
     /// and the currently supplied compiled contract.
     pub fn restore(
@@ -718,7 +740,12 @@ impl InputBinder {
                 check_size(&value.value, self.limits.max_value_bytes)?;
             }
             let decision = self
-                .authorize(&input.policy_request(), context, budget, false)
+                .authorize(
+                    &input.policy_request_for_run(&saved.snapshot),
+                    context,
+                    budget,
+                    false,
+                )
                 .await?;
             boundary(context, budget).await?;
             return Ok(ToolBindingResult {
@@ -885,7 +912,12 @@ impl InputBinder {
         };
         check_size(&input, self.limits.max_bound_bytes)?;
         let decision = self
-            .authorize(&input.policy_request(), context, budget, false)
+            .authorize(
+                &input.policy_request_for_run(&saved.snapshot),
+                context,
+                budget,
+                false,
+            )
             .await?;
         boundary(context, budget).await?;
         let record = ProtectedRecord::new(

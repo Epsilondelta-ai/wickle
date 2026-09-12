@@ -4,6 +4,7 @@ use serde_json::Value;
 use std::{collections::BTreeMap, fmt, sync::Arc};
 use tokio_util::sync::CancellationToken;
 
+mod resume;
 mod round;
 
 /// Identity and controls for one physical tool call. Credentials and unrelated
@@ -55,6 +56,13 @@ pub enum ToolExecutionOutcome {
         /// Safe registered failure code, without SDK error messages or payloads.
         code: Id,
     },
+    /// Ask the Host for the value that will complete this call, without rerunning
+    /// the executor. Requires NotApplied and no receipt. The pinned output schema
+    /// validates the answer; this does not suspend and resume handler code.
+    InputRequired {
+        /// Bounded question displayed to the authorized caller.
+        question: String,
+    },
 }
 
 /// Explicit completion and effect receipt. Serialize only for protected storage.
@@ -73,6 +81,7 @@ impl fmt::Debug for ToolExecutionOutcome {
         f.write_str(match self {
             Self::Succeeded { .. } => "ToolExecutionOutcome::Succeeded(<protected>)",
             Self::Failed { .. } => "ToolExecutionOutcome::Failed(<classified>)",
+            Self::InputRequired { .. } => "ToolExecutionOutcome::InputRequired(<protected>)",
         })
     }
 }
@@ -95,6 +104,83 @@ pub trait ToolExecutor: Send + Sync {
         execution_args: &'a JsonObject,
         context: &'a ToolExecutionContext,
     ) -> PortFuture<'a, ToolExecutionResult>;
+}
+
+/// Exact saved effect and protected evidence presented to a trusted Host verifier.
+/// The Host must authenticate the receipt and its ownership, not merely compare
+/// caller-supplied IDs. This value must not be sent to a model or ordinary logs.
+#[derive(Clone)]
+pub struct ExternalReceiptRequest {
+    /// Original saved logical call, including its immutable input reference.
+    pub call: ToolCall,
+    /// Original uncertain physical attempt; no new execution is requested.
+    pub attempt_id: Id,
+    /// Original external deduplication identity.
+    pub idempotency_key: Id,
+    /// Restored, policy-authorized final arguments for that same call.
+    pub bound_input: BoundToolInput,
+    /// Exact record authorized and retrieved by the Agent before verification.
+    pub receipt_ref: RecordRef,
+    /// Protected record contents, not an untrusted substitute for the reference.
+    pub receipt: Value,
+}
+impl fmt::Debug for ExternalReceiptRequest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("ExternalReceiptRequest(<protected>)")
+    }
+}
+
+/// Current authorization and finite controls for a read-only receipt inspection.
+#[derive(Debug, Clone)]
+pub struct ExternalReceiptContext {
+    /// Exact namespace of the waiting run and receipt.
+    pub scope: Scope,
+    /// Current authenticated actor.
+    pub principal_ref: Id,
+    /// Current Host authorization grant.
+    pub capability_grant_ref: Id,
+    /// Cancelled when verification stops or times out.
+    pub cancellation: CancellationToken,
+    /// Finite callback deadline.
+    pub deadline: tokio::time::Instant,
+}
+
+/// Read-only Host attestation of a previously uncertain effect. It must not
+/// execute or retry the business operation. Unknown leaves the wait unresolved.
+pub trait ExternalReceiptVerifier: Send + Sync {
+    /// Return an authenticated result for the original call and frozen target.
+    fn verify<'a>(
+        &'a self,
+        request: &'a ExternalReceiptRequest,
+        context: &'a ExternalReceiptContext,
+    ) -> PortFuture<'a, ToolExecutionResult>;
+}
+
+/// Prepared settlement for one authorized resume command. No state is committed
+/// here: the Agent saves this alongside command consumption and RunResumed in one
+/// transaction. Protected values deliberately have no ordinary Debug output.
+pub struct PreparedToolResolution {
+    /// Final observation for the original logical call.
+    pub result: ToolResult,
+    /// Replacement ledger state for that call.
+    pub state: ToolCallState,
+    /// Paired result, or explicit correction of the old Unknown observation.
+    pub message: Message,
+    /// Immutable result and diagnostic/effect records needed by the settlement.
+    pub records: Vec<ProtectedRecord>,
+    /// Next ToolSettled event; the Agent sequences RunResumed after it.
+    pub event: RunEvent,
+}
+impl fmt::Debug for PreparedToolResolution {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("PreparedToolResolution(<protected>)")
+    }
+}
+
+struct AttemptIdentity<'a> {
+    scope: &'a Scope,
+    attempt_id: &'a Id,
+    idempotency_key: &'a Id,
 }
 
 /// A trusted Host associates one compiled contract with an existing executor.
@@ -212,6 +298,11 @@ pub enum ToolRoundOutcome {
         bound_input_ref: RecordRef,
         /// Identity of the final model-and-system argument binding.
         binding_digest: JsonDigest,
+    },
+    /// A no-effect input tool has saved its question and original attempt.
+    InputRequired {
+        /// Stable request answered through an authorized resume command.
+        request: InputRequest,
     },
     /// A prior or current attempt requires explicit effect reconciliation.
     Unresolved {

@@ -403,6 +403,7 @@ fn validate_history(
     let mut sequence = 0_u64;
     let mut started = 0;
     let mut finished = 0;
+    let mut resumed = 0;
     let mut unresolved_keys = BTreeMap::new();
     for event in &run.events {
         sequence = sequence
@@ -524,9 +525,15 @@ fn validate_history(
                 }
             }
             RunEventPayload::RunResumed { command_ref } => {
+                resumed += 1;
                 let command: ResumeCommand = event_record(state, &empty, command_ref)?;
                 if command.run_id != run.snapshot.run_id
                     || command.expected_revision >= run.snapshot.revision
+                    || !run.snapshot.resume_receipts.iter().any(|receipt| {
+                        receipt.command_ref == *command_ref
+                            && receipt.command == command
+                            && event.seq.get() > receipt.previous_last_event_seq
+                    })
                 {
                     return Err(invalid("checkpoint.run_resumed"));
                 }
@@ -584,9 +591,19 @@ fn validate_history(
     if started != 1
         || sequence != run.snapshot.last_event_seq
         || finished != usize::from(run.snapshot.status.is_terminal())
+        || resumed != run.snapshot.resume_receipts.len()
     {
         return Err(invalid("checkpoint.events"));
     }
+    let events: Vec<_> = run.events.iter().collect();
+    let messages: Vec<_> = state
+        .sessions
+        .get(&run.snapshot.request.session_id)
+        .ok_or_else(|| invalid("checkpoint.session"))?
+        .messages
+        .iter()
+        .collect();
+    validate_resume_history(state, &empty, &run.snapshot, &events, &messages)?;
     Ok(())
 }
 
