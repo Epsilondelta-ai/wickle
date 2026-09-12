@@ -15,10 +15,18 @@ mod context;
 mod error;
 mod message;
 mod model;
+mod policy;
 mod profile;
 mod resolution;
 mod run;
 mod serialization;
+mod views;
+
+pub use policy::{
+    ApprovalChallenge, Guarded, PolicyAction, PolicyContext, PolicyDecision, PolicyGate,
+    PolicyPort, PolicyRequest, ToolPolicyInput,
+};
+pub use views::{ArtifactView, EventView, RunView};
 
 pub use context::{
     ExecutionContext, ExecutionContextData, PortFuture, PortStream, Scope, SystemInputs,
