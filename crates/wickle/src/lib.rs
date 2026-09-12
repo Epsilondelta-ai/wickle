@@ -12,6 +12,7 @@
 //! use wickle::serialization::canonical_digest;
 //! ```
 
+mod agent;
 mod budget;
 mod clock;
 mod context;
@@ -34,6 +35,10 @@ mod state;
 mod tool_schema;
 mod views;
 
+pub use agent::{
+    Agent, AgentBindings, AgentSettings, CancelReceipt, ModelTokenEstimator, RunHandle,
+    create_agent,
+};
 pub use budget::{AttemptReservation, ReservationKind, RunBudget, RunTiming};
 pub use clock::{Clock, ClockReading, IdSource, RandomIdSource, SystemClock};
 pub use context_projection::{

@@ -44,6 +44,27 @@ async fn durable_admission_replays_the_original_run_and_releases_a_finished_sess
         .unwrap();
     assert!(!replay.created);
     assert_eq!(replay.state, first.state);
+    assert_eq!(
+        store
+            .find_request(&scope(), &id("session"), &id("request"))
+            .await
+            .unwrap(),
+        Some(first.state.clone())
+    );
+    assert!(
+        store
+            .find_request(
+                &Scope {
+                    workspace_id: id("foreign"),
+                    ..scope()
+                },
+                &id("session"),
+                &id("request")
+            )
+            .await
+            .unwrap()
+            .is_none()
+    );
     let mut changed = durable_admission("changed", "request", "session").await;
     changed.snapshot.request.input = vec![InputContent::Text {
         text: "Different input".into(),
@@ -80,6 +101,16 @@ async fn durable_admission_replays_the_original_run_and_releases_a_finished_sess
     drop(store);
     let store = SqliteStateStore::open(database.path()).unwrap();
     let mut second = durable_admission("second", "second", "session").await;
+    assert_eq!(
+        store
+            .find_request(&scope(), &id("session"), &id("request"))
+            .await
+            .unwrap()
+            .unwrap()
+            .snapshot
+            .status,
+        RunStatus::Succeeded
+    );
     second.messages[0].sequence = 2.try_into().unwrap();
     assert!(store.admit(&scope(), second).await.unwrap().created);
     assert_eq!(

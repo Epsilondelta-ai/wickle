@@ -225,6 +225,19 @@ impl SqliteStateStore {
 }
 
 impl StateStore for SqliteStateStore {
+    fn find_request<'a>(
+        &'a self,
+        scope: &'a Scope,
+        session_id: &'a Id,
+        request_id: &'a Id,
+    ) -> PortFuture<'a, Option<StoredRun>> {
+        let session_id = session_id.clone();
+        let request_id = request_id.clone();
+        self.transact(scope, false, move |state, scope, runtime| {
+            runtime.block_on(state.find_request(scope, &session_id, &request_id))
+        })
+    }
+
     fn capabilities(&self) -> StateStoreCapabilities {
         StateStoreCapabilities {
             durable: true,
