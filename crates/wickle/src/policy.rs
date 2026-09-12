@@ -140,6 +140,15 @@ pub enum PolicyAction {
     ReadRecord {},
     /// Use scoped data in model context.
     UseContext {},
+    /// Invoke one selected lifecycle hook under its pinned definition and target.
+    InvokeHook {
+        /// Exact selected hook version.
+        hook: VersionedRef,
+        /// Immutable execution definition.
+        definition_digest: JsonDigest,
+        /// Exact lifecycle invocation scope within the Run.
+        target: crate::HookTarget,
+    },
     /// Read one registered system key before the final target value is known.
     ResolveSystemInput {
         /// Exact tool requesting the lookup.

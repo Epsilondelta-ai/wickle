@@ -9,7 +9,9 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 
 mod checkpoint;
+mod hook_state;
 pub use checkpoint::{STATE_STORE_CHECKPOINT_VERSION, StateStoreCheckpoint};
+use hook_state::{validate_hook_observation, validate_hook_snapshot, validate_hook_transition};
 
 use crate::{
     ApprovalTarget, BudgetUsage, ContentBlock, ContractError, ErrorCode, Id, Message,
@@ -257,6 +259,34 @@ pub trait StateStore: Send + Sync {
         scope: &'a Scope,
         reference: &'a RecordRef,
     ) -> PortFuture<'a, ProtectedRecord>;
+    /// Append a report about an already committed result without changing its
+    /// outcome, snapshot revision, session ownership, or durable event sequence.
+    fn record_hook_observation<'a>(
+        &'a self,
+        _scope: &'a Scope,
+        _run_id: &'a Id,
+        _report: crate::HookObservation,
+    ) -> PortFuture<'a, ()> {
+        Box::pin(async {
+            Err(error(
+                ErrorCode::CapabilityUnsupported,
+                "store.hook_observations",
+            ))
+        })
+    }
+    /// Read protected lifecycle observation reports after Host authorization.
+    fn read_hook_observations<'a>(
+        &'a self,
+        _scope: &'a Scope,
+        _run_id: &'a Id,
+    ) -> PortFuture<'a, Vec<crate::HookObservation>> {
+        Box::pin(async {
+            Err(error(
+                ErrorCode::CapabilityUnsupported,
+                "store.hook_observations",
+            ))
+        })
+    }
 }
 
 type ScopeKey = (Id, Id, Option<Id>);
@@ -270,6 +300,7 @@ struct ScopeState {
     records: BTreeMap<RecordKey, ProtectedRecord>,
     event_ids: BTreeSet<Id>,
     message_ids: BTreeSet<Id>,
+    hook_observations: BTreeMap<Id, Vec<crate::HookObservation>>,
 }
 
 #[derive(Clone)]
@@ -381,6 +412,7 @@ impl StateStore for MemoryStateStore {
                 || !input.snapshot.tool_ledger.is_empty()
                 || !input.snapshot.reservations.is_empty()
                 || !input.snapshot.resume_receipts.is_empty()
+                || !input.snapshot.hook_applications.is_empty()
                 || input.snapshot.usage != BudgetUsage::default()
             {
                 return Err(error(ErrorCode::InvalidSnapshot, "admission"));
@@ -741,6 +773,49 @@ impl StateStore for MemoryStateStore {
             Ok(record.clone())
         })
     }
+    fn record_hook_observation<'a>(
+        &'a self,
+        scope: &'a Scope,
+        run_id: &'a Id,
+        report: crate::HookObservation,
+    ) -> PortFuture<'a, ()> {
+        Box::pin(async move {
+            let mut scopes = self.lock()?;
+            let state = scopes.get_mut(&scope_key(scope)).ok_or_else(not_found)?;
+            validate_hook_observation(state, scope, run_id, &report)?;
+            let reports = state.hook_observations.entry(run_id.clone()).or_default();
+            if let Some(existing) = reports
+                .iter()
+                .find(|existing| existing.hook == report.hook && existing.target == report.target)
+            {
+                return if existing == &report {
+                    Ok(())
+                } else {
+                    Err(error(ErrorCode::RecordConflict, "hooks.observation"))
+                };
+            }
+            reports.push(report);
+            Ok(())
+        })
+    }
+    fn read_hook_observations<'a>(
+        &'a self,
+        scope: &'a Scope,
+        run_id: &'a Id,
+    ) -> PortFuture<'a, Vec<crate::HookObservation>> {
+        Box::pin(async move {
+            let scopes = self.lock()?;
+            let state = namespace(&scopes, scope)?;
+            if !state.runs.contains_key(run_id) {
+                return Err(not_found());
+            }
+            Ok(state
+                .hook_observations
+                .get(run_id)
+                .cloned()
+                .unwrap_or_default())
+        })
+    }
 }
 
 fn error(code: ErrorCode, path: &str) -> ContractError {
@@ -872,6 +947,7 @@ fn validate_snapshot_refs(
     additions: &BTreeMap<RecordKey, ProtectedRecord>,
     snapshot: &RunSnapshot,
 ) -> Result<(), ContractError> {
+    validate_hook_snapshot(state, additions, snapshot)?;
     let mut references = Vec::new();
     for receipt in &snapshot.resume_receipts {
         let command: ResumeCommand = event_record(state, additions, &receipt.command_ref)?;
@@ -974,6 +1050,26 @@ fn validate_snapshot_refs(
                 run_inputs.as_ref(),
             )
             .map_err(|_| error(ErrorCode::InvalidSnapshot, "bound_input"))?;
+            let bound = record_value(state, additions, reference)?;
+            let transform_ref = bound
+                .get("data")
+                .and_then(|data| data.get("transformation_ref"))
+                .map(|value| {
+                    serde_json::from_value::<RecordRef>(value.clone()).map_err(|_| {
+                        error(ErrorCode::InvalidSnapshot, "bound_input.transformation_ref")
+                    })
+                })
+                .transpose()?;
+            let transformed = transform_ref
+                .as_ref()
+                .map(|reference| record_value(state, additions, reference))
+                .transpose()?;
+            crate::input_binding::validate_bound_transformation(
+                bound,
+                snapshot,
+                &entry.call,
+                transformed,
+            )?;
         }
     }
     for entry in &snapshot.tool_ledger {
@@ -1739,6 +1835,7 @@ fn validate_transition(previous: &RunSnapshot, next: &RunSnapshot) -> Result<(),
         return Err(error(ErrorCode::InvalidTransition, "run.status"));
     }
     next.validate()?;
+    validate_hook_transition(previous, next)?;
     crate::budget::validate_budget_transition(previous, next)?;
     if !next.resume_receipts.starts_with(&previous.resume_receipts)
         || next.resume_receipts.len() > previous.resume_receipts.len() + 1

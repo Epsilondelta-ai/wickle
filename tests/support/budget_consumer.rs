@@ -98,6 +98,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         timing: RunTiming::new(started_at, 30000)?,
         reservations: vec![],
         resume_receipts: vec![],
+        hook_plan_ref: None,
+        hook_applications: vec![],
         model_ledger: vec![],
         tool_ledger: vec![],
         system_inputs: None,

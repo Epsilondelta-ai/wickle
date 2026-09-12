@@ -1,5 +1,6 @@
 // Synthetic model, tool, and metadata inspector. No provider network or business
-// database calls occur. SQLite is real; the assertions exercise the public Agent API.
+// database calls occur. SQLite is real; lifecycle transforms and observer reports
+// use the public Agent API and survive reopening the store.
 use futures_util::{TryStreamExt, stream};
 use serde_json::{Value, json};
 use std::{
@@ -68,7 +69,14 @@ impl ProfileResolver for Catalog {
                 required_capabilities: BTreeSet::new(),
                 required_connections: BTreeSet::new(),
                 model_name: (reference.kind == ComponentKind::Tool).then(|| id("search")),
-                hook_position: None,
+                hook_position: match reference.id.as_str() {
+                    "run-data" => Some(HookPosition::BeforeRun),
+                    "step-data" => Some(HookPosition::BeforeModel),
+                    "normalize" => Some(HookPosition::BeforeTool),
+                    "tool-observer" => Some(HookPosition::AfterTool),
+                    "run-observer" => Some(HookPosition::AfterRun),
+                    _ => None,
+                },
                 exports: vec![],
             })
         })
@@ -210,6 +218,28 @@ impl ModelPort for Model {
         assert_eq!(request.route, self.route);
         assert_eq!(request.tools.len(), 1);
         assert_eq!(request.tools[0].name, id("search"));
+        let context_items: Vec<_> = request
+            .messages
+            .iter()
+            .flat_map(|message| {
+                message.content.iter().filter_map(|content| match content {
+                    ModelContent::Json { value } if value["kind"] == "context_data" => {
+                        assert_eq!(message.role, ModelRole::User);
+                        Some(value)
+                    }
+                    _ => None,
+                })
+            })
+            .collect();
+        assert_eq!(context_items.len(), 2);
+        assert!(context_items.iter().all(|value| value["origin"] == "hook"));
+        assert_eq!(
+            context_items
+                .iter()
+                .map(|value| value["source_ref"]["id"].as_str().unwrap())
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from(["run-data", "step-data"])
+        );
         assert_eq!(
             request.tools[0].model_input_schema["properties"],
             json!({"query":{"type":"string"},"limit":{"type":"integer","minimum":1,"default":2}})
@@ -282,7 +312,7 @@ impl ModelPort for Model {
                     assert_eq!(results[index].0, calls[index].0);
                     assert_eq!(
                         results[index].1,
-                        json!({"status":"succeeded","effect":"not_applied","content":[{"type":"json","value":{"query":query,"count":index+2}}]})
+                        json!({"status":"succeeded","effect":"not_applied","content":[{"type":"json","value":{"query":format!("{query}|hook"),"count":index+2}}]})
                     );
                 }
                 vec![
@@ -318,9 +348,9 @@ impl ToolExecutor for Search {
         assert_eq!(
             args,
             &object(if index == 0 {
-                json!({"query":"alpha","limit":2,"workspace_id":WORKSPACE})
+                json!({"query":"alpha|hook","limit":2,"workspace_id":WORKSPACE})
             } else {
-                json!({"query":"beta","limit":3,"workspace_id":WORKSPACE})
+                json!({"query":"beta|hook","limit":3,"workspace_id":WORKSPACE})
             })
         );
         arguments.push(args.clone());
@@ -362,6 +392,58 @@ fn registry(
         )?,
     ))
 }
+struct Hooks {
+    calls: AtomicUsize,
+}
+impl HookHandler for Hooks {
+    fn call<'a>(
+        &'a self,
+        input: &'a HookInput,
+        context: &'a HookContext,
+    ) -> PortFuture<'a, HookOutput> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Box::pin(async move {
+            Ok(match input {
+                HookInput::BeforeRun { .. } | HookInput::BeforeModel { .. } => {
+                    HookOutput::Context {
+                        additions: vec![HookContextAddition {
+                            content: vec![InputContent::Json {
+                                value: json!({"marker":context.hook.id}),
+                            }],
+                            priority: ContextPriority::Required,
+                        }],
+                    }
+                }
+                HookInput::BeforeTool {
+                    original_model_inputs,
+                    model_inputs,
+                    ..
+                } => {
+                    assert_eq!(model_inputs, original_model_inputs);
+                    let mut inputs = model_inputs.clone();
+                    inputs.insert(
+                        "query".into(),
+                        json!(format!("{}|hook", model_inputs["query"].as_str().unwrap())),
+                    );
+                    HookOutput::Tool {
+                        model_inputs: inputs,
+                        deny: None,
+                    }
+                }
+                HookInput::AfterTool { status, effect, .. } => {
+                    assert_eq!(*status, ToolResultStatus::Succeeded);
+                    assert_eq!(*effect, ToolEffect::NotApplied);
+                    HookOutput::Observed {}
+                }
+                HookInput::AfterRun { status, .. } => {
+                    assert_eq!(*status, RunStatus::Succeeded);
+                    HookOutput::Observed {}
+                }
+            })
+        })
+    }
+}
+
 struct TemporaryDatabase(std::path::PathBuf);
 impl Drop for TemporaryDatabase {
     fn drop(&mut self) {
@@ -377,7 +459,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         user_id: None,
     };
     let temporary = TemporaryDatabase(
-        std::env::temp_dir().join(format!("wickle-tool-loop-{}", RandomIdSource.next_id()?)),
+        std::env::temp_dir().join(format!("wickle-hooks-{}", RandomIdSource.next_id()?)),
     );
     std::fs::create_dir(&temporary.0)?;
     let database = temporary.0.join("state.sqlite3");
@@ -403,12 +485,46 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "schema_version":"wickle.agent-profile.v1","agent_id":"assistant","version":"1",
         "name":"Assistant","description":"Synthetic tool loop consumer","instructions":{"text":"Search then summarize the observations"},
         "model_binding":"primary","tools":[{"tool_id":"search","version":"1"}],"skills":[],"connectors":[],
+        "hooks":[{"hook_id":"run-data","version":"1","position":"before_run"},{"hook_id":"step-data","version":"1","position":"before_model"},{"hook_id":"normalize","version":"1","position":"before_tool"},{"hook_id":"tool-observer","version":"1","position":"after_tool"},{"hook_id":"run-observer","version":"1","position":"after_run"}],
         "context_policy":{"strategy":"bounded"},"output_contract":{"type":"text"},
         "limits":{"max_model_calls":4,"max_tool_attempts":2,"max_repair_attempts":0,"max_recovery_attempts":0,"max_elapsed_ms":30000}
     }"#,
     )?;
+    let hook = Arc::new(Hooks {
+        calls: AtomicUsize::new(0),
+    });
     let make_agent = |store: Arc<SqliteStateStore>| -> Result<Agent, ContractError> {
         let (system_inputs, tools) = registry(&scope, search.clone())?;
+        let registry = HookRegistry::new(
+            scope.clone(),
+            [
+                ("run-data", HookPosition::BeforeRun),
+                ("step-data", HookPosition::BeforeModel),
+                ("normalize", HookPosition::BeforeTool),
+                ("tool-observer", HookPosition::AfterTool),
+                ("run-observer", HookPosition::AfterRun),
+            ]
+            .into_iter()
+            .map(|(name, position)| HookRegistration {
+                definition: HookDefinition {
+                    hook: reference(name),
+                    position,
+                    priority: 0,
+                    required: true,
+                    timeout_ms: 1000,
+                    max_output_bytes: 4096,
+                },
+                handler: hook.clone(),
+            })
+            .collect(),
+        )?;
+        let runtime = Arc::new(HookRuntime::new(
+            store.clone(),
+            policy.clone(),
+            Arc::new(SystemClock::new()),
+            Arc::new(RandomIdSource),
+            Arc::new(registry),
+        ));
         create_agent(
             profile.clone(),
             AgentBindings {
@@ -421,7 +537,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 host_instructions: vec!["Use only the authorized workspace.".into()],
                 system_inputs,
                 tools: Some(Arc::new(tools)),
-                system_input_resolver: None, external_receipt_verifier: None, hooks: None,
+                system_input_resolver: None,
+                external_receipt_verifier: None,
+                hooks: Some(runtime),
                 clock: Arc::new(SystemClock::new()),
                 ids: Arc::new(RandomIdSource),
                 token_estimator: Arc::new(Estimate),
@@ -456,6 +574,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let store = Arc::new(SqliteStateStore::open(&database)?);
     let agent = make_agent(store.clone())?;
     assert_eq!(model.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(hook.calls.load(Ordering::SeqCst), 0);
     assert!(search.arguments.lock().unwrap().is_empty());
     let handle = completed(agent.start(request.clone(), context.clone()).await?)?;
     let run_id = handle.run_id().clone();
@@ -495,7 +614,41 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         events.last().ok_or("missing terminal event")?.event_type,
         "run.finished"
     );
+    let saved_before_reports = store.load(&scope, &run_id).await?;
+    let reports = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let view = completed(handle.hook_observations(&context).await?)?;
+            if let Some(error) = view.local_error {
+                return Err::<_, Box<dyn std::error::Error>>(Box::new(error));
+            }
+            if view.reports.len() == 3 {
+                return Ok(view.reports);
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await??;
+    assert!(
+        reports
+            .iter()
+            .all(|report| report.status == HookObservationStatus::Completed)
+    );
     let saved = store.load(&scope, &run_id).await?;
+    assert_eq!(saved.snapshot, saved_before_reports.snapshot);
+    assert_eq!(saved.snapshot.hook_applications.len(), 5);
+    for application in &saved.snapshot.hook_applications {
+        let record = store.read_record(&scope, &application.result_ref).await?;
+        let result: HookApplicationRecord = serde_json::from_value(record.value().clone())?;
+        assert_eq!(result.hook, application.hook);
+        assert!(result.failure.is_none());
+        assert!(
+            result
+                .context_items
+                .iter()
+                .all(|item| item.origin == ContextOrigin::Hook && item.scope == scope)
+        );
+    }
+    assert_eq!(hook.calls.load(Ordering::SeqCst), 8);
     assert_eq!(
         saved.snapshot.tool_ledger[0].call.model_inputs,
         object(json!({"query":"alpha"}))
@@ -515,6 +668,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(restored.snapshot.outcome, Some(outcome.clone()));
     assert_eq!(restored.snapshot.tool_ledger, saved.snapshot.tool_ledger);
     assert!(restored.session.active_run_id.is_none());
+    assert_eq!(
+        reopened.read_hook_observations(&scope, &run_id).await?,
+        reports
+    );
     let resolver_calls = catalog.calls.load(Ordering::SeqCst);
     let replay_agent = make_agent(reopened)?;
     let replay = completed(replay_agent.start(request, context.clone()).await?)?;
@@ -523,8 +680,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(model.calls.load(Ordering::SeqCst), 2);
     assert_eq!(search.arguments.lock().unwrap().len(), 2);
     assert_eq!(catalog.calls.load(Ordering::SeqCst), resolver_calls);
+    assert_eq!(hook.calls.load(Ordering::SeqCst), 8);
     println!(
-        "tool loop consumer: two serial calls with system UUID binding and model-only arguments; final model response; SQLite reopen and request replay without additional model, tool, or resolver calls"
+        "hooks consumer: core-stamped Run/step context; original/effective tool arguments; committed tool/Run reports; real SQLite reopen and replay without repeated model/tool/hooks (synthetic Host, no provider network)"
     );
     Ok(())
 }

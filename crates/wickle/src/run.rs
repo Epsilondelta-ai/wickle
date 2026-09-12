@@ -644,6 +644,16 @@ pub struct RunSnapshot {
     /// Append-only resume acceptances and prior segment outcomes.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub resume_receipts: Vec<ResumeReceipt>,
+    /// Exact selected lifecycle definitions pinned before any hook executes.
+    #[serde(
+        default,
+        deserialize_with = "optional",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub hook_plan_ref: Option<RecordRef>,
+    /// Applied lifecycle transformations, preserved in their invocation order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hook_applications: Vec<crate::HookApplication>,
     /// Physical model attempt records.
     pub model_ledger: Vec<ModelInvocationRecord>,
     /// Saved tool plans and states.

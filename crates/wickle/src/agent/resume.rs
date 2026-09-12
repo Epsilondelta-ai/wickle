@@ -80,15 +80,17 @@ impl Agent {
         };
         let result = self.resume_owned(&command, &context, &lease).await;
         match result {
-            Ok((receipt, prompt, true)) => Ok(Guarded::Completed(self.launch_resumed(
-                command.run_id,
-                receipt.accepted_revision,
-                prompt,
-                context,
-                lease,
-                receipt.expired,
-            )?)),
-            Ok((receipt, _, false)) => {
+            Ok((receipt, prompt, true, observer_error)) => {
+                Ok(Guarded::Completed(self.launch_resumed(
+                    command.run_id,
+                    &receipt,
+                    prompt,
+                    context,
+                    lease,
+                    observer_error,
+                )?))
+            }
+            Ok((receipt, _, false, _)) => {
                 self.release_owned(&command.run_id, &lease).await;
                 Ok(Guarded::Completed(
                     self.handle(command.run_id, receipt.accepted_revision)?,
@@ -106,7 +108,7 @@ impl Agent {
         command: &ResumeCommand,
         context: &ExecutionContext,
         lease: &RunLease,
-    ) -> Result<(ResumeReceipt, PromptSnapshot, bool), ContractError> {
+    ) -> Result<(ResumeReceipt, PromptSnapshot, bool, Option<ContractError>), ContractError> {
         let bindings = &self.inner.bindings;
         let saved = self
             .resume_read(
@@ -116,7 +118,7 @@ impl Agent {
             .await?;
         let prompt = self.restore_resume_runtime(&saved, context).await?;
         if let Some(receipt) = accepted(&saved.snapshot, command)? {
-            return Ok((receipt.clone(), prompt, false));
+            return Ok((receipt.clone(), prompt, false, None));
         }
         validate_wait(&saved.snapshot, command)?;
         self.resume_inputs(&saved.snapshot, context).await?;
@@ -317,6 +319,19 @@ impl Agent {
         let mut messages = vec![];
         let mut events = vec![];
         let mut snapshot = saved.snapshot;
+        let observation = prepared.as_ref().and_then(|prepared| {
+            if let RunEventPayload::ToolSettled { result_ref } = &prepared.event.payload {
+                Some((
+                    HookTarget::AfterTool {
+                        call_id: prepared.result.call_id.clone(),
+                        result_ref: result_ref.clone(),
+                    },
+                    HookInput::tool_observed(&prepared.result.call_id, &prepared.result),
+                ))
+            } else {
+                None
+            }
+        });
         if let Some(prepared) = prepared {
             apply_resolution(
                 &mut snapshot,
@@ -385,11 +400,23 @@ impl Agent {
                 .load(&bindings.scope, &command.run_id)
                 .await?;
             if accepted(&latest.snapshot, command)?.is_some_and(|saved| saved == &receipt) {
-                return Ok((receipt, prompt, true));
+                let observer_error = if let Some((target, input)) = observation {
+                    self.after_tool(&command.run_id, target, input, context)
+                        .await
+                } else {
+                    None
+                };
+                return Ok((receipt, prompt, true, observer_error));
             }
             return Err(error);
         }
-        Ok((receipt, prompt, true))
+        let observer_error = if let Some((target, input)) = observation {
+            self.after_tool(&command.run_id, target, input, context)
+                .await
+        } else {
+            None
+        };
+        Ok((receipt, prompt, true, observer_error))
     }
 
     async fn authorize_resume(
@@ -513,6 +540,17 @@ impl Agent {
                 ErrorCode::ModelRoutingMismatch,
                 "agent.pinned_routing",
             ));
+        }
+        match (&saved.snapshot.hook_plan_ref, &bindings.hooks) {
+            (Some(reference), Some(hooks))
+                if hooks.plan(saved.snapshot.profile.profile())?.digest() == reference.digest => {}
+            (None, None) => {}
+            (None, Some(hooks))
+                if hooks
+                    .plan(saved.snapshot.profile.profile())?
+                    .definitions()
+                    .is_empty() => {}
+            _ => return Err(fail(ErrorCode::ContextMismatch, "agent.pinned_hooks")),
         }
         Ok(prompt)
     }
@@ -649,13 +687,16 @@ impl Agent {
     fn launch_resumed(
         &self,
         run_id: Id,
-        segment_start_revision: u64,
+        receipt: &ResumeReceipt,
         prompt: PromptSnapshot,
         context: ExecutionContext,
         lease: RunLease,
-        expired: bool,
+        observer_error: Option<ContractError>,
     ) -> Result<RunHandle, ContractError> {
+        let segment_start_revision = receipt.accepted_revision;
+        let expired = receipt.expired;
         let local = Arc::new(LocalRun::new(segment_start_revision));
+        self.remember_observer_error(&local, observer_error);
         self.inner
             .runs
             .lock()
@@ -683,7 +724,11 @@ impl Agent {
                 Ok(Err(error)) => Some(fail(error.code, "agent.driver")),
                 Err(_) => Some(fail(ErrorCode::InvalidContract, "agent.driver")),
             };
-            let completed = error.is_none();
+            let completed = error.is_none()
+                && driver_local
+                    .observer_error
+                    .lock()
+                    .is_ok_and(|error| error.is_none());
             if let Ok(mut slot) = driver_local.error.lock() {
                 *slot = error;
             }
@@ -782,6 +827,7 @@ impl Agent {
             let mut messages = vec![];
             let mut events = vec![];
             let mut records = vec![];
+            let mut observations = vec![];
             let calls: Vec<_> = saved
                 .snapshot
                 .tool_ledger
@@ -805,6 +851,15 @@ impl Agent {
                     Id::new("cancelled")?,
                     now,
                 )?;
+                if let RunEventPayload::ToolSettled { result_ref } = &prepared.event.payload {
+                    observations.push((
+                        HookTarget::AfterTool {
+                            call_id: prepared.result.call_id.clone(),
+                            result_ref: result_ref.clone(),
+                        },
+                        HookInput::tool_observed(&prepared.result.call_id, &prepared.result),
+                    ));
+                }
                 saved.session.transcript_revision += 1;
                 saved.messages.push(prepared.message.clone());
                 apply_resolution(
@@ -891,11 +946,31 @@ impl Agent {
                     .await?
                     .snapshot
                     .status
-                    == RunStatus::Cancelled
+                    != RunStatus::Cancelled
                 {
-                    return Ok(CancelReceipt::Requested);
+                    return Err(error);
                 }
-                return Err(error);
+            }
+            let saved = bindings.state.load(&bindings.scope, &run_id).await?;
+            let local = Arc::new(LocalRun::new(segment_revision(&saved.snapshot)));
+            for (target, input) in observations {
+                self.remember_observer_error(
+                    &local,
+                    self.after_tool(&run_id, target, input, &context).await,
+                );
+            }
+            self.after_run(&saved, &context, &local).await;
+            local.done.store(true, Ordering::Release);
+            if local
+                .observer_error
+                .lock()
+                .is_ok_and(|error| error.is_some())
+            {
+                self.inner
+                    .runs
+                    .lock()
+                    .map_err(|_| fail(ErrorCode::InvalidContract, "agent.observer_state"))?
+                    .insert(run_id.clone(), local);
             }
             Ok(CancelReceipt::Requested)
         }

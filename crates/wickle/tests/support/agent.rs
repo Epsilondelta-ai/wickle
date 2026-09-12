@@ -660,6 +660,7 @@ impl Fixture {
             tools: None,
             system_input_resolver: None,
             external_receipt_verifier: None,
+            hooks: None,
             token_estimator: self.estimator.clone(),
             settings: AgentSettings {
                 observer_poll_ms: 1,

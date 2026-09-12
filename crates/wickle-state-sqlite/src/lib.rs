@@ -388,6 +388,27 @@ impl StateStore for SqliteStateStore {
             runtime.block_on(state.read_record(scope, &reference))
         })
     }
+    fn record_hook_observation<'a>(
+        &'a self,
+        scope: &'a Scope,
+        run_id: &'a Id,
+        report: wickle::HookObservation,
+    ) -> PortFuture<'a, ()> {
+        let run_id = run_id.clone();
+        self.transact(scope, true, move |state, scope, runtime| {
+            runtime.block_on(state.record_hook_observation(scope, &run_id, report))
+        })
+    }
+    fn read_hook_observations<'a>(
+        &'a self,
+        scope: &'a Scope,
+        run_id: &'a Id,
+    ) -> PortFuture<'a, Vec<wickle::HookObservation>> {
+        let run_id = run_id.clone();
+        self.transact(scope, false, move |state, scope, runtime| {
+            runtime.block_on(state.read_hook_observations(scope, &run_id))
+        })
+    }
 }
 
 fn check_engine() -> Result<(), ContractError> {

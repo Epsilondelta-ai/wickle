@@ -31,6 +31,8 @@ struct CheckpointView<'a> {
     sessions: Vec<SessionView<'a>>,
     runs: Vec<RunView<'a>>,
     records: Vec<RecordView<'a>>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    hook_observations: Vec<&'a crate::HookObservation>,
 }
 #[derive(Serialize)]
 struct SessionView<'a> {
@@ -84,6 +86,7 @@ impl Serialize for StateStoreCheckpoint {
                     value: record.value(),
                 })
                 .collect(),
+            hook_observations: self.state.hook_observations.values().flatten().collect(),
         }
         .serialize(serializer)
     }
@@ -97,6 +100,8 @@ struct CheckpointData {
     sessions: Vec<SessionData>,
     runs: Vec<RunData>,
     records: Vec<RecordData>,
+    #[serde(default)]
+    hook_observations: Vec<crate::HookObservation>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -385,6 +390,20 @@ fn restore_graph(data: CheckpointData) -> Result<StateStoreCheckpoint, ContractE
     for run in state.runs.values() {
         validate_snapshot_refs(&state, &empty, &run.snapshot)?;
         validate_history(&state, run, &mut event_ids)?;
+    }
+    for report in data.hook_observations {
+        validate_hook_observation(&state, &data.scope, &report.run_id, &report)?;
+        let reports = state
+            .hook_observations
+            .entry(report.run_id.clone())
+            .or_default();
+        if reports
+            .iter()
+            .any(|existing| existing.hook == report.hook && existing.target == report.target)
+        {
+            return Err(invalid("checkpoint.hook_observation_duplicate"));
+        }
+        reports.push(report);
     }
     state.message_ids = message_ids;
     state.event_ids = event_ids;

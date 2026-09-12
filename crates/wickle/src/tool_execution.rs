@@ -320,6 +320,8 @@ pub struct SerialToolRound {
     policy: Arc<PolicyGate>,
     ids: Arc<dyn IdSource>,
     limits: ToolExecutionLimits,
+    hooks: Option<Arc<HookRuntime>>,
+    observer_error: std::sync::Mutex<Option<ContractError>>,
 }
 impl SerialToolRound {
     /// Inject existing bindings; no tool is run or looked up externally here.
@@ -335,6 +337,8 @@ impl SerialToolRound {
             policy,
             ids,
             limits: ToolExecutionLimits::default(),
+            hooks: None,
+            observer_error: std::sync::Mutex::new(None),
         }
     }
     /// Require finite nonzero timeout and receipt limits.
@@ -345,6 +349,18 @@ impl SerialToolRound {
         }
         self.limits = limits;
         Ok(self)
+    }
+    /// Connect the pinned lifecycle runtime without running a callback.
+    pub fn with_hooks(mut self, hooks: Arc<HookRuntime>) -> Self {
+        self.hooks = Some(hooks);
+        self
+    }
+    /// A local observer-report persistence error, separate from Tool execution.
+    pub fn observer_error(&self) -> Option<ContractError> {
+        self.observer_error
+            .lock()
+            .ok()
+            .and_then(|error| error.clone())
     }
 }
 fn error(code: ErrorCode, path: &str) -> ContractError {

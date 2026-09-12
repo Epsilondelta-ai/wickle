@@ -138,7 +138,11 @@ impl Agent {
                 Ok(Err(error)) => Some(fail(error.code, "agent.driver")),
                 Err(_) => Some(fail(ErrorCode::InvalidContract, "agent.driver")),
             };
-            let completed = error.is_none();
+            let completed = error.is_none()
+                && driver_local
+                    .observer_error
+                    .lock()
+                    .is_ok_and(|error| error.is_none());
             if let Ok(mut saved) = driver_local.error.lock() {
                 *saved = error;
             }
@@ -299,6 +303,19 @@ impl Agent {
                 .map_err(|_| fail(ErrorCode::InvalidJson, "agent.routing"))?,
         );
         let run_id = bindings.ids.next_id()?;
+        let hook_record = bindings
+            .hooks
+            .as_ref()
+            .map(|hooks| {
+                let plan = hooks.plan(profile.profile())?;
+                Ok::<_, ContractError>(ProtectedRecord::new(
+                    bindings.ids.next_id()?,
+                    1,
+                    serde_json::to_value(&plan)
+                        .map_err(|_| fail(ErrorCode::InvalidJson, "agent.hooks"))?,
+                ))
+            })
+            .transpose()?;
         let now = bindings.clock.now()?.utc_ms;
         let snapshot = RunSnapshot {
             schema_version: RunSnapshotSchemaVersion::V1,
@@ -325,6 +342,10 @@ impl Agent {
             source_states: vec![],
             revision: 0,
             resume_receipts: vec![],
+            hook_plan_ref: hook_record
+                .as_ref()
+                .map(|record| record.reference().clone()),
+            hook_applications: vec![],
             last_event_seq: 1,
         };
         let message = Message {
@@ -362,7 +383,11 @@ impl Agent {
                 require_durable: bindings.settings.require_durable,
                 messages: vec![message],
                 events: vec![event],
-                records: vec![request_record, prompt_record, inputs_record, routing_record],
+                records: [
+                    vec![request_record, prompt_record, inputs_record, routing_record],
+                    hook_record.into_iter().collect(),
+                ]
+                .concat(),
             },
             prompt,
         ))
