@@ -1,8 +1,8 @@
 //! Wickle, an agent engine for Rust applications.
 //!
 //! Profiles, scoped metadata resolution, and versioned execution data contracts.
-//! Model calls use scoped ports and persisted attempt accounting. Tool dispatch
-//! and the agent driver are not implemented yet.
+//! The agent driver runs model/tool loops with scoped ports, separate system
+//! inputs, persisted attempt accounting, and explicit effect outcomes.
 //!
 //! Runtime objects stay in Host code. Only documented data contracts are
 //! serialized; successful decoding does not authenticate a caller.
@@ -32,6 +32,7 @@ mod resolution;
 mod run;
 mod serialization;
 mod state;
+mod tool_execution;
 mod tool_schema;
 mod views;
 
@@ -74,6 +75,10 @@ pub use state::{
     AdmissionInput, AdmissionResult, CommitInput, EventPage, MAX_EVENT_PAGE_SIZE, MemoryStateStore,
     ProtectedRecord, RunLease, STATE_STORE_CHECKPOINT_VERSION, StateStore, StateStoreCapabilities,
     StateStoreCheckpoint, StoredRun,
+};
+pub use tool_execution::{
+    SerialToolRound, ToolEffect, ToolExecutionContext, ToolExecutionLimits, ToolExecutionOutcome,
+    ToolExecutionResult, ToolExecutor, ToolRegistration, ToolRegistry, ToolRoundOutcome,
 };
 pub use tool_schema::{
     CompiledTool, SchemaCompiler, SystemInputDefinition, SystemInputRegistry, SystemInputSource,

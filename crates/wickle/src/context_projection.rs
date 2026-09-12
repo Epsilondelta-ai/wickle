@@ -909,8 +909,9 @@ fn project_transcript(
                             .tools
                             .iter()
                             .find(|tool| tool.model_tool.name == call.tool_name);
-                        if tool.is_some_and(|tool| tool.descriptor_digest != call.descriptor_digest)
-                        {
+                        if tool.is_some_and(|tool| {
+                            Some(&tool.descriptor_digest) != call.descriptor_digest.as_ref()
+                        }) {
                             return Err(mismatch("transcript.descriptor"));
                         }
                         pending.insert(
@@ -945,7 +946,9 @@ fn project_transcript(
                         {
                             return Err(invalid("transcript.tool_pair"));
                         }
-                        if result.status == ToolResultStatus::Unknown {
+                        if result.status == ToolResultStatus::Unknown
+                            || result.effect == crate::ToolEffect::Unknown
+                        {
                             if !is_visible {
                                 return Err(invalid("transcript.hidden_unknown_effect"));
                             }
@@ -957,7 +960,7 @@ fn project_transcript(
                                 .iter()
                                 .map(|item| safe_value(item, input.scope))
                                 .collect::<Result<Vec<_>, _>>()?;
-                            let mut value = json!({"status":result.status,"content":values});
+                            let mut value = json!({"status":result.status,"effect":result.effect,"content":values});
                             if let Some(failure) = &result.error {
                                 value["error"] = json!({"code":failure.code});
                             }

@@ -759,7 +759,7 @@ async fn checkpoint() -> RunSnapshot {
                 provider_call_id: id("provider-call"),
                 tool_name: id("documents_search"),
                 model_inputs: BTreeMap::from([("query".into(), json!("evidence"))]),
-                descriptor_digest: digest("descriptor"),
+                descriptor_digest: Some(digest("descriptor")),
                 bound_input_ref: Some(record("bound-inputs")),
             },
             state: ToolCallState::Planned {},
@@ -874,6 +874,14 @@ async fn checkpoint_rejects_inconsistent_state_budget_inputs_and_dispatch_record
         attempt_id: id("attempt"),
         idempotency_key: id("effect"),
     };
+    malformed.reservations.push(AttemptReservation {
+        attempt_id: id("attempt"),
+        kind: ReservationKind::Tool {
+            call_id: id("call"),
+        },
+        reserved_at_ms: 0,
+    });
+    malformed.usage.tool_attempts += 1;
     assert_eq!(
         malformed.validate().unwrap_err().path,
         "tool_ledger.bound_input_ref"
@@ -891,6 +899,95 @@ async fn checkpoint_rejects_inconsistent_state_budget_inputs_and_dispatch_record
             .unwrap_err()
             .code,
         ErrorCode::UnsupportedSchemaVersion
+    );
+}
+
+#[tokio::test]
+async fn dispatched_and_approval_pending_tools_require_their_own_saved_reservation() {
+    for state in [
+        ToolCallState::Dispatching {
+            attempt_id: id("attempt"),
+            idempotency_key: id("effect"),
+        },
+        ToolCallState::ApprovalPending {
+            attempt_id: id("attempt"),
+            idempotency_key: id("effect"),
+        },
+        ToolCallState::Unknown {
+            attempt_id: id("attempt"),
+            idempotency_key: id("effect"),
+        },
+    ] {
+        let mut snapshot = checkpoint().await;
+        snapshot.tool_ledger[0].state = state;
+        assert_eq!(
+            snapshot.validate().unwrap_err().path,
+            "tool_ledger.reservation"
+        );
+        snapshot.reservations.push(AttemptReservation {
+            attempt_id: id("attempt"),
+            kind: ReservationKind::Tool {
+                call_id: id("different-call"),
+            },
+            reserved_at_ms: 0,
+        });
+        snapshot.usage.tool_attempts += 1;
+        assert_eq!(
+            snapshot.validate().unwrap_err().path,
+            "tool_ledger.reservation"
+        );
+        snapshot.reservations.last_mut().unwrap().kind = ReservationKind::Tool {
+            call_id: id("call"),
+        };
+        snapshot.validate().unwrap();
+        snapshot.tool_ledger[0].call.descriptor_digest = None;
+        assert_eq!(
+            snapshot.validate().unwrap_err().path,
+            "tool_ledger.unregistered"
+        );
+    }
+}
+
+#[tokio::test]
+async fn an_unregistered_tool_can_only_be_planned_or_settled_without_an_effect() {
+    let mut snapshot = checkpoint().await;
+    snapshot.tool_ledger[0].call.descriptor_digest = None;
+    snapshot.tool_ledger[0].call.bound_input_ref = None;
+    snapshot.validate().unwrap();
+    let result = ToolResult {
+        call_id: id("call"),
+        call_message_id: id("original-assistant"),
+        status: ToolResultStatus::Failed,
+        effect: ToolEffect::NotApplied,
+        content: vec![],
+        error: None,
+        effect_receipt_ref: None,
+    };
+    snapshot.tool_ledger[0].state = ToolCallState::Settled {
+        result: result.clone(),
+    };
+    snapshot.validate().unwrap();
+    for effect in [ToolEffect::Applied, ToolEffect::Unknown] {
+        snapshot.tool_ledger[0].state = ToolCallState::Settled {
+            result: ToolResult {
+                effect,
+                ..result.clone()
+            },
+        };
+        assert_eq!(
+            snapshot.validate().unwrap_err().path,
+            "tool_ledger.unregistered"
+        );
+    }
+    snapshot.tool_ledger[0].state = ToolCallState::Settled {
+        result: ToolResult {
+            status: ToolResultStatus::Succeeded,
+            ..result
+        },
+    };
+    assert_eq!(
+        snapshot.validate().unwrap_err().path,
+        "tool_ledger.unregistered"
     );
 }
 
@@ -922,6 +1019,7 @@ async fn success_requires_a_matching_completion_basis_and_verified_success_requi
             call_id: id("call"),
             call_message_id: id("call-message"),
             status: ToolResultStatus::Succeeded,
+            effect: ToolEffect::NotApplied,
             content: vec![InputContent::Text {
                 text: "Evidence found".into(),
             }],

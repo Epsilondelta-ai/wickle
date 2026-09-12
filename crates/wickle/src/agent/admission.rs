@@ -205,6 +205,12 @@ impl Agent {
         let profile = ProfileValidator::new(bindings.profile_resolver.as_ref())
             .validate(&self.inner.profile, &bindings.scope)
             .await?;
+        let tool_bindings = bindings
+            .tools
+            .as_ref()
+            .map(|tools| tools.prompt_bindings(profile.profile()))
+            .transpose()?
+            .unwrap_or_default();
         let session = match bindings
             .state
             .load_session(&bindings.scope, &request.session_id)
@@ -238,7 +244,7 @@ impl Agent {
                 &profile,
                 bindings.host_instructions.clone(),
                 None,
-                vec![],
+                tool_bindings.clone(),
                 vec![],
             )?;
             let record = ProtectedRecord::new(
@@ -249,6 +255,20 @@ impl Agent {
             );
             (prompt, record, 1)
         };
+        if prompt.tools().len() != tool_bindings.len()
+            || prompt
+                .tools()
+                .iter()
+                .zip(&tool_bindings)
+                .any(|(pinned, binding)| {
+                    pinned.selection != binding.selection
+                        || pinned.compiled_digest != *binding.compiled.digest()
+                        || pinned.descriptor_digest != *binding.compiled.descriptor_digest()
+                        || pinned.model_tool != binding.compiled.to_model_tool()
+                })
+        {
+            return Err(fail(ErrorCode::ContextMismatch, "agent.pinned_tools"));
+        }
         let inputs = RunSystemInputs::capture(
             bindings.scope.clone(),
             context.data.system_inputs.clone(),

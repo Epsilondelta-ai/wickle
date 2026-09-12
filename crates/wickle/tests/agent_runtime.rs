@@ -627,17 +627,22 @@ async fn concurrent_duplicate_starts_share_one_run_and_one_model_attempt() {
 }
 
 #[tokio::test]
-async fn adapter_panic_and_unexpected_tool_proposals_are_saved_as_failure_without_an_extra_attempt()
-{
-    for response in [Response::Panic, Response::Tool] {
+async fn adapter_panic_fails_and_repeated_unknown_tools_exhaust_without_tool_dispatch() {
+    for (response, expected_status, expected_calls) in [
+        (Response::Panic, RunStatus::Failed, 1),
+        (Response::Tool, RunStatus::Exhausted, 4),
+    ] {
         let fixture = Fixture::new(response, false);
         let agent = fixture.agent();
         let handle = fixture.started(&agent, "request").await;
         let outcome = completed(handle.outcome(&context()).await.unwrap());
-        assert_eq!(outcome.result.status(), RunStatus::Failed);
-        assert_eq!(outcome.usage.model_calls, 1);
+        assert_eq!(outcome.result.status(), expected_status);
+        assert_eq!(outcome.usage.model_calls, expected_calls);
         assert_eq!(outcome.usage.tool_attempts, 0);
-        assert_eq!(fixture.model.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            fixture.model.calls.load(Ordering::SeqCst),
+            expected_calls as usize
+        );
         assert!(
             fixture
                 .store

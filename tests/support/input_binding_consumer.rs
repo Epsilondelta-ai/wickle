@@ -136,7 +136,7 @@ async fn plan(
         provider_call_id: id(&format!("provider-{call_id}")),
         tool_name: compiled.descriptor().name.clone(),
         model_inputs,
-        descriptor_digest: compiled.descriptor_digest().clone(),
+        descriptor_digest: Some(compiled.descriptor_digest().clone()),
         bound_input_ref: None,
     };
     snapshot.tool_ledger.push(ToolLedgerEntry {

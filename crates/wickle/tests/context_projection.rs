@@ -344,13 +344,14 @@ fn round(run: &str, sequence: u64, label: &str, body: &str, tool: &CompiledTool)
         provider_call_id: id(&format!("provider-{label}")),
         tool_name: id("search"),
         model_inputs: object(json!({"query":label})),
-        descriptor_digest: tool.descriptor_digest().clone(),
+        descriptor_digest: Some(tool.descriptor_digest().clone()),
         bound_input_ref: Some(record("bound-private-input")),
     };
     let result = ToolResult {
         call_id: call.call_id.clone(),
         call_message_id: call_message,
         status: ToolResultStatus::Failed,
+        effect: ToolEffect::NotApplied,
         content: vec![InputContent::Text { text: body.into() }],
         effect_receipt_ref: Some(record("private-effect-receipt")),
         error: Some(Failure {
@@ -554,7 +555,7 @@ async fn tool_projection_keeps_model_arguments_and_public_observations_without_e
     assert_eq!(result.0, &id("provider-call"));
     assert_eq!(
         result.1,
-        &json!({"status":"failed","content":[{"type":"text","text":"public observation"}],"error":{"code":"unavailable"}})
+        &json!({"status":"failed","effect":"not_applied","content":[{"type":"text","text":"public observation"}],"error":{"code":"unavailable"}})
     );
     assert_eq!(projected.request.messages.len(), 6);
     assert_eq!(
@@ -1175,6 +1176,7 @@ async fn an_older_unknown_effect_is_not_dropped_when_a_newer_round_exists() {
         unreachable!()
     };
     result.status = ToolResultStatus::Unknown;
+    result.effect = ToolEffect::Unknown;
     transcript.extend(uncertain);
     transcript.push(message(
         "unknown-run",

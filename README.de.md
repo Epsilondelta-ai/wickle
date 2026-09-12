@@ -12,4 +12,4 @@ Wickle ist eine Agenten-Engine, die EpsilonDelta in Rust entwickelt. Ziel ist ei
 
 Der Entwurf verwendet Agentenprofile (Agent Profiles) zur Konfiguration des Agentenverhaltens und Adapter zur Anbindung verschiedener Modelle und Werkzeuge.
 
-**Status:** In Entwicklung. Textagenten können Anfragen ausführen, Ergebnisse speichern, Ereignisse erneut abrufen und Ausführungen ausdrücklich abbrechen. Werkzeugausführung und weitere Laufzeiterweiterungen werden noch entwickelt. [Agenten ausführen](docs/agents.md) · [Datenverträge](docs/contracts.md).
+**Status:** In Entwicklung. Agenten unterstützen sequenzielle Schleifen aus Modell- und Werkzeugaufrufen, gespeicherte Ergebnisse, Ereigniswiedergabe und ausdrücklichen Abbruch. Registrierte `ToolExecutor`-Implementierungen erhalten validierte Modelleingaben, die mit separat vom Host verwalteten `SystemInputs` zusammengeführt werden. Bei erforderlicher Genehmigung oder unklarer Wirkung eines Schreibvorgangs stoppt die Ausführung in `Waiting`; `resume` wird noch nicht unterstützt. [Agenten ausführen](docs/agents.md) · [Datenverträge](docs/contracts.md).

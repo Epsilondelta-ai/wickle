@@ -518,7 +518,7 @@ impl BoundToolInput {
         if self.scope() != scope
             || self.run_id() != run_id
             || self.call_id() != &call.call_id
-            || self.descriptor_digest() != &call.descriptor_digest
+            || Some(self.descriptor_digest()) != call.descriptor_digest.as_ref()
             || self.original_model_inputs() != &call.model_inputs
             || self.data.run_inputs_ref.as_ref() != run_inputs_ref
         {
@@ -980,7 +980,7 @@ fn check_selection(
     compiled: &CompiledTool,
     call: &ToolCall,
 ) -> Result<(), ContractError> {
-    if call.descriptor_digest != *compiled.descriptor_digest()
+    if call.descriptor_digest.as_ref() != Some(compiled.descriptor_digest())
         || !snapshot
             .profile
             .profile()

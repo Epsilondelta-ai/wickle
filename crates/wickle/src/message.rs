@@ -91,8 +91,13 @@ pub struct ToolCall {
     pub tool_name: Id,
     /// Original model-supplied inputs, never replaced with execution_args.
     pub model_inputs: JsonObject,
-    /// Pinned descriptor identity.
-    pub descriptor_digest: JsonDigest,
+    /// Pinned descriptor identity. None means the name was unregistered when planned.
+    #[serde(
+        default,
+        deserialize_with = "optional",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub descriptor_digest: Option<JsonDigest>,
     /// Protected bound-input record, once binding succeeds.
     #[serde(
         default,
@@ -143,6 +148,10 @@ pub struct ToolResult {
     pub call_message_id: Id,
     /// Explicit execution status.
     pub status: ToolResultStatus,
+    /// Confirmed external effect, separate from validation of the returned value.
+    /// Missing legacy metadata is unknown, never evidence that a write did not occur.
+    #[serde(default)]
+    pub effect: crate::ToolEffect,
     /// Bounded model-visible observations or references.
     pub content: Vec<InputContent>,
     /// Protected receipt, retained even if output processing fails.

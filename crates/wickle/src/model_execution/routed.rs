@@ -96,7 +96,7 @@ impl ModelExchange {
             return Err(failure(ErrorCode::RequestConflict, "routing.model_options"));
         }
         if saved.snapshot.tool_ledger.iter().any(|entry| !matches!(&entry.state,
-            ToolCallState::Settled { result } if result.status != crate::ToolResultStatus::Unknown
+            ToolCallState::Settled { result } if result.status != crate::ToolResultStatus::Unknown && result.effect != crate::ToolEffect::Unknown
         )) {
             return Err(failure(ErrorCode::InvalidTransition, "routing.unsettled_tools"));
         }

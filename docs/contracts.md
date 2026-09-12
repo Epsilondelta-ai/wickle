@@ -1,9 +1,9 @@
 # Data contracts and profile validation
 
 Wickle provides profile validation, scoped state and policy contracts, and a
-bounded model-call boundary. The [text agent runtime](agents.md) connects these
-contracts to Agent and RunHandle. Tool execution and runtime component assembly
-are still being implemented.
+bounded model-call boundary. The [agent runtime](agents.md) connects these
+contracts to Agent and RunHandle, including serial execution of registered tools.
+Dynamic runtime component assembly is still being implemented.
 
 `AgentProfile` contains data and registered references. A `ProfileResolver` is
 Host code that supplies approved metadata for a scope. `ProfileValidator` checks

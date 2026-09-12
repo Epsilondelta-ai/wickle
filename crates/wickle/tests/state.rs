@@ -583,7 +583,7 @@ async fn uncertain_tool_effects_keep_the_original_attempt_and_idempotency_key() 
         provider_call_id: id("provider-call"),
         tool_name: id("tool"),
         model_inputs: Default::default(),
-        descriptor_digest: compiled.descriptor_digest().clone(),
+        descriptor_digest: Some(compiled.descriptor_digest().clone()),
         bound_input_ref: None,
     };
     let call_record =
@@ -658,14 +658,16 @@ async fn uncertain_tool_effects_keep_the_original_attempt_and_idempotency_key() 
         attempt_id: id("attempt-b"),
         idempotency_key: id("different-key"),
     };
-    assert_eq!(
-        store
-            .commit(&scope(), &id("run"), lost)
-            .await
-            .unwrap_err()
-            .code,
-        ErrorCode::InvalidTransition
-    );
+    lost.snapshot.reservations.push(AttemptReservation {
+        attempt_id: id("attempt-b"),
+        kind: ReservationKind::Tool {
+            call_id: id("call"),
+        },
+        reserved_at_ms: lost.snapshot.timing.last_observed_at_ms,
+    });
+    lost.snapshot.usage.tool_attempts += 1;
+    let rejected = store.commit(&scope(), &id("run"), lost).await.unwrap_err();
+    assert_eq!(rejected.code, ErrorCode::InvalidTransition, "{rejected:?}");
     let mut lost = prepared(&dispatched.snapshot, lease, 103);
     lost.snapshot.phase = RunPhase::Tool;
     lost.snapshot.tool_ledger[0].state = ToolCallState::Unknown {

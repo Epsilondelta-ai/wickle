@@ -657,6 +657,8 @@ impl Fixture {
             system_inputs: SystemInputRegistry::new(vec![]).unwrap(),
             clock: self.clock.clone(),
             ids: self.ids.clone(),
+            tools: None,
+            system_input_resolver: None,
             token_estimator: self.estimator.clone(),
             settings: AgentSettings {
                 observer_poll_ms: 1,

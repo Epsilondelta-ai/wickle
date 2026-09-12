@@ -521,7 +521,7 @@ async fn waiting_observation_consumes_time_but_no_model_attempts() {
             provider_call_id: id("provider-call"),
             tool_name: id("read"),
             model_inputs: JsonObject::new(),
-            descriptor_digest: canonical_digest(&serde_json::json!({})),
+            descriptor_digest: Some(canonical_digest(&serde_json::json!({}))),
             bound_input_ref: None,
         },
         state: ToolCallState::Planned {},
