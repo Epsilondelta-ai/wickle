@@ -20,6 +20,7 @@ mod error;
 mod input_binding;
 mod message;
 mod model;
+mod model_catalog;
 mod model_execution;
 mod model_protocol;
 mod policy;
@@ -42,6 +43,11 @@ pub use input_binding::{
     BoundSystemInput, BoundToolInput, InputBinder, InputBindingLimits, ResolvedSystemInput,
     RunSystemInputs, SystemInputResolveContext, SystemInputResolveRequest, SystemInputResolver,
     ToolBindingResult,
+};
+pub use model_catalog::{
+    CatalogRequirements, ModelAlias, ModelBinding, ModelCapabilities, ModelCatalog,
+    ModelCatalogSnapshot, ModelDefinition, ModelDefinitionRef, ModelEvidence, ModelLifecycle,
+    ModelSupportStatus, ModelValidationEvidence, ModelValidationKind, ResolvedCatalogBinding,
 };
 pub use model_protocol::{
     ModelCallContext, ModelContent, ModelEvent, ModelFinish, ModelMessage, ModelOutput, ModelPort,

@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/wickle"]
+members = ["crates/wickle", "crates/wickle-model-router"]
 default-members = ["crates/wickle"]
 resolver = "3"
 
