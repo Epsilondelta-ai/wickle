@@ -12,4 +12,4 @@ Wickle ist eine Agenten-Engine, die EpsilonDelta in Rust entwickelt. Ziel ist ei
 
 Der Entwurf verwendet Agentenprofile (Agent Profiles) zur Konfiguration des Agentenverhaltens und Adapter zur Anbindung verschiedener Modelle und Werkzeuge.
 
-**Status:** In der Entwurfsphase. Eine lauffähige Engine und ein installierbares Paket sind noch nicht verfügbar.
+**Status:** In Entwicklung. Das Crate verfügt derzeit über eine Build- und Testinfrastruktur; die Ausführung von Agenten ist noch nicht implementiert.

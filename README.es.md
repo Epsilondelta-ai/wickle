@@ -12,4 +12,4 @@ Wickle es un motor de agentes que EpsilonDelta está desarrollando en Rust. Su o
 
 Su diseño utiliza perfiles de agente (Agent Profiles) para configurar el comportamiento de los agentes y adaptadores para conectar distintos modelos y herramientas.
 
-**Estado:** En fase de diseño. Todavía no se dispone de un motor ejecutable ni de un paquete instalable.
+**Estado:** En desarrollo. El crate cuenta con infraestructura de compilación y pruebas; la ejecución de agentes aún no está implementada.
