@@ -65,6 +65,8 @@ pub enum ErrorCode {
     UnsupportedInputProjection,
     /// Model-owned or assembled tool arguments do not satisfy their input contract.
     InvalidArguments,
+    /// An external receipt did not establish the tool effect; its saved wait remains.
+    ToolEffectUnresolved,
     /// A supplied system value does not satisfy its registered input contract.
     SystemInputInvalid,
     /// A required registered system value is absent; the model must not invent it.

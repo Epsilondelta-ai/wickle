@@ -111,6 +111,7 @@ fn admission(
         usage: BudgetUsage::default(),
         timing: RunTiming::new(started_at_ms, 10000).unwrap(),
         reservations: vec![],
+        resume_receipts: vec![],
         model_ledger: vec![],
         tool_ledger: vec![],
         system_inputs: None,

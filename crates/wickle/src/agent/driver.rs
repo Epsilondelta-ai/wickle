@@ -21,6 +21,20 @@ impl Agent {
                 bindings.settings.lease_ttl_ms,
             )
             .await?;
+        self.drive_leased(run_id, prompt, context, local, lease, false)
+            .await
+    }
+
+    pub(super) async fn drive_leased(
+        &self,
+        run_id: &Id,
+        prompt: PromptSnapshot,
+        context: ExecutionContext,
+        local: &Arc<LocalRun>,
+        lease: RunLease,
+        expired: bool,
+    ) -> Result<(), ContractError> {
+        let bindings = &self.inner.bindings;
         let budget = Arc::new(
             RunBudget::attach(
                 bindings.state.clone(),
@@ -58,11 +72,31 @@ impl Agent {
             }
             result
         });
-        let result =
-            AssertUnwindSafe(self.run_segment(run_id, prompt, &context, &budget, &lease, local))
-                .catch_unwind()
+        let result = AssertUnwindSafe(async {
+            if expired {
+                self.finish(
+                    run_id,
+                    PreparedOutcome {
+                        result: OutcomeResult::Exhausted {
+                            budget: BudgetKind::Elapsed,
+                        },
+                        output: vec![],
+                        continuation: vec![],
+                        unresolved_effects: vec![],
+                    },
+                    &budget,
+                    &context,
+                    local,
+                )
                 .await
-                .unwrap_or_else(|_| Err(fail(ErrorCode::InvalidContract, "agent.driver")));
+            } else {
+                self.run_segment(run_id, prompt, &context, &budget, &lease, local)
+                    .await
+            }
+        })
+        .catch_unwind()
+        .await
+        .unwrap_or_else(|_| Err(fail(ErrorCode::InvalidContract, "agent.driver")));
         stop.cancel();
         let heartbeat_result = heartbeat
             .await
@@ -137,7 +171,29 @@ impl Agent {
         local: &Arc<LocalRun>,
     ) -> Result<(), ContractError> {
         let mut waiting = None;
+        let saved = self
+            .inner
+            .bindings
+            .state
+            .load(budget.scope(), run_id)
+            .await?;
+        let mut pending_round = saved.snapshot.tool_ledger.iter().find(|entry| !matches!(&entry.state, ToolCallState::Settled { result } if result.status != ToolResultStatus::Unknown && result.effect != ToolEffect::Unknown)).map(|entry| entry.call.model_request_id.clone());
         let attempt = loop {
+            if let Some(request_id) = pending_round.take() {
+                match self
+                    .tool_round(budget)
+                    .await?
+                    .execute(&request_id, context, budget)
+                    .await
+                {
+                    Ok(ToolRoundOutcome::Completed) => {}
+                    Ok(outcome) => {
+                        waiting = Some(self.tool_wait(outcome, budget).await?);
+                        break None;
+                    }
+                    Err(error) => break Some(Err(error)),
+                }
+            }
             match self
                 .generate(run_id, prompt.clone(), context, budget, lease)
                 .await
@@ -148,7 +204,7 @@ impl Agent {
                     if let Err(error) = self.plan_tools(&response, &prompt, budget).await {
                         break Some(Err(error));
                     }
-                    let round = self.tool_round()?;
+                    let round = self.tool_round(budget).await?;
                     match round.execute(&response.request_id, context, budget).await {
                         Ok(ToolRoundOutcome::Completed) => continue,
                         Ok(outcome) => {
@@ -384,13 +440,20 @@ impl Agent {
             mut result,
             mut output,
             continuation,
-            unresolved_effects,
+            mut unresolved_effects,
         } = candidate;
         let bindings = &self.inner.bindings;
         let lease = budget.lease();
         let mut saved = bindings.state.load(&bindings.scope, run_id).await?;
         if saved.snapshot.status.is_terminal() {
             return Ok(());
+        }
+        if unresolved_effects.is_empty() && saved.snapshot.tool_ledger.iter().any(|entry| matches!(entry.state, ToolCallState::Unknown { .. }) || matches!(&entry.state, ToolCallState::Settled { result } if result.effect == ToolEffect::Unknown)) {
+            if let Some(receipt) = saved.snapshot.resume_receipts.last() {
+                let record = bindings.state.read_record(&bindings.scope, &receipt.previous_outcome_ref).await?;
+                let previous: RunOutcome = serde_json::from_value(record.value().clone()).map_err(|_| fail(ErrorCode::InvalidSnapshot, "agent.previous_outcome"))?;
+                unresolved_effects = previous.unresolved_effects;
+            }
         }
         if output.is_empty() && !matches!(result, OutcomeResult::Succeeded { .. }) {
             output = self.saved_partial_output(&saved.snapshot).await?;
@@ -435,7 +498,9 @@ impl Agent {
             ) && saved.snapshot.tool_ledger.iter().any(|entry| {
                 matches!(
                     entry.state,
-                    ToolCallState::Planned {} | ToolCallState::ApprovalPending { .. }
+                    ToolCallState::Planned {}
+                        | ToolCallState::ApprovalPending { .. }
+                        | ToolCallState::InputPending { .. }
                 )
             }) {
                 if cleaned {

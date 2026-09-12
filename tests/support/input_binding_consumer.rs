@@ -253,6 +253,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         usage: BudgetUsage::default(),
         timing: RunTiming::new(now, 30000)?,
         reservations: vec![],
+        resume_receipts: vec![],
         model_ledger: vec![],
         tool_ledger: vec![],
         system_inputs: Some(input_ref.clone()),

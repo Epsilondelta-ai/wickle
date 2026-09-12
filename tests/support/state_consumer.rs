@@ -72,6 +72,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         scope: scope.clone(),
         timing: RunTiming::new(1000, profile.profile().limits.max_elapsed_ms.get()).unwrap(),
         reservations: vec![],
+        resume_receipts: vec![],
         limits: profile.profile().limits.clone(),
         profile,
         status: RunStatus::Running,

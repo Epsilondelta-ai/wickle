@@ -571,6 +571,158 @@ async fn tool_projection_keeps_model_arguments_and_public_observations_without_e
 }
 
 #[tokio::test]
+async fn explicit_unknown_correction_projects_one_confirmed_result_without_changing_history() {
+    let fixture = Fixture::new().await;
+    let mut transcript = vec![fixture.current_message(1)];
+    transcript.extend(round(
+        "current-run",
+        2,
+        "call",
+        "uncertain",
+        &fixture.tools[0],
+    ));
+    let ContentBlock::ToolResult { result } = &mut transcript[2].content[0] else {
+        unreachable!()
+    };
+    result.status = ToolResultStatus::Unknown;
+    result.effect = ToolEffect::Unknown;
+    let prior_digest = canonical_digest(&serde_json::to_value(&*result).unwrap());
+    let confirmed = ToolResult {
+        status: ToolResultStatus::Succeeded,
+        effect: ToolEffect::Applied,
+        content: vec![InputContent::Text {
+            text: "confirmed receipt".into(),
+        }],
+        error: None,
+        ..result.clone()
+    };
+    transcript.push(message(
+        "current-run",
+        4,
+        MessageRole::Tool,
+        MessageOrigin::Tool,
+        vec![ContentBlock::ToolResultCorrection {
+            previous_message_id: id("message-3"),
+            previous_result_digest: prior_digest,
+            result: confirmed,
+        }],
+    ));
+    let original = transcript.clone();
+    let projected = ContextAssembler::new()
+        .project(&fixture.prompt, fixture.input(&transcript, &[], &[]))
+        .unwrap();
+    let results: Vec<_> = projected
+        .request
+        .messages
+        .iter()
+        .flat_map(|message| &message.content)
+        .filter_map(|content| {
+            if let ModelContent::ToolResult {
+                provider_call_id,
+                content,
+            } = content
+            {
+                Some((provider_call_id, content))
+            } else {
+                None
+            }
+        })
+        .collect();
+    assert_eq!(
+        results,
+        vec![(
+            &id("provider-call"),
+            &json!({"status":"succeeded","effect":"applied","content":[{"type":"text","text":"confirmed receipt"}]})
+        )]
+    );
+    assert!(projected.selected_message_ids.contains(&id("message-4")));
+    assert!(!projected.selected_message_ids.contains(&id("message-3")));
+    assert_eq!(transcript, original);
+    projected.request.validate().unwrap();
+
+    for fault in 0..7 {
+        let mut changed = transcript.clone();
+        match fault {
+            0 => {
+                let ContentBlock::ToolResultCorrection {
+                    previous_result_digest,
+                    ..
+                } = &mut changed[3].content[0]
+                else {
+                    unreachable!()
+                };
+                *previous_result_digest = canonical_digest(&json!("different"));
+            }
+            1 => {
+                let ContentBlock::ToolResultCorrection { result, .. } = &mut changed[3].content[0]
+                else {
+                    unreachable!()
+                };
+                result.call_id = id("foreign-call");
+            }
+            2 => changed[3].origin = MessageOrigin::User,
+            3 => {
+                let ContentBlock::ToolResult { result } = &mut changed[2].content[0] else {
+                    unreachable!()
+                };
+                result.status = ToolResultStatus::Succeeded;
+                result.effect = ToolEffect::Applied;
+                let digest = canonical_digest(&serde_json::to_value(&*result).unwrap());
+                let ContentBlock::ToolResultCorrection {
+                    previous_result_digest,
+                    ..
+                } = &mut changed[3].content[0]
+                else {
+                    unreachable!()
+                };
+                *previous_result_digest = digest;
+            }
+            4 => {
+                let mut duplicate = changed[3].clone();
+                duplicate.message_id = id("second-correction");
+                duplicate.sequence = 5.try_into().unwrap();
+                changed.push(duplicate);
+            }
+            5 => {
+                changed[3].sequence = 5.try_into().unwrap();
+                changed.insert(
+                    3,
+                    message(
+                        "current-run",
+                        4,
+                        MessageRole::Assistant,
+                        MessageOrigin::Model,
+                        vec![text("premature continuation")],
+                    ),
+                );
+            }
+            6 => {
+                let ContentBlock::ToolResult { result } = &mut changed[2].content[0] else {
+                    unreachable!()
+                };
+                result.effect = ToolEffect::Applied;
+                let digest = canonical_digest(&serde_json::to_value(&*result).unwrap());
+                let ContentBlock::ToolResultCorrection {
+                    previous_result_digest,
+                    result,
+                    ..
+                } = &mut changed[3].content[0]
+                else {
+                    unreachable!()
+                };
+                *previous_result_digest = digest;
+                result.effect = ToolEffect::NotApplied;
+            }
+            _ => unreachable!(),
+        }
+        let error = ContextAssembler::new()
+            .project(&fixture.prompt, fixture.input(&changed, &[], &[]))
+            .unwrap_err();
+        assert_eq!(error.path, "transcript.tool_correction", "fault {fault}");
+    }
+}
+
+#[tokio::test]
 async fn data_context_never_adds_system_authority_or_replaces_the_pinned_prefix() {
     let fixture = Fixture::new().await;
     let transcript = vec![fixture.current_message(1)];

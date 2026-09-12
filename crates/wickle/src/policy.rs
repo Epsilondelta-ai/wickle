@@ -23,6 +23,8 @@ pub struct ToolPolicyInput {
     /// Binding identity computed by the trusted input binder.
     pub binding_digest: JsonDigest,
     execution_args: JsonObject,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    approval: Option<ToolApproval>,
 }
 
 impl ToolPolicyInput {
@@ -40,11 +42,59 @@ impl ToolPolicyInput {
             descriptor_digest,
             binding_digest,
             execution_args,
+            approval: None,
         }
     }
     /// Inspect the full arguments to check actual target existence and ownership.
     pub fn execution_args(&self) -> &JsonObject {
         &self.execution_args
+    }
+    /// A recorded approval of this exact binding. The current policy still decides
+    /// whether the actor may execute; this evidence never overrides a Deny.
+    pub fn approval(&self) -> Option<&ToolApproval> {
+        self.approval.as_ref()
+    }
+    pub(crate) fn with_approval(mut self, receipt: &crate::ResumeReceipt) -> Self {
+        self.approval = Some(ToolApproval {
+            command_id: receipt.command.command_id.clone(),
+            command_ref: receipt.command_ref.clone(),
+            accepted_revision: receipt.accepted_revision,
+            actor_ref: receipt.actor_ref.clone(),
+            capability_grant_ref: receipt.capability_grant_ref.clone(),
+        });
+        self
+    }
+}
+
+/// Core-validated evidence that an authenticated actor approved a fixed tool binding.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ToolApproval {
+    command_id: Id,
+    command_ref: crate::RecordRef,
+    accepted_revision: u64,
+    actor_ref: Id,
+    capability_grant_ref: Id,
+}
+impl ToolApproval {
+    /// Accepted command identity.
+    pub fn command_id(&self) -> &Id {
+        &self.command_id
+    }
+    /// Protected command record, for authorized auditing.
+    pub fn command_ref(&self) -> &crate::RecordRef {
+        &self.command_ref
+    }
+    /// Revision at which approval was committed.
+    pub fn accepted_revision(&self) -> u64 {
+        self.accepted_revision
+    }
+    /// Authenticated approver.
+    pub fn actor_ref(&self) -> &Id {
+        &self.actor_ref
+    }
+    /// Host grant checked when approval was accepted.
+    pub fn capability_grant_ref(&self) -> &Id {
+        &self.capability_grant_ref
     }
 }
 
@@ -72,8 +122,11 @@ pub enum PolicyAction {
     ReadRunDetails {},
     /// Resume a recorded wait or interruption.
     ResumeRun {
-        /// Idempotent command identity.
-        command_id: Id,
+        /// Exact command, so authorization distinguishes approving, denying,
+        /// answering and supplying an external receipt.
+        command: Box<crate::ResumeCommand>,
+        /// Fixed tool binding when the saved wait belongs to a tool.
+        binding_digest: Option<JsonDigest>,
     },
     /// Request cancellation.
     CancelRun {},

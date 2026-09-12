@@ -26,15 +26,19 @@ pub async fn run_once(
 The [text consumer](../tests/support/agent_consumer.rs) and
 [tool-loop consumer](../tests/support/tool_loop_consumer.rs) configure the Host
 components, execute requests with synthetic models, reconnect to their events,
-and reopen SQLite state. Run the extracted-package examples with
+and reopen SQLite state. The [resume consumer](../tests/support/resume_consumer.rs)
+reopens a saved approval wait with new Host instances and a different reviewer,
+then completes the same Run using its frozen inputs. These consumers use real
+SQLite and synthetic ports; they make no provider network calls. Run them with
 `python3 scripts/check-package.py --allow-dirty`.
 
 ## Supply Host components
 
 `AgentBindings` contains the exact scope, `StateStore`, current `PolicyGate`,
 `ProfileResolver`, pinned `ModelRouter`, configured `ModelExchange`, trusted Host
-instructions, `SystemInputRegistry`, optional `ToolRegistry` and
-`SystemInputResolver`, clock, ID source, token estimator, and `AgentSettings`.
+instructions, `SystemInputRegistry`, optional `ToolRegistry`,
+`SystemInputResolver`, and `ExternalReceiptVerifier`, clock, ID source, token
+estimator, and `AgentSettings`.
 A single Agent instance owns one scope; use separately configured instances for
 other scopes.
 
@@ -159,10 +163,116 @@ Use `AgentSettings.tool_execution_limits` for the per-attempt timeout and receip
 bound. Profile limits still bound total model calls, tool attempts, and elapsed
 time. Tool execution is serial; declaring tool metadata does not enable parallel
 dispatch or automatic retry. There is no automatic replay after an unknown
-effect. `Agent::resume` is still unsupported, so a saved wait can be inspected but
-cannot yet be continued through an approval or reconciliation command. This saved
-tool wait is distinct from `Guarded::ApprovalRequired`, which reports a policy
-challenge on a facade operation such as starting or observing a Run.
+effect. A saved tool wait is distinct from `Guarded::ApprovalRequired`, which
+reports a policy challenge on a facade operation such as starting, resuming, or
+observing a Run.
+
+## Resume a saved wait
+
+`agent.resume(command, context)` continues the same Run from its saved tool
+cursor and returns a new `RunHandle`. It does not repeat completed tools or ask
+the model to recreate its plan. Waiting ends the active driver segment and
+consumes no additional model or tool attempts; time spent waiting still counts
+toward the Run deadline.
+
+| Saved wait | Command and result |
+| --- | --- |
+| Tool approval | `ResumeAction::Approve` permits current policy to consider the recorded approval; `Deny` records a denied, `NotApplied` result for that call |
+| Tool input | `ResumeAction::Input` validates the answer against the saved tool's output schema and completes the original call without reentering its executor |
+| Uncertain external effect | `ResumeAction::External` supplies a protected receipt reference for Host verification; a confirmed result settles the original call without executing it again |
+
+Create a command once from the protected saved state and keep the same command
+for retries. This helper constructs a tool approval; obtain its snapshot through
+`get_run_details` with current authorization.
+
+```rust
+use wickle::*;
+
+pub fn approval_command(
+    snapshot: &RunSnapshot,
+    command_id: Id,
+) -> Result<ResumeCommand, ContractError> {
+    let wait = snapshot.wait.as_ref().ok_or_else(||
+        ContractError::new(ErrorCode::InvalidTransition, "wait"))?;
+    let WaitTarget::Approval { target: target @ ApprovalTarget::Tool { .. } } =
+        &wait.target else {
+            return Err(ContractError::new(ErrorCode::InvalidTransition, "wait.target"));
+        };
+    Ok(ResumeCommand {
+        run_id: snapshot.run_id.clone(),
+        expected_revision: snapshot.revision,
+        command_id,
+        action: ResumeAction::Approve {
+            wait_id: wait.wait_id.clone(),
+            target: target.clone(),
+        },
+    })
+}
+```
+
+Pass that command to `agent.resume(command.clone(), reviewer_context).await`.
+The command ID, decision, expected revision, wait ID, scope, and binding target
+identify one acceptance. Repeating an accepted command returns its saved
+acceptance even after the Run finishes; changing that command under the same ID
+is a conflict. A new command cannot revive a terminal Run. Command consumption,
+any answer or effect correction, and `run.resumed` are committed atomically.
+Current permissions are checked on new commands and replays.
+
+On resume, omitted `system_inputs` reuses the original Run snapshot. An explicit
+map, including an empty map, must match it. Changing the reviewer updates the
+current principal and grant, not the saved workspace or target. Existing bound
+inputs retain their resolver values and source revisions. Profile, prompt,
+compiled tools, and routing must match the pinned runtime configuration; current
+metadata is not silently substituted.
+
+The Host's `PolicyPort` receives the full command in `PolicyAction::ResumeRun`.
+When execution reaches an approved tool, `ToolPolicyInput::approval()` exposes
+the recorded command, reviewer, and grant as evidence. Policy must explicitly
+allow the operation under current permissions. Approval never overrides a
+current denial.
+
+### Ask for input or verify an external result
+
+A tool can return `ToolExecutionOutcome::InputRequired { question }` with
+`effect: ToolEffect::NotApplied` and no receipt. The question must be nonempty
+and bounded. This creates `InputPending` and an input wait. The answer uses the
+tool's pinned `output_schema`; dynamic answer schemas are not supported.
+Before expiry, invalid answers leave the command unconsumed and the wait intact. The answer
+becomes a tool observation, not a replacement for the original user request or
+system instructions.
+
+For an external wait, configure `AgentBindings.external_receipt_verifier`.
+`ExternalReceiptVerifier::verify` receives the original call, attempt and
+idempotency key, frozen `BoundToolInput`, protected receipt, and current scope,
+actor, cancellation, and deadline. The Agent checks receipt read permission
+before supplying it. The verifier must authenticate the evidence and target;
+record existence or caller-provided IDs alone do not establish a business effect.
+It must inspect the prior operation without retrying it.
+
+A verified `Applied` or `NotApplied` result settles that original call. Even an
+`Applied` result with invalid output keeps its effect and receipt as a failed
+observation. `NotApplied` does not request an automatic retry. A verdict that is
+still `Unknown` returns `ToolEffectUnresolved` without consuming the command.
+The transcript retains the original unknown observation and appends a linked
+correction; subsequent model context uses the corrected observation once.
+
+### Observe execution segments
+
+An old handle keeps the Waiting outcome and event endpoint of its segment after
+a successful resume. Use the new handle for the continued segment; the Run ID is
+unchanged and event sequence numbers continue increasing. `get_run` and
+`get_run_details` inspect the current Run. Dropping a polled resume Future or a
+resumed handle does not abandon an accepted command or cancel its driver.
+
+An expired wait or Run deadline produces `Exhausted` without new dispatch and
+retains already recorded effects. Expiry is recorded at command acceptance;
+an on-time acceptance does not expire merely because its previous wait's
+deadline later passes. Expired approvals supply no tool authorization evidence.
+Durable storage allows a saved wait to resume
+after the Host recreates compatible bindings. General interruption recovery via
+`ResumeAction::Recover` and candidate approval via
+`ApprovalTarget::Candidate` remain unsupported; they require their separate
+recovery and verification runtimes.
 
 ## Start, replay, and observe
 
@@ -196,9 +306,15 @@ block the driver. Reconnecting replays the remaining committed sequence.
 
 | Receipt | Meaning |
 | --- | --- |
-| `Requested` | The local driver received the cancellation signal; observe its saved outcome for completion |
+| `Requested` | Cancellation was accepted for a local execution or saved wait; observe the saved outcome for completion |
 | `AlreadyTerminal` | The stored result is already terminal and stays unchanged |
-| `NotLocal` | This instance owns no live driver for the Run; no remote cancellation was accepted |
+| `NotLocal` | This instance owns no live driver for a running Run; no remote running-worker cancellation was accepted |
+
+A saved Waiting Run can be cancelled under a fresh lease even when no local
+driver exists. Unstarted calls become `NotApplied`; existing `Applied` and
+`Unknown` effects are retained. Cancelling the current waiting segment finalizes
+it as `Cancelled`, which its handle can observe. New resume commands are then
+rejected.
 
 Success records `completion_basis=turn_ended`. This says the model completed its
 turn under the configured output contract; it does not claim external business
@@ -212,7 +328,6 @@ with the assistant transcript. A later Run can reuse it only under the exact
 matching route. Changing providers or route identity fails before transmitting
 foreign continuation. The original session prompt remains pinned.
 
-`resume` has a public command shape, but waiting-command consumption and recovery
-of interrupted external effects are not implemented by this initial driver.
-Replaying `start` is not a substitute for that recovery operation. Durable state
-can still be inspected after a process stops.
+Replaying `start` retrieves the original Run; it does not consume a saved wait or
+restart an interrupted running worker. Use a matching `ResumeCommand` for the
+supported waits described above.

@@ -189,6 +189,16 @@ pub enum ContentBlock {
         /// Observation and receipt reference.
         result: ToolResult,
     },
+    /// Explicit resolution of an earlier Unknown observation. The original
+    /// message stays immutable; only its model projection is superseded.
+    ToolResultCorrection {
+        /// Earlier Tool message containing the unresolved observation.
+        previous_message_id: Id,
+        /// Canonical digest of that exact earlier ToolResult.
+        previous_result_digest: JsonDigest,
+        /// Confirmed result for the same call and original call message.
+        result: ToolResult,
+    },
     /// Opaque continuation data bound to one provider/route.
     ProviderOpaque {
         /// Registered provider key.
@@ -198,6 +208,71 @@ pub enum ContentBlock {
         /// Protected replay-data record.
         data_ref: RecordRef,
     },
+}
+
+/// Validate explicit corrections while retaining the original append-only history.
+pub(crate) fn tool_corrections(
+    messages: &[Message],
+) -> Result<std::collections::BTreeMap<Id, (Id, ToolResult)>, crate::ContractError> {
+    let invalid = || {
+        crate::ContractError::new(
+            crate::ErrorCode::InvalidContext,
+            "transcript.tool_correction",
+        )
+    };
+    let mut corrections = std::collections::BTreeMap::new();
+    for (index, message) in messages.iter().enumerate() {
+        for content in &message.content {
+            let ContentBlock::ToolResultCorrection {
+                previous_message_id,
+                previous_result_digest,
+                result,
+            } = content
+            else {
+                continue;
+            };
+            if message.role != MessageRole::Tool
+                || message.origin != MessageOrigin::Tool
+                || message.content.len() != 1
+            {
+                return Err(invalid());
+            }
+            let prior_index = messages[..index]
+                .iter()
+                .position(|prior| &prior.message_id == previous_message_id)
+                .ok_or_else(invalid)?;
+            let prior = &messages[prior_index];
+            let [ContentBlock::ToolResult { result: previous }] = prior.content.as_slice() else {
+                return Err(invalid());
+            };
+            if prior.run_id != message.run_id
+                || prior.sequence >= message.sequence
+                || prior.role != MessageRole::Tool
+                || prior.origin != MessageOrigin::Tool
+                || prior.visibility != message.visibility
+                || previous.call_id != result.call_id
+                || previous.call_message_id != result.call_message_id
+                || previous.effect != crate::ToolEffect::Unknown
+                || previous.status != ToolResultStatus::Unknown
+                || result.effect == crate::ToolEffect::Unknown
+                || result.status == ToolResultStatus::Unknown
+                || &crate::canonical_digest(&serde_json::to_value(previous).map_err(|_| invalid())?)
+                    != previous_result_digest
+                || messages[prior_index + 1..index].iter().any(|intervening| {
+                    intervening.run_id != message.run_id || intervening.role != MessageRole::Tool
+                })
+                || corrections
+                    .insert(
+                        previous_message_id.clone(),
+                        (message.message_id.clone(), result.clone()),
+                    )
+                    .is_some()
+            {
+                return Err(invalid());
+            }
+        }
+    }
+    Ok(corrections)
 }
 
 /// Logical message role before provider-specific projection.

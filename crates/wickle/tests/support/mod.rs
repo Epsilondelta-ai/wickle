@@ -108,6 +108,7 @@ pub async fn admission(
         scope: owner.clone(),
         timing: RunTiming::new(0, profile.profile().limits.max_elapsed_ms.get()).unwrap(),
         reservations: vec![],
+        resume_receipts: vec![],
         limits: profile.profile().limits.clone(),
         profile,
         status: RunStatus::Running,

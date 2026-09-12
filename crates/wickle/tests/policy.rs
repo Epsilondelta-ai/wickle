@@ -171,7 +171,15 @@ async fn every_control_boundary_requires_exact_tenant_workspace_and_user_scope()
         PolicyAction::ReadArtifact {},
         PolicyAction::ReadEvents {},
         PolicyAction::ResumeRun {
-            command_id: id("resume-command"),
+            command: Box::new(ResumeCommand {
+                run_id: id("run"),
+                expected_revision: 0,
+                command_id: id("resume-command"),
+                action: ResumeAction::Recover {
+                    recovery_ref: record("recovery"),
+                },
+            }),
+            binding_digest: None,
         },
         PolicyAction::CancelRun {},
     ];
@@ -695,6 +703,7 @@ async fn snapshot() -> RunSnapshot {
         request,
         scope: scope(),
         timing: RunTiming::new(0, profile.profile().limits.max_elapsed_ms.get()).unwrap(),
+        resume_receipts: vec![],
         reservations: vec![AttemptReservation {
             attempt_id: id("first-model-attempt"),
             kind: ReservationKind::Model {

@@ -55,7 +55,10 @@ impl Agent {
                 self.validate_replay(&request, &context, &saved),
             )
             .await?;
-            return Ok(Guarded::Completed(self.handle(saved.snapshot.run_id)?));
+            let segment = segment_revision(&saved.snapshot);
+            return Ok(Guarded::Completed(
+                self.handle(saved.snapshot.run_id, segment)?,
+            ));
         }
         // Preparation may be cancelled or time out. Once durable admission begins,
         // this owned coordinator waits for its result even if the caller disconnects.
@@ -105,12 +108,13 @@ impl Agent {
         if !result.created {
             self.validate_replay(&request, &context, &result.state)
                 .await?;
-            return Ok(Guarded::Completed(
-                self.handle(result.state.snapshot.run_id)?,
-            ));
+            return Ok(Guarded::Completed(self.handle(
+                result.state.snapshot.run_id.clone(),
+                segment_revision(&result.state.snapshot),
+            )?));
         }
         let run_id = result.state.snapshot.run_id;
-        let local = Arc::new(LocalRun::new());
+        let local = Arc::new(LocalRun::new(0));
         self.inner
             .runs
             .lock()
@@ -142,13 +146,19 @@ impl Agent {
             driver_local.notify.notify_waiters();
             if completed {
                 if let Ok(mut runs) = agent.inner.runs.lock() {
-                    runs.remove(&driver_id);
+                    if runs
+                        .get(&driver_id)
+                        .is_some_and(|current| Arc::ptr_eq(current, &driver_local))
+                    {
+                        runs.remove(&driver_id);
+                    }
                 }
             }
         });
         Ok(Guarded::Completed(RunHandle {
             agent: self.clone(),
             run_id,
+            segment_start_revision: 0,
             local: Some(local),
         }))
     }
@@ -314,6 +324,7 @@ impl Agent {
             context_batches: vec![],
             source_states: vec![],
             revision: 0,
+            resume_receipts: vec![],
             last_event_seq: 1,
         };
         let message = Message {

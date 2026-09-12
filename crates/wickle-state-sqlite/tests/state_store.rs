@@ -333,15 +333,20 @@ async fn historical_wait_and_resume_events_remain_valid_after_terminal_reopen() 
         .acquire_lease(&scope(), &id("run"), &id("owner"), 0, 10_000)
         .await
         .unwrap();
+    // This low-level store test preserves generic candidate-review history;
+    // actual tool approvals are exercised by the Agent resume consumer.
+    let candidate = ProtectedRecord::new(id("candidate"), 1, json!({"selection":"saved"}));
+    let target = ApprovalTarget::Candidate {
+        candidate_ref: candidate.reference().clone(),
+        verifier_ref: VersionedRef {
+            id: id("reviewer"),
+            version: id("1"),
+        },
+    };
     let wait = WaitState {
         wait_id: id("wait"),
-        target: WaitTarget::Input {
-            request: InputRequest {
-                input_request_id: id("question"),
-                call_id: id("input-call"),
-                question: "Choose input".into(),
-                schema_ref: None,
-            },
+        target: WaitTarget::Approval {
+            target: target.clone(),
         },
         expires_at_ms: None,
     };
@@ -350,6 +355,24 @@ async fn historical_wait_and_resume_events_remain_valid_after_terminal_reopen() 
     update.snapshot.status = RunStatus::Waiting;
     update.snapshot.phase = RunPhase::Waiting;
     update.snapshot.wait = Some(wait);
+    update.snapshot.outcome = Some(RunOutcome {
+        result: OutcomeResult::Waiting {
+            wait: update.snapshot.wait.clone().unwrap(),
+        },
+        output: vec![],
+        artifacts: vec![],
+        usage: update.snapshot.usage.clone(),
+        checkpoint_revision: update.snapshot.revision,
+        verification: None,
+        unresolved_effects: vec![],
+    });
+    let prior_outcome = ProtectedRecord::new(
+        id("prior-outcome"),
+        1,
+        serde_json::to_value(update.snapshot.outcome.as_ref().unwrap()).unwrap(),
+    );
+    let prior_outcome_ref = prior_outcome.reference().clone();
+    update.records.extend([candidate, prior_outcome]);
     update.snapshot.last_event_seq += 1;
     update.events.push(event(
         &id("run"),
@@ -360,6 +383,7 @@ async fn historical_wait_and_resume_events_remain_valid_after_terminal_reopen() 
             wait_ref: record.reference().clone(),
         },
     ));
+    update.events[0].timestamp_ms = 1;
     update.records.push(record);
     store.commit(&scope(), &id("run"), update).await.unwrap();
     store
@@ -389,9 +413,9 @@ async fn historical_wait_and_resume_events_remain_valid_after_terminal_reopen() 
         run_id: id("run"),
         expected_revision: saved.snapshot.revision,
         command_id: id("resume"),
-        action: ResumeAction::Input {
+        action: ResumeAction::Approve {
             wait_id: id("wait"),
-            answer: json!("selected"),
+            target,
         },
     };
     let record = ProtectedRecord::new(
@@ -402,6 +426,20 @@ async fn historical_wait_and_resume_events_remain_valid_after_terminal_reopen() 
     let mut update = prepared(&saved.snapshot, lease.clone(), 4);
     update.snapshot.status = RunStatus::Running;
     update.snapshot.wait = None;
+    update.snapshot.outcome = None;
+    update.snapshot.timing.last_observed_at_ms = 4;
+    update.snapshot.usage.elapsed_ms = 4;
+    update.snapshot.resume_receipts.push(ResumeReceipt {
+        command: command.clone(),
+        command_ref: record.reference().clone(),
+        accepted_revision: update.snapshot.revision,
+        expired: false,
+        previous_segment_start_revision: 0,
+        previous_outcome_ref: prior_outcome_ref,
+        previous_last_event_seq: saved.snapshot.last_event_seq,
+        actor_ref: id("reviewer"),
+        capability_grant_ref: id("reviewer-grant"),
+    });
     update.snapshot.last_event_seq += 1;
     update.events.push(event(
         &id("run"),
@@ -413,6 +451,7 @@ async fn historical_wait_and_resume_events_remain_valid_after_terminal_reopen() 
         },
     ));
     update.records.push(record);
+    update.events[0].timestamp_ms = 4;
     let resumed = store.commit(&scope(), &id("run"), update).await.unwrap();
     store
         .commit(&scope(), &id("run"), finished(&resumed.snapshot, lease, 5))

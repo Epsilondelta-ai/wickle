@@ -19,6 +19,15 @@ impl SerialToolRound {
         }) {
             return self.existing_uncertainty(entry, budget).await;
         }
+        if let Some(request) = saved.snapshot.tool_ledger.iter().find_map(|entry| {
+            if let ToolCallState::InputPending { request, .. } = &entry.state {
+                Some(request.clone())
+            } else {
+                None
+            }
+        }) {
+            return Ok(ToolRoundOutcome::InputRequired { request });
+        }
         let call_ids: Vec<_> = saved
             .snapshot
             .tool_ledger
@@ -43,6 +52,11 @@ impl SerialToolRound {
                     continue;
                 }
                 ToolCallState::Planned {} | ToolCallState::ApprovalPending { .. } => {}
+                ToolCallState::InputPending { request, .. } => {
+                    return Ok(ToolRoundOutcome::InputRequired {
+                        request: request.clone(),
+                    });
+                }
                 _ => return self.existing_uncertainty(entry, budget).await,
             }
             let call = entry.call.clone();
@@ -282,10 +296,34 @@ impl SerialToolRound {
                     receipt: None,
                 },
             };
+            if let ToolExecutionOutcome::InputRequired { question } = &completion.outcome {
+                let question_bytes = serde_json::to_vec(question)
+                    .map_err(|_| error(ErrorCode::InvalidJson, "tool.input_question"))?
+                    .len();
+                if completion.effect == ToolEffect::NotApplied
+                    && completion.receipt.is_none()
+                    && !question.trim().is_empty()
+                    && question_bytes as u64
+                        <= registered.compiled.descriptor().max_output_bytes.get()
+                {
+                    let request = InputRequest {
+                        input_request_id: self.ids.next_id()?,
+                        call_id: call_id.clone(),
+                        question: question.clone(),
+                        schema_ref: None,
+                    };
+                    self.input_pending(&execution, &request, budget).await?;
+                    return Ok(ToolRoundOutcome::InputRequired { request });
+                }
+            }
             let (result, records) = self.validate_output(
                 &call,
                 call_message_id,
-                &execution,
+                AttemptIdentity {
+                    scope: &execution.scope,
+                    attempt_id: &execution.attempt_id,
+                    idempotency_key: &execution.idempotency_key,
+                },
                 &registered.compiled,
                 completion,
             )?;
@@ -313,8 +351,8 @@ impl SerialToolRound {
         Ok(ToolRoundOutcome::Completed)
     }
 
-    /// Close only never-dispatched plans when a driver ends a segment because of
-    /// cancellation or exhaustion. Unknown and already-dispatched calls are untouched.
+    /// Close unstarted plans and input requests confirmed to have no effect when
+    /// a segment ends. Unknown and potentially dispatched calls are untouched.
     pub async fn settle_unstarted(
         &self,
         model_request_id: &Id,
@@ -335,7 +373,9 @@ impl SerialToolRound {
             if &entry.call.model_request_id == model_request_id
                 && matches!(
                     entry.state,
-                    ToolCallState::Planned {} | ToolCallState::ApprovalPending { .. }
+                    ToolCallState::Planned {}
+                        | ToolCallState::ApprovalPending { .. }
+                        | ToolCallState::InputPending { .. }
                 )
             {
                 self.reject(
@@ -374,7 +414,12 @@ impl SerialToolRound {
         context: &ExecutionContext,
         budget: &RunBudget,
     ) -> Result<PolicyDecision, ContractError> {
-        let request = input.policy_request();
+        let saved = tokio::select! { biased;
+            _ = context.cancellation.cancelled() => return Err(error(ErrorCode::Cancelled, "tool.policy")),
+            stopped = budget.wait_for_cancellation_or_deadline() => return match stopped { Err(error) => Err(error), Ok(()) => Err(error(ErrorCode::DeadlineExceeded, "tool.policy")) },
+            result = budget.store().load(budget.scope(), budget.run_id()) => result?,
+        };
+        let request = input.policy_request_for_run(&saved.snapshot);
         tokio::select! { biased;
             _ = context.cancellation.cancelled() => Err(error(ErrorCode::Cancelled, "tool.policy")),
             stopped = budget.wait_for_cancellation_or_deadline() => match stopped { Err(error) => Err(error), Ok(()) => Err(error(ErrorCode::DeadlineExceeded, "tool.policy")) },
@@ -440,6 +485,31 @@ impl SerialToolRound {
         };
         self.commit(snapshot, vec![], vec![], vec![], budget).await
     }
+    async fn input_pending(
+        &self,
+        execution: &ToolExecutionContext,
+        request: &InputRequest,
+        budget: &RunBudget,
+    ) -> Result<(), ContractError> {
+        let saved = budget.store().load(budget.scope(), budget.run_id()).await?;
+        let mut snapshot = saved.snapshot;
+        let entry = snapshot
+            .tool_ledger
+            .iter_mut()
+            .find(|entry| entry.call.call_id == execution.call_id)
+            .ok_or_else(|| error(ErrorCode::InvalidSnapshot, "tool.call"))?;
+        if !matches!(&entry.state, ToolCallState::Dispatching { attempt_id, idempotency_key }
+            if attempt_id == &execution.attempt_id && idempotency_key == &execution.idempotency_key)
+        {
+            return Err(error(ErrorCode::InvalidTransition, "tool.input_pending"));
+        }
+        entry.state = ToolCallState::InputPending {
+            attempt_id: execution.attempt_id.clone(),
+            idempotency_key: execution.idempotency_key.clone(),
+            request: request.clone(),
+        };
+        self.commit(snapshot, vec![], vec![], vec![], budget).await
+    }
     async fn reject(
         &self,
         call: &ToolCall,
@@ -473,11 +543,11 @@ impl SerialToolRound {
         Ok(())
     }
 
-    fn validate_output(
+    pub(super) fn validate_output(
         &self,
         call: &ToolCall,
         call_message_id: Id,
-        execution: &ToolExecutionContext,
+        attempt: AttemptIdentity<'_>,
         compiled: &CompiledTool,
         completion: ToolExecutionResult,
     ) -> Result<(ToolResult, Vec<ProtectedRecord>), ContractError> {
@@ -530,6 +600,13 @@ impl SerialToolRound {
                 code = Some(failure.clone());
                 Value::Null
             }
+            ToolExecutionOutcome::InputRequired { .. } => {
+                // Only a bounded no-effect request is accepted before this path.
+                // Invalid requests retain any reported effect and receipt.
+                status = ToolResultStatus::Failed;
+                code = Some(Id::new("invalid_input_request")?);
+                Value::Null
+            }
         };
         if effect == ToolEffect::Unknown {
             status = ToolResultStatus::Unknown;
@@ -554,7 +631,7 @@ impl SerialToolRound {
             self.ids.next_id()?,
             1,
             serde_json::json!({
-                "scope":execution.scope,"call_id":execution.call_id,"attempt_id":execution.attempt_id,"idempotency_key":execution.idempotency_key,
+                "scope":attempt.scope,"call_id":call.call_id,"attempt_id":attempt.attempt_id,"idempotency_key":attempt.idempotency_key,
                 "effect":effect,"receipt":raw_receipt,"receipt_omitted":receipt_oversized,"output":raw_output,"error_code":code,
             }),
         );
@@ -743,7 +820,7 @@ impl SerialToolRound {
     }
 }
 
-fn call_message(saved: &StoredRun, call: &ToolCall) -> Result<Id, ContractError> {
+pub(super) fn call_message(saved: &StoredRun, call: &ToolCall) -> Result<Id, ContractError> {
     let messages: Vec<_> = saved.messages.iter().filter(|message| message.run_id == saved.snapshot.run_id && message.role == MessageRole::Assistant && message.content.iter().any(|content| matches!(content, ContentBlock::ToolCall { call: candidate } if candidate.call_id == call.call_id && candidate.model_request_id == call.model_request_id && candidate.provider_call_id == call.provider_call_id && candidate.tool_name == call.tool_name && candidate.model_inputs == call.model_inputs && candidate.descriptor_digest == call.descriptor_digest))).collect();
     if messages.len() != 1 {
         return Err(error(ErrorCode::InvalidSnapshot, "tool.call_message"));

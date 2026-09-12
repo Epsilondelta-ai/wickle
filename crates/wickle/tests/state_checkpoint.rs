@@ -186,15 +186,18 @@ async fn historical_wait_and_resume_survive_a_finished_run_and_a_new_session_run
         .await
         .unwrap();
     let snapshot = store.load(&scope(), &id("run-a")).await.unwrap().snapshot;
+    let candidate = ProtectedRecord::new(id("candidate"), 1, json!({"source":"saved selection"}));
+    let target = ApprovalTarget::Candidate {
+        candidate_ref: candidate.reference().clone(),
+        verifier_ref: VersionedRef {
+            id: id("verifier"),
+            version: id("1"),
+        },
+    };
     let wait = WaitState {
         wait_id: id("wait"),
-        target: WaitTarget::Input {
-            request: InputRequest {
-                input_request_id: id("question"),
-                call_id: id("input-call"),
-                question: "Select a source".into(),
-                schema_ref: None,
-            },
+        target: WaitTarget::Approval {
+            target: target.clone(),
         },
         expires_at_ms: Some(180),
     };
@@ -203,6 +206,25 @@ async fn historical_wait_and_resume_survive_a_finished_run_and_a_new_session_run
     waiting.snapshot.status = RunStatus::Waiting;
     waiting.snapshot.phase = RunPhase::Waiting;
     waiting.snapshot.wait = Some(wait);
+    waiting.snapshot.outcome = Some(RunOutcome {
+        result: OutcomeResult::Waiting {
+            wait: waiting.snapshot.wait.clone().unwrap(),
+        },
+        output: vec![],
+        artifacts: vec![],
+        usage: waiting.snapshot.usage.clone(),
+        checkpoint_revision: waiting.snapshot.revision,
+        verification: None,
+        unresolved_effects: vec![],
+    });
+    let prior_outcome = ProtectedRecord::new(
+        id("old-outcome"),
+        1,
+        serde_json::to_value(waiting.snapshot.outcome.as_ref().unwrap()).unwrap(),
+    );
+    let prior_outcome_ref = prior_outcome.reference().clone();
+    waiting.records.push(prior_outcome);
+    waiting.records.push(candidate);
     waiting.snapshot.last_event_seq += 1;
     waiting.events.push(event(
         &id("run-a"),
@@ -214,14 +236,15 @@ async fn historical_wait_and_resume_survive_a_finished_run_and_a_new_session_run
         },
     ));
     waiting.records.push(wait_record);
+    waiting.events[0].timestamp_ms = 101;
     let waiting = store.commit(&scope(), &id("run-a"), waiting).await.unwrap();
     let command = ResumeCommand {
         run_id: id("run-a"),
         expected_revision: waiting.snapshot.revision,
         command_id: id("answer"),
-        action: ResumeAction::Input {
+        action: ResumeAction::Approve {
             wait_id: id("wait"),
-            answer: json!("selected source"),
+            target,
         },
     };
     let command_record = ProtectedRecord::new(
@@ -232,6 +255,20 @@ async fn historical_wait_and_resume_survive_a_finished_run_and_a_new_session_run
     let mut resumed = prepared(&waiting.snapshot, lease.clone(), 102);
     resumed.snapshot.status = RunStatus::Running;
     resumed.snapshot.wait = None;
+    resumed.snapshot.outcome = None;
+    resumed.snapshot.timing.last_observed_at_ms = 102;
+    resumed.snapshot.usage.elapsed_ms = (102 - resumed.snapshot.timing.started_at_ms) as u64;
+    resumed.snapshot.resume_receipts.push(ResumeReceipt {
+        command: command.clone(),
+        command_ref: command_record.reference().clone(),
+        accepted_revision: resumed.snapshot.revision,
+        previous_segment_start_revision: 0,
+        previous_outcome_ref: prior_outcome_ref,
+        previous_last_event_seq: waiting.snapshot.last_event_seq,
+        actor_ref: id("reviewer"),
+        capability_grant_ref: id("reviewer-grant"),
+        expired: false,
+    });
     resumed.snapshot.last_event_seq += 1;
     resumed.events.push(event(
         &id("run-a"),
@@ -242,6 +279,7 @@ async fn historical_wait_and_resume_survive_a_finished_run_and_a_new_session_run
             command_ref: command_record.reference().clone(),
         },
     ));
+    resumed.events[0].timestamp_ms = 102;
     resumed.records.push(command_record);
     let resumed = store.commit(&scope(), &id("run-a"), resumed).await.unwrap();
     store
@@ -275,6 +313,24 @@ async fn historical_wait_and_resume_survive_a_finished_run_and_a_new_session_run
         events.events[2].payload,
         RunEventPayload::RunResumed { .. }
     ));
+
+    for fault in 0..3 {
+        let mut corrupted = image.clone();
+        let receipts = &mut corrupted["runs"][0]["snapshot"]["resume_receipts"];
+        match fault {
+            0 => receipts[0]["command"]["command_id"] = json!("changed command"),
+            1 => receipts[0]["previous_segment_start_revision"] = json!(999),
+            2 => {
+                let duplicate = receipts[0].clone();
+                receipts.as_array_mut().unwrap().push(duplicate);
+            }
+            _ => unreachable!(),
+        }
+        assert!(
+            restore_json(&corrupted, &scope()).is_err(),
+            "resume receipt fault {fault}"
+        );
+    }
 
     // An active run cannot precede a later completed run in the same transcript.
     let mut reversed = image;
