@@ -281,6 +281,10 @@ impl fmt::Debug for HookOutput {
 /// Current authorization and finite callback controls, without system inputs.
 #[derive(Debug, Clone)]
 pub struct HookContext {
+    /// Original adapter export authority; absent for direct catalog hooks.
+    pub selection: Option<HookRef>,
+    /// Host runtime segment; absent for directly injected catalog hooks.
+    pub binding_set_id: Option<Id>,
     /// Exact namespace.
     pub scope: Scope,
     /// Owning Run identity.
@@ -320,87 +324,187 @@ pub struct HookRegistration {
 pub struct HookRegistry {
     scope: Scope,
     entries: Vec<HookRegistration>,
+    selections: Vec<HookRef>,
 }
 impl HookRegistry {
-    /// Register existing callbacks; this performs no callback or external I/O.
-    pub fn new(scope: Scope, mut entries: Vec<HookRegistration>) -> Result<Self, ContractError> {
-        if entries.len() > 64 {
+    /// Register direct catalog callbacks without invoking them.
+    pub fn new(scope: Scope, entries: Vec<HookRegistration>) -> Result<Self, ContractError> {
+        Self::from_bindings(
+            scope,
+            entries
+                .into_iter()
+                .map(|entry| (catalog_selection(&entry.definition), entry))
+                .collect(),
+        )
+    }
+    /// Preserve real catalog/export selections, including distinct bindings of
+    /// the same native Hook definition. Only selected handlers can be called.
+    pub fn from_bindings(
+        scope: Scope,
+        mut bindings: Vec<(HookRef, HookRegistration)>,
+    ) -> Result<Self, ContractError> {
+        if bindings.len() > 64 {
             return Err(hook_error(ErrorCode::InvalidContract, "hooks.count"));
         }
         let mut seen = std::collections::BTreeSet::new();
-        for entry in &entries {
+        for (selection, entry) in &bindings {
             entry.definition.validate()?;
-            if !seen.insert(entry.definition.hook.id.clone()) {
+            let valid = match selection {
+                HookRef::Catalog(_) => selection == &catalog_selection(&entry.definition),
+                HookRef::Export(export) => export.alias.is_none(),
+            };
+            if !valid || !seen.insert(crate::serialization::data_digest(selection)) {
                 return Err(hook_error(ErrorCode::InvalidReference, "hooks.duplicate"));
             }
         }
-        entries.sort_by(|a, b| {
-            a.definition
+        bindings.sort_by(|(a, ea), (b, eb)| {
+            ea.definition
                 .priority
-                .cmp(&b.definition.priority)
-                .then(a.definition.hook.id.cmp(&b.definition.hook.id))
+                .cmp(&eb.definition.priority)
+                .then(ea.definition.hook.id.cmp(&eb.definition.hook.id))
+                .then(
+                    crate::serialization::data_digest(a)
+                        .as_str()
+                        .cmp(crate::serialization::data_digest(b).as_str()),
+                )
         });
-        Ok(Self { scope, entries })
+        let (selections, entries) = bindings.into_iter().unzip();
+        Ok(Self {
+            scope,
+            entries,
+            selections,
+        })
+    }
+    /// Metadata-only registry for admission and non-executing settlement paths.
+    pub fn metadata(
+        scope: Scope,
+        bindings: Vec<ResolvedHookBinding>,
+    ) -> Result<Self, ContractError> {
+        Self::from_bindings(
+            scope,
+            bindings
+                .into_iter()
+                .map(|binding| {
+                    (
+                        binding.selection,
+                        HookRegistration {
+                            definition: binding.definition,
+                            handler: Arc::new(MetadataHook),
+                        },
+                    )
+                })
+                .collect(),
+        )
     }
     /// Exact registered namespace.
     pub fn scope(&self) -> &Scope {
         &self.scope
     }
-    /// Pin only exact profile-selected catalog definitions in execution order.
+    /// Pin exact profile selections in priority/identity order.
     pub fn plan(&self, profile: &AgentProfile) -> Result<HookPlan, ContractError> {
         let mut definitions = Vec::new();
-        for selected in profile.hooks.iter().flatten() {
-            let HookRef::Catalog(selected) = selected else {
-                return Err(hook_error(ErrorCode::CapabilityUnsupported, "hooks.export"));
-            };
-            let entry = self
-                .entries
-                .iter()
-                .find(|entry| {
-                    entry.definition.hook.id == selected.hook_id
-                        && entry.definition.hook.version == selected.version
-                        && entry.definition.position == selected.position
-                })
-                .ok_or_else(|| hook_error(ErrorCode::ComponentUnavailable, "hooks.selection"))?;
-            definitions.push(entry.definition.clone());
+        let mut selections = Vec::new();
+        let wanted = profile.hooks.as_deref().unwrap_or_default();
+        for (selection, entry) in self.selections.iter().zip(&self.entries) {
+            if wanted.contains(selection) {
+                definitions.push(entry.definition.clone());
+                selections.push(export_selection(selection));
+            }
         }
-        definitions.sort_by(|a, b| a.priority.cmp(&b.priority).then(a.hook.id.cmp(&b.hook.id)));
+        if selections.iter().all(Option::is_none) {
+            selections.clear();
+        }
         let plan = HookPlan {
             scope: self.scope.clone(),
             definitions,
+            selections,
         };
         plan.validate(profile)?;
         Ok(plan)
     }
+    fn get(&self, hook: &VersionedRef, selection: Option<&HookRef>) -> Option<&HookRegistration> {
+        self.entries
+            .iter()
+            .zip(&self.selections)
+            .find(|(entry, registered)| {
+                &entry.definition.hook == hook && export_selection(registered).as_ref() == selection
+            })
+            .map(|(entry, _)| entry)
+    }
+}
+struct MetadataHook;
+impl HookHandler for MetadataHook {
+    fn call<'a>(&'a self, _: &'a HookInput, _: &'a HookContext) -> PortFuture<'a, HookOutput> {
+        Box::pin(async {
+            Err(hook_error(
+                ErrorCode::ComponentUnavailable,
+                "hooks.metadata_only",
+            ))
+        })
+    }
+}
+fn catalog_selection(definition: &HookDefinition) -> HookRef {
+    HookRef::Catalog(CatalogHookRef {
+        hook_id: definition.hook.id.clone(),
+        version: definition.hook.version.clone(),
+        position: definition.position,
+    })
+}
+fn export_selection(selection: &HookRef) -> Option<HookRef> {
+    if matches!(selection, HookRef::Export(_)) {
+        Some(selection.clone())
+    } else {
+        None
+    }
 }
 
-/// Immutable selected definitions, serialized for protected Run storage.
+/// Immutable selected definitions and optional real export identities.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HookPlan {
     scope: Scope,
     definitions: Vec<HookDefinition>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    selections: Vec<Option<HookRef>>,
 }
 impl HookPlan {
     /// Exact owning namespace.
     pub fn scope(&self) -> &Scope {
         &self.scope
     }
-    /// Selected definitions in their stable execution order.
+    /// Selected definitions in stable execution order.
     pub fn definitions(&self) -> &[HookDefinition] {
         &self.definitions
     }
-    /// Canonical identity of scope, definitions, order and bounds.
+    /// Export authority for the definition at this index; direct catalog is None.
+    pub fn selection(&self, index: usize) -> Option<&HookRef> {
+        self.selections.get(index).and_then(Option::as_ref)
+    }
+    /// Exact definition behind a native Hook ID and real export selection.
+    pub fn definition_for(
+        &self,
+        hook: &VersionedRef,
+        selection: Option<&HookRef>,
+    ) -> Option<&HookDefinition> {
+        self.definitions
+            .iter()
+            .enumerate()
+            .find(|(index, definition)| {
+                &definition.hook == hook && self.selection(*index) == selection
+            })
+            .map(|(_, definition)| definition)
+    }
+    /// Complete scope/definitions/order/selection identity.
     pub fn digest(&self) -> JsonDigest {
         crate::serialization::data_digest(self)
     }
-    /// Restore only the exact trusted protected plan identity.
+    /// Restore only the trusted protected plan identity.
     pub fn restore(
         json: &str,
         scope: &Scope,
         expected_digest: &JsonDigest,
     ) -> Result<Self, ContractError> {
-        let plan: Self = serde_json::from_str(json)
+        let plan: Self = serde_json::from_value(parse_json(json)?)
             .map_err(|_| hook_error(ErrorCode::InvalidSnapshot, "hooks.plan"))?;
         if plan.scope() != scope || &plan.digest() != expected_digest {
             return Err(hook_error(
@@ -411,23 +515,24 @@ impl HookPlan {
         plan.validate_order()?;
         Ok(plan)
     }
-    /// Confirm the plan is exactly the profile's selected catalog hooks.
+    /// Match the original profile selections without rewriting export identities.
     pub fn validate(&self, profile: &AgentProfile) -> Result<(), ContractError> {
         self.validate_order()?;
-        let selections: Vec<_> = profile.hooks.iter().flatten().collect();
-        let mut selected_ids = std::collections::BTreeSet::new();
-        if selections.len() != self.definitions.len()
-            || selections.iter().any(|selection| match selection {
-                HookRef::Catalog(selected) => {
-                    !selected_ids.insert(&selected.hook_id)
-                        || !self.definitions.iter().any(|definition| {
-                            definition.hook.id == selected.hook_id
-                                && definition.hook.version == selected.version
-                                && definition.position == selected.position
-                        })
-                }
-                HookRef::Export(_) => true,
+        let selected = profile.hooks.as_deref().unwrap_or_default();
+        let actual: Vec<_> = self
+            .definitions
+            .iter()
+            .enumerate()
+            .map(|(index, definition)| {
+                self.selection(index)
+                    .cloned()
+                    .unwrap_or_else(|| catalog_selection(definition))
             })
+            .collect();
+        if selected.len() != actual.len()
+            || selected
+                .iter()
+                .any(|selection| actual.iter().filter(|item| *item == selection).count() != 1)
         {
             return Err(hook_error(
                 ErrorCode::InvalidSnapshot,
@@ -437,20 +542,34 @@ impl HookPlan {
         Ok(())
     }
     fn validate_order(&self) -> Result<(), ContractError> {
-        if self.definitions.len() > 64 {
+        if self.definitions.len() > 64
+            || (!self.selections.is_empty() && self.selections.len() != self.definitions.len())
+        {
             return Err(hook_error(ErrorCode::InvalidSnapshot, "hooks.plan_count"));
         }
         let mut seen = std::collections::BTreeSet::new();
+        let mut prior = None;
         for (index, definition) in self.definitions.iter().enumerate() {
             definition.validate()?;
-            if !seen.insert(definition.hook.id.clone())
-                || (index > 0 && {
-                    let prior = &self.definitions[index - 1];
-                    (prior.priority, &prior.hook.id) > (definition.priority, &definition.hook.id)
-                })
-            {
+            let selection = self
+                .selection(index)
+                .cloned()
+                .unwrap_or_else(|| catalog_selection(definition));
+            if self.selection(index).is_some_and(
+                |selection| !matches!(selection,HookRef::Export(export) if export.alias.is_none()),
+            ) {
+                return Err(hook_error(ErrorCode::InvalidSnapshot, "hooks.plan_export"));
+            }
+            let digest = crate::serialization::data_digest(&selection);
+            let key = (
+                definition.priority,
+                definition.hook.id.clone(),
+                digest.as_str().to_owned(),
+            );
+            if !seen.insert(digest) || prior.as_ref().is_some_and(|previous| previous > &key) {
                 return Err(hook_error(ErrorCode::InvalidSnapshot, "hooks.plan_order"));
             }
+            prior = Some(key);
         }
         Ok(())
     }
@@ -461,6 +580,9 @@ impl HookPlan {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HookApplication {
+    /// Original adapter export authority; absent for direct catalog hooks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selection: Option<HookRef>,
     /// Exact selected hook.
     pub hook: VersionedRef,
     /// Complete pinned definition identity.
@@ -476,6 +598,9 @@ pub struct HookApplication {
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HookApplicationRecord {
+    /// Original adapter export authority; absent for direct catalog hooks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selection: Option<HookRef>,
     /// Exact namespace.
     pub scope: Scope,
     /// Owning Run.
@@ -536,6 +661,9 @@ pub enum HookObservationStatus {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HookObservation {
+    /// Original adapter export authority; absent for direct catalog hooks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selection: Option<HookRef>,
     /// Exact namespace.
     pub scope: Scope,
     /// Owning Run.
@@ -556,6 +684,7 @@ pub struct HookObservation {
 
 /// Executes selected callbacks, with authority and persistence owned by the core.
 pub struct HookRuntime {
+    binding_set_id: Option<Id>,
     store: Arc<dyn StateStore>,
     policy: Arc<PolicyGate>,
     clock: Arc<dyn Clock>,

@@ -4,12 +4,10 @@ impl Agent {
     pub(super) async fn tool_round(
         &self,
         budget: &RunBudget,
+        segment: &SegmentBindings,
     ) -> Result<SerialToolRound, ContractError> {
         let bindings = &self.inner.bindings;
-        let registry = match &bindings.tools {
-            Some(registry) => registry.clone(),
-            None => Arc::new(ToolRegistry::new(bindings.scope.clone(), vec![])?),
-        };
+        let registry = segment.tools.clone();
         let saved = bindings.state.load(budget.scope(), budget.run_id()).await?;
         let definitions = if let Some(reference) = &saved.snapshot.system_inputs {
             let record = bindings
@@ -34,8 +32,11 @@ impl Agent {
             bindings.ids.clone(),
         )
         .with_limits(bindings.settings.tool_execution_limits)?;
-        if let Some(hooks) = &bindings.hooks {
+        if let Some(hooks) = &segment.hooks {
             round = round.with_hooks(hooks.clone());
+        }
+        if let Some(binding_set_id) = segment.binding_set_id() {
+            round = round.with_binding_set_id(binding_set_id.clone());
         }
         Ok(round)
     }
@@ -263,7 +264,7 @@ impl Agent {
     pub(super) async fn settle_unstarted_tools(
         &self,
         snapshot: &RunSnapshot,
-        context: &ExecutionContext,
+        segment: &SegmentBindings,
         budget: &RunBudget,
         cancelled: bool,
         local: &LocalRun,
@@ -284,7 +285,7 @@ impl Agent {
         if requests.is_empty() {
             return Ok(());
         }
-        let round = self.tool_round(budget).await?;
+        let round = self.tool_round(budget, segment).await?;
         for request in requests {
             round
                 .settle_unstarted(
@@ -299,7 +300,7 @@ impl Agent {
                     } else {
                         "run_stopped"
                     })?,
-                    context,
+                    &segment.context,
                     budget,
                 )
                 .await?;

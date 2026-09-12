@@ -296,6 +296,8 @@ impl SerialToolRound {
                 .ok_or_else(|| error(ErrorCode::InvalidConfiguration, "tool.timeout"))?
                 .min(run_deadline);
             let execution = ToolExecutionContext {
+                run_id: budget.run_id().clone(),
+                binding_set_id: self.binding_set_id.clone(),
                 call_id: call_id.clone(),
                 attempt_id: reservation.attempt_id.clone(),
                 idempotency_key: key.clone(),

@@ -1,5 +1,5 @@
 use super::*;
-use crate::{HookInput, HookPlan, HookPosition, HookRef, HookTarget};
+use crate::{HookInput, HookPlan, HookPosition, HookTarget};
 
 fn load_plan(
     state: &ScopeState,
@@ -26,24 +26,7 @@ fn load_plan(
         &snapshot.scope,
         &reference.digest,
     )?;
-    let selected = snapshot
-        .profile
-        .profile()
-        .hooks
-        .as_deref()
-        .unwrap_or_default();
-    if plan.definitions().len() != selected.len()
-        || selected.iter().any(|selection| match selection {
-            HookRef::Catalog(hook) => !plan.definitions().iter().any(|definition| {
-                definition.hook.id == hook.hook_id
-                    && definition.hook.version == hook.version
-                    && definition.position == hook.position
-            }),
-            HookRef::Export(_) => true,
-        })
-    {
-        return Err(error(ErrorCode::InvalidSnapshot, "hooks.plan_selection"));
-    }
+    plan.validate(snapshot.profile.profile())?;
     Ok(Some(plan))
 }
 
@@ -213,11 +196,13 @@ pub(super) fn validate_hook_observation(
     let empty = BTreeMap::new();
     let plan = load_plan(state, &empty, &run.snapshot)?
         .ok_or_else(|| error(ErrorCode::InvalidSnapshot, "hooks.plan_missing"))?;
-    if !plan.definitions().iter().any(|definition| {
-        definition.hook == report.hook
-            && definition.digest() == report.definition_digest
-            && definition.position == report.target.position()
-    }) {
+    if !plan
+        .definition_for(&report.hook, report.selection.as_ref())
+        .is_some_and(|definition| {
+            definition.digest() == report.definition_digest
+                && definition.position == report.target.position()
+        })
+    {
         return Err(error(
             ErrorCode::InvalidReference,
             "hooks.observer_definition",

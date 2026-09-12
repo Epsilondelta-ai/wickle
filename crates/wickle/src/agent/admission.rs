@@ -138,11 +138,7 @@ impl Agent {
                 Ok(Err(error)) => Some(fail(error.code, "agent.driver")),
                 Err(_) => Some(fail(ErrorCode::InvalidContract, "agent.driver")),
             };
-            let completed = error.is_none()
-                && driver_local
-                    .observer_error
-                    .lock()
-                    .is_ok_and(|error| error.is_none());
+            let completed = error.is_none() && !agent.keep_local(&driver_local);
             if let Ok(mut saved) = driver_local.error.lock() {
                 *saved = error;
             }
@@ -219,12 +215,40 @@ impl Agent {
         let profile = ProfileValidator::new(bindings.profile_resolver.as_ref())
             .validate(&self.inner.profile, &bindings.scope)
             .await?;
-        let tool_bindings = bindings
-            .tools
-            .as_ref()
-            .map(|tools| tools.prompt_bindings(profile.profile()))
-            .transpose()?
-            .unwrap_or_default();
+        let assembly = if let Some(runtime) = &bindings.components {
+            let resolve_context = ComponentResolveContext {
+                scope: bindings.scope.clone(),
+                session_id: request.session_id.clone(),
+                principal_ref: context.data.principal_ref.clone(),
+                capability_grant_ref: context.data.capability_grant_ref.clone(),
+                system_inputs: bindings.system_inputs.clone(),
+                cancellation: context.cancellation.child_token(),
+                deadline: tokio::time::Instant::now()
+                    + Duration::from_millis(bindings.settings.start_timeout_ms),
+            };
+            let resolved = runtime.resolve(&profile, &resolve_context).await?;
+            resolve_context.cancellation.cancel();
+            if resolved.scope() != &bindings.scope
+                || resolved.session_id() != &request.session_id
+                || resolved.profile_resolution_digest() != profile.resolution_digest()
+            {
+                return Err(fail(ErrorCode::InvalidSnapshot, "agent.assembly"));
+            }
+            Some(resolved)
+        } else {
+            None
+        };
+        let tool_bindings = if let Some(assembly) = &assembly {
+            ToolRegistry::metadata(bindings.scope.clone(), assembly.tools().to_vec())?
+                .prompt_bindings(profile.profile())?
+        } else {
+            bindings
+                .tools
+                .as_ref()
+                .map(|tools| tools.prompt_bindings(profile.profile()))
+                .transpose()?
+                .unwrap_or_default()
+        };
         let session = match bindings
             .state
             .load_session(&bindings.scope, &request.session_id)
@@ -303,16 +327,37 @@ impl Agent {
                 .map_err(|_| fail(ErrorCode::InvalidJson, "agent.routing"))?,
         );
         let run_id = bindings.ids.next_id()?;
-        let hook_record = bindings
-            .hooks
+        let hook_plan = if let Some(assembly) = &assembly {
+            Some(
+                HookRegistry::metadata(bindings.scope.clone(), assembly.hooks().to_vec())?
+                    .plan(profile.profile())?,
+            )
+        } else {
+            bindings
+                .hooks
+                .as_ref()
+                .map(|hooks| hooks.plan(profile.profile()))
+                .transpose()?
+        };
+        let hook_record = hook_plan
             .as_ref()
-            .map(|hooks| {
-                let plan = hooks.plan(profile.profile())?;
+            .map(|plan| {
                 Ok::<_, ContractError>(ProtectedRecord::new(
                     bindings.ids.next_id()?,
                     1,
-                    serde_json::to_value(&plan)
+                    serde_json::to_value(plan)
                         .map_err(|_| fail(ErrorCode::InvalidJson, "agent.hooks"))?,
+                ))
+            })
+            .transpose()?;
+        let assembly_record = assembly
+            .as_ref()
+            .map(|assembly| {
+                Ok::<_, ContractError>(ProtectedRecord::new(
+                    bindings.ids.next_id()?,
+                    1,
+                    serde_json::to_value(assembly)
+                        .map_err(|_| fail(ErrorCode::InvalidJson, "agent.assembly"))?,
                 ))
             })
             .transpose()?;
@@ -336,7 +381,9 @@ impl Agent {
             system_inputs: Some(inputs_ref),
             wait: None,
             outcome: None,
-            assembly_ref: None,
+            assembly_ref: assembly_record
+                .as_ref()
+                .map(|record| record.reference().clone()),
             routing_snapshot_ref: Some(routing_record.reference().clone()),
             context_batches: vec![],
             source_states: vec![],
@@ -386,6 +433,7 @@ impl Agent {
                 records: [
                     vec![request_record, prompt_record, inputs_record, routing_record],
                     hook_record.into_iter().collect(),
+                    assembly_record.into_iter().collect(),
                 ]
                 .concat(),
             },

@@ -317,7 +317,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             clock: Arc::new(ExampleClock),
             ids: Arc::new(RandomIdSource),
             tools: None,
-            system_input_resolver: None, external_receipt_verifier: None, hooks: None,
+            system_input_resolver: None, external_receipt_verifier: None, components: None, hooks: None,
             token_estimator: Arc::new(Estimate),
             settings: AgentSettings {
                 max_output_tokens: 128.try_into()?,

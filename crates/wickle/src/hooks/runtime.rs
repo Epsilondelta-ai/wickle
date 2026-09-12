@@ -13,12 +13,18 @@ impl HookRuntime {
         registry: Arc<HookRegistry>,
     ) -> Self {
         Self {
+            binding_set_id: None,
             store,
             policy,
             clock,
             ids,
             registry,
         }
+    }
+    /// Forward the current Host segment identity to scoped export wrappers.
+    pub fn with_binding_set_id(mut self, binding_set_id: Id) -> Self {
+        self.binding_set_id = Some(binding_set_id);
+        self
     }
     /// Scope under which callbacks are registered.
     pub fn scope(&self) -> &Scope {
@@ -142,12 +148,13 @@ impl HookRuntime {
         let definitions: Vec<_> = plan
             .definitions()
             .iter()
-            .filter(|definition| definition.position == target.position())
-            .cloned()
+            .enumerate()
+            .filter(|(_, definition)| definition.position == target.position())
+            .map(|(index, definition)| (definition.clone(), plan.selection(index).cloned()))
             .collect();
         let mut applications = Vec::new();
         let mut deny = None;
-        for definition in definitions {
+        for (definition, selection) in definitions {
             budget.check_boundary().await?;
             if context.cancellation.is_cancelled() {
                 return Err(hook_error(ErrorCode::Cancelled, "hooks.transform"));
@@ -165,7 +172,9 @@ impl HookRuntime {
                     .hook_applications
                     .iter()
                     .find(|application| {
-                        application.target == target && application.hook == definition.hook
+                        application.target == target
+                            && application.hook == definition.hook
+                            && application.selection == selection
                     })
             {
                 let record = bounded(
@@ -194,6 +203,7 @@ impl HookRuntime {
             let callback = self
                 .invoke(
                     &definition,
+                    selection.as_ref(),
                     &target,
                     &input,
                     budget.run_id(),
@@ -230,6 +240,7 @@ impl HookRuntime {
                 vec![]
             };
             let value = HookApplicationRecord {
+                selection: selection.clone(),
                 scope: budget.scope().clone(),
                 run_id: budget.run_id().clone(),
                 hook: definition.hook.clone(),
@@ -247,6 +258,7 @@ impl HookRuntime {
                     .map_err(|_| hook_error(ErrorCode::InvalidJson, "hooks.application"))?,
             );
             let application = HookApplication {
+                selection: selection.clone(),
                 hook: definition.hook.clone(),
                 definition_digest: definition.digest(),
                 target: target.clone(),
@@ -262,11 +274,11 @@ impl HookRuntime {
             )
             .await?
             .snapshot;
-            if snapshot
-                .hook_applications
-                .iter()
-                .any(|prior| prior.target == target && prior.hook == definition.hook)
-            {
+            if snapshot.hook_applications.iter().any(|prior| {
+                prior.target == target
+                    && prior.hook == definition.hook
+                    && prior.selection == selection
+            }) {
                 return Err(hook_error(ErrorCode::RevisionConflict, "hooks.application"));
             }
             let expected_revision = snapshot.revision;
@@ -378,13 +390,16 @@ impl HookRuntime {
         } else {
             deadline
         };
-        for definition in plan
+        for (index, definition) in plan
             .definitions()
             .iter()
-            .filter(|definition| definition.position == target.position())
+            .enumerate()
+            .filter(|(_, definition)| definition.position == target.position())
         {
+            let selection = plan.selection(index);
             if prior.iter().any(|report| {
                 report.hook == definition.hook
+                    && report.selection.as_ref() == selection
                     && report.definition_digest == definition.digest()
                     && report.target == target
             }) {
@@ -393,6 +408,7 @@ impl HookRuntime {
             let observed = self
                 .invoke(
                     definition,
+                    selection,
                     &target,
                     &input,
                     run_id,
@@ -414,6 +430,7 @@ impl HookRuntime {
                 },
             };
             let report = HookObservation {
+                selection: selection.cloned(),
                 scope: self.scope().clone(),
                 run_id: run_id.clone(),
                 hook: definition.hook.clone(),
@@ -451,6 +468,7 @@ impl HookRuntime {
     async fn invoke(
         &self,
         definition: &HookDefinition,
+        selection: Option<&HookRef>,
         target: &HookTarget,
         input: &HookInput,
         run_id: &Id,
@@ -474,6 +492,7 @@ impl HookRuntime {
             owner_scope: self.scope().clone(),
             resource_id: run_id.clone(),
             action: PolicyAction::InvokeHook {
+                selection: selection.cloned(),
                 hook: definition.hook.clone(),
                 definition_digest: definition.digest(),
                 target: target.clone(),
@@ -495,11 +514,12 @@ impl HookRuntime {
         }
         let entry = self
             .registry
-            .entries
-            .iter()
-            .find(|entry| entry.definition == *definition)
+            .get(&definition.hook, selection)
+            .filter(|entry| entry.definition == *definition)
             .ok_or_else(|| hook_error(ErrorCode::ComponentUnavailable, "hooks.handler"))?;
         let hook_context = HookContext {
+            selection: selection.cloned(),
+            binding_set_id: self.binding_set_id.clone(),
             scope: self.scope().clone(),
             run_id: run_id.clone(),
             hook: definition.hook.clone(),

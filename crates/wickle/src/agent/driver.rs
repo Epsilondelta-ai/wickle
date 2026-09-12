@@ -35,18 +35,23 @@ impl Agent {
         expired: bool,
     ) -> Result<(), ContractError> {
         let bindings = &self.inner.bindings;
-        let budget = Arc::new(
-            RunBudget::attach(
-                bindings.state.clone(),
-                bindings.clock.clone(),
-                bindings.ids.clone(),
-                bindings.scope.clone(),
-                run_id.clone(),
-                lease.clone(),
-                local.cancel.clone(),
-            )
-            .await?,
-        );
+        let budget = match RunBudget::attach(
+            bindings.state.clone(),
+            bindings.clock.clone(),
+            bindings.ids.clone(),
+            bindings.scope.clone(),
+            run_id.clone(),
+            lease.clone(),
+            local.cancel.clone(),
+        )
+        .await
+        {
+            Ok(budget) => Arc::new(budget),
+            Err(error) => {
+                self.release_owned(run_id, &lease).await;
+                return Err(error);
+            }
+        };
         let stop = CancellationToken::new();
         let heartbeat_agent = self.clone();
         let heartbeat_budget = budget.clone();
@@ -72,8 +77,12 @@ impl Agent {
             }
             result
         });
+        let mut segment = None;
         let result = AssertUnwindSafe(async {
+            let saved = bindings.state.load(&bindings.scope, run_id).await?;
+            let metadata = self.metadata_segment(&saved, context.clone()).await?;
             if expired {
+                segment = Some(metadata);
                 self.finish(
                     run_id,
                     PreparedOutcome {
@@ -85,13 +94,83 @@ impl Agent {
                         unresolved_effects: vec![],
                     },
                     &budget,
-                    &context,
+                    segment.as_ref().expect("metadata segment"),
                     local,
                 )
                 .await
             } else {
-                self.run_segment(run_id, prompt, &context, &budget, &lease, local)
+                match self
+                    .bind_segment(
+                        &saved,
+                        context.clone(),
+                        Some(&lease),
+                        ComponentBindPurpose::Execution,
+                        Some(&budget),
+                        local,
+                    )
                     .await
+                {
+                    Ok(bound) => {
+                        segment = Some(bound);
+                        self.observe_pending(
+                            run_id,
+                            segment.as_ref().expect("bound segment"),
+                            local,
+                        )
+                        .await;
+                        self.run_segment(
+                            run_id,
+                            prompt,
+                            segment.as_ref().expect("bound segment"),
+                            &budget,
+                            &lease,
+                            local,
+                        )
+                        .await
+                    }
+                    Err(error) => {
+                        segment = Some(metadata);
+                        if matches!(
+                            error.code,
+                            ErrorCode::LeaseLost
+                                | ErrorCode::PersistenceUnavailable
+                                | ErrorCode::RevisionConflict
+                        ) {
+                            return Err(error);
+                        }
+                        self.finish(
+                            run_id,
+                            PreparedOutcome {
+                                result: match error.code {
+                                    ErrorCode::Cancelled => OutcomeResult::Cancelled {
+                                        reason: local
+                                            .reason
+                                            .lock()
+                                            .map_err(|_| {
+                                                fail(ErrorCode::InvalidContract, "agent.cancel")
+                                            })?
+                                            .as_ref()
+                                            .map(ToString::to_string)
+                                            .unwrap_or_else(|| "cancelled".into()),
+                                    },
+                                    ErrorCode::DeadlineExceeded | ErrorCode::BudgetExceeded => {
+                                        OutcomeResult::Exhausted {
+                                            budget: BudgetKind::Elapsed,
+                                        }
+                                    }
+                                    _ => failed(&enum_name(&error.code)),
+                                },
+                                output: vec![],
+                                continuation: vec![],
+                                unresolved_effects: vec![],
+                            },
+                            &budget,
+                            segment.as_ref().expect("metadata segment"),
+                            local,
+                        )
+                        .await
+                    }
+                }
             }
         })
         .catch_unwind()
@@ -101,19 +180,38 @@ impl Agent {
         let heartbeat_result = heartbeat
             .await
             .map_err(|_| fail(ErrorCode::LeaseLost, "agent.heartbeat"))?;
-        // Stored completion is authoritative even if an acknowledgement or the
-        // final heartbeat was lost after the terminal transaction succeeded.
-        if let Ok(saved) = bindings.state.load(&bindings.scope, run_id).await {
-            if saved.snapshot.status.is_terminal() {
-                self.after_run(&saved, &context, local).await;
-                return Ok(());
+        let latest = bindings.state.load(&bindings.scope, run_id).await;
+        if let Some(segment) = segment.as_ref() {
+            if let Ok(saved) = &latest {
+                if saved.snapshot.status.is_terminal() {
+                    if bindings.components.is_some() && segment.owned.is_none() {
+                        if expired {
+                            self.cleanup_observers(saved, &context, local, vec![]).await;
+                        } else if let Ok(mut slot) = local.release_error.lock() {
+                            if slot.is_none() {
+                                *slot = Some(fail(
+                                    ErrorCode::ComponentUnavailable,
+                                    "components.observers_not_bound",
+                                ));
+                            }
+                        }
+                    } else {
+                        self.after_run(saved, segment, local).await;
+                    }
+                }
             }
+            self.release_segment(segment, local).await;
         }
         if let Ok((_, now)) = budget.settlement_time(0) {
             let _ = bindings
                 .state
                 .release_lease(&bindings.scope, run_id, &lease, now)
                 .await;
+        }
+        if latest.as_ref().is_ok_and(|saved| {
+            saved.snapshot.status.is_terminal() || saved.snapshot.status == RunStatus::Waiting
+        }) {
+            return Ok(());
         }
         result.and(heartbeat_result)
     }
@@ -166,11 +264,12 @@ impl Agent {
         &self,
         run_id: &Id,
         prompt: PromptSnapshot,
-        context: &ExecutionContext,
+        segment: &SegmentBindings,
         budget: &RunBudget,
         lease: &RunLease,
         local: &Arc<LocalRun>,
     ) -> Result<(), ContractError> {
+        let context = &segment.context;
         let mut waiting = None;
         let saved = self
             .inner
@@ -181,7 +280,7 @@ impl Agent {
         let mut pending_round = saved.snapshot.tool_ledger.iter().find(|entry| !matches!(&entry.state, ToolCallState::Settled { result } if result.status != ToolResultStatus::Unknown && result.effect != ToolEffect::Unknown)).map(|entry| entry.call.model_request_id.clone());
         let attempt = loop {
             if let Some(request_id) = pending_round.take() {
-                let round = self.tool_round(budget).await?;
+                let round = self.tool_round(budget, segment).await?;
                 let result = round.execute(&request_id, context, budget).await;
                 self.remember_observer_error(local, round.observer_error());
                 match result {
@@ -194,7 +293,7 @@ impl Agent {
                 }
             }
             match self
-                .generate(run_id, prompt.clone(), context, budget, lease)
+                .generate(run_id, prompt.clone(), segment, budget, lease)
                 .await
             {
                 Ok(Guarded::Completed(ModelExchangeOutcome::Completed { response }))
@@ -203,7 +302,7 @@ impl Agent {
                     if let Err(error) = self.plan_tools(&response, &prompt, budget).await {
                         break Some(Err(error));
                     }
-                    let round = self.tool_round(budget).await?;
+                    let round = self.tool_round(budget, segment).await?;
                     let result = round.execute(&response.request_id, context, budget).await;
                     self.remember_observer_error(local, round.observer_error());
                     match result {
@@ -237,7 +336,7 @@ impl Agent {
                         unresolved_effects,
                     },
                     budget,
-                    context,
+                    segment,
                     local,
                 )
                 .await;
@@ -333,7 +432,7 @@ impl Agent {
                 unresolved_effects: vec![],
             },
             budget,
-            context,
+            segment,
             local,
         )
         .await
@@ -343,13 +442,14 @@ impl Agent {
         &self,
         run_id: &Id,
         prompt: PromptSnapshot,
-        context: &ExecutionContext,
+        segment: &SegmentBindings,
         budget: &RunBudget,
         lease: &RunLease,
     ) -> Result<Guarded<ModelExchangeOutcome>, ContractError> {
+        let context = &segment.context;
         let bindings = &self.inner.bindings;
         budget.check_boundary().await?;
-        let run_context = self.before_run(budget, context).await?;
+        let run_context = self.before_run(budget, segment).await?;
         let mut snapshot = bindings.state.load(&bindings.scope, run_id).await?.snapshot;
         let expected_revision = snapshot.revision;
         let step = bindings.ids.next_id()?;
@@ -393,7 +493,7 @@ impl Agent {
                 &step,
                 saved.snapshot.request.input.clone(),
                 run_context,
-                context,
+                segment,
                 budget,
             )
             .await?;
@@ -445,7 +545,7 @@ impl Agent {
         run_id: &Id,
         candidate: PreparedOutcome,
         budget: &RunBudget,
-        context: &ExecutionContext,
+        segment: &SegmentBindings,
         local: &Arc<LocalRun>,
     ) -> Result<(), ContractError> {
         let PreparedOutcome {
@@ -520,7 +620,7 @@ impl Agent {
                 }
                 self.settle_unstarted_tools(
                     &saved.snapshot,
-                    context,
+                    segment,
                     budget,
                     matches!(result, OutcomeResult::Cancelled { .. }),
                     local,

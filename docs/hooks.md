@@ -82,7 +82,7 @@ pub fn with_query_hook(
 }
 ```
 
-This helper assumes no existing hook selections. Supply a `ProfileResolver` whose
+This helper assumes no existing hook selections and `components: None`. Supply a `ProfileResolver` whose
 metadata registers the same hook ID, version, and position. Use the Agent's state,
 scope, policy, clock, and ID source when constructing its `HookRuntime`.
 
@@ -90,7 +90,9 @@ scope, policy, clock, and ID source when constructing its `HookRuntime`.
 run serially: lower `priority` first, then ID to break ties. Each hook receives
 the preceding hook's accepted output. An optional hook is not an optional
 registration: its selected version must still exist and match the pinned plan.
-Adapter-export hooks require the separate adapter runtime and are unsupported.
+Adapter-export hooks are supplied through the [adapter runtime](adapters.md).
+Their original export selections and segment identities remain separate from
+the hook definition; they use the same transformation and observation contracts.
 
 ## Preserve input and context boundaries
 

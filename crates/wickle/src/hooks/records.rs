@@ -17,6 +17,7 @@ impl HookApplicationRecord {
             || &value.scope != scope
             || &value.run_id != run_id
             || value.hook != application.hook
+            || value.selection != application.selection
             || value.definition_digest != application.definition_digest
             || value.target != application.target
             || value.input.digest() != application.input_digest
@@ -25,11 +26,9 @@ impl HookApplicationRecord {
             return Err(invalid());
         }
         let definition = plan
-            .definitions()
-            .iter()
-            .find(|definition| {
-                definition.hook == value.hook
-                    && definition.digest() == value.definition_digest
+            .definition_for(&value.hook, value.selection.as_ref())
+            .filter(|definition| {
+                definition.digest() == value.definition_digest
                     && definition.position == value.target.position()
             })
             .ok_or_else(invalid)?;
@@ -239,7 +238,9 @@ pub(crate) fn validate_application_chain(
         let definitions: Vec<_> = plan
             .definitions()
             .iter()
-            .filter(|definition| definition.position == target.position())
+            .enumerate()
+            .filter(|(_, definition)| definition.position == target.position())
+            .map(|(index, definition)| (definition, plan.selection(index)))
             .collect();
         let applications: Vec<_> = snapshot
             .hook_applications
@@ -251,9 +252,10 @@ pub(crate) fn validate_application_chain(
         }
         let mut current = None;
         let mut denied = false;
-        for (application, definition) in applications.into_iter().zip(definitions) {
+        for (application, (definition, selection)) in applications.into_iter().zip(definitions) {
             if denied
                 || application.hook != definition.hook
+                || application.selection.as_ref() != selection
                 || application.definition_digest != definition.digest()
             {
                 return Err(hook_error(ErrorCode::InvalidSnapshot, "hooks.chain_order"));

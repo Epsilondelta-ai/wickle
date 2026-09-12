@@ -38,7 +38,8 @@ def main():
     core = next(p for p in workspace["packages"] if p["name"] == "wickle")
     catalog = next(p for p in workspace["packages"] if p["name"] == "wickle-model-router")
     sqlite = next(p for p in workspace["packages"] if p["name"] == "wickle-state-sqlite")
-    libraries = [core, catalog, sqlite]
+    adapters = next(p for p in workspace["packages"] if p["name"] == "wickle-adapter-runtime")
+    libraries = [core, catalog, sqlite, adapters]
     versions = {d["name"]: d["req"] for d in core["dependencies"] if d["kind"] is None}
     for dep in core["dependencies"]:
         if dep["kind"] != "dev":
@@ -73,12 +74,13 @@ def main():
             destination.mkdir(parents=True)
             shutil.copyfile(manifest, destination / "Cargo.toml")
             shutil.copytree(manifest.parent / "src", destination / "src")
-        patch = f'patch.crates-io.wickle.path="{base / package_name}"'
         package_paths = {core["name"]: base / package_name}
-        for package in [catalog, sqlite]:
+        for package in [catalog, sqlite, adapters]:
+            patches = [argument for name, path in package_paths.items()
+                       for argument in ["--config", f'patch.crates-io.{name}.path={json.dumps(str(path))}']]
             subprocess.run(
                 ["cargo", "package", "-p", package["name"], "--allow-dirty",
-                 "--offline", "--no-verify", "--config", patch],
+                 "--offline", "--no-verify", *patches],
                 cwd=staged, env={**env, "CARGO_TARGET_DIR": str(staged / "target")}, check=True,
             )
             name = f"{package['name']}-{package['version']}"
@@ -131,7 +133,7 @@ def main():
         for example in examples:
             subprocess.run(["cargo", "run", "--locked", "--offline", "--bin", example.stem],
                            cwd=consumer, env=env, check=True)
-    print("Independent package consumers: passed (core, model catalog, SQLite store)", flush=True)
+    print("Independent package consumers: passed (core, model catalog, SQLite store, adapter runtime)", flush=True)
 
 
 if __name__ == "__main__":

@@ -246,6 +246,8 @@ impl RunSystemInputs {
 /// One exact read-only resolver lookup, without other system values or credentials.
 #[derive(Clone)]
 pub struct SystemInputResolveRequest {
+    /// Original selected adapter export; absent for a directly registered catalog tool.
+    pub selection: Option<ToolBindingRef>,
     /// Registered key being requested.
     pub key: Id,
     /// Pinned value-definition revision.
@@ -331,6 +333,12 @@ struct BoundInputData {
     run_id: Id,
     call_id: Id,
     tool: VersionedRef,
+    #[serde(
+        default,
+        deserialize_with = "crate::serialization::optional",
+        skip_serializing_if = "Option::is_none"
+    )]
+    selection: Option<ToolBindingRef>,
     descriptor_digest: JsonDigest,
     compiled_digest: JsonDigest,
     compiler_version: String,
@@ -394,6 +402,10 @@ impl BoundToolInput {
     pub fn tool(&self) -> &VersionedRef {
         &self.data.tool
     }
+    /// Original export selection when this call is supplied by a scoped adapter.
+    pub fn selection(&self) -> Option<&ToolBindingRef> {
+        self.data.selection.as_ref()
+    }
     /// Original descriptor digest.
     pub fn descriptor_digest(&self) -> &JsonDigest {
         &self.data.descriptor_digest
@@ -439,13 +451,17 @@ impl BoundToolInput {
     }
     /// Build the existing final-value policy input without introducing a new ownership port.
     pub fn policy_input(&self) -> ToolPolicyInput {
-        ToolPolicyInput::new(
+        let input = ToolPolicyInput::new(
             self.data.call_id.clone(),
             self.data.tool.clone(),
             self.data.descriptor_digest.clone(),
             self.binding_digest.clone(),
             self.data.execution_args.clone(),
-        )
+        );
+        match &self.data.selection {
+            Some(selection) => input.with_selection(selection.clone()),
+            None => input,
+        }
     }
     /// Exact action checked for allow/deny/approval after all values are fixed.
     pub fn policy_request(&self) -> PolicyRequest {
@@ -696,6 +712,7 @@ impl InputBinder {
             .call
             .clone();
         check_selection(&saved.snapshot, compiled, &call)?;
+        let selection = resolved_tool_selection(&saved.snapshot, compiled, context, budget).await?;
         let run_inputs = match &saved.snapshot.system_inputs {
             Some(reference) => {
                 boundary(context, budget).await?;
@@ -762,6 +779,12 @@ impl InputBinder {
                 saved.snapshot.system_inputs.as_ref(),
             )?;
             validate_bound_record(record.value(), &saved.snapshot, &call, run_inputs.as_ref())?;
+            if input.selection() != selection.as_ref() {
+                return Err(error(
+                    ErrorCode::SystemInputsMismatch,
+                    "bound_input.selection",
+                ));
+            }
             if input.transformation_ref() != transformed.as_ref().map(|(_, reference)| reference)
                 || input.effective_model_inputs()
                     != transformed
@@ -848,6 +871,7 @@ impl InputBinder {
                             owner_scope: budget.scope().clone(),
                             resource_id: budget.run_id().clone(),
                             action: PolicyAction::ResolveSystemInput {
+                                selection: selection.clone(),
                                 tool: compiled.descriptor().tool.clone(),
                                 call_id: call_id.clone(),
                                 descriptor_digest: compiled.descriptor_digest().clone(),
@@ -863,6 +887,7 @@ impl InputBinder {
                         })?;
                         boundary(context, budget).await?;
                         let request = SystemInputResolveRequest {
+                            selection: selection.clone(),
                             key: definition.key.clone(),
                             definition_version: definition.version.clone(),
                             resolver_ref: resolver_ref.clone(),
@@ -942,6 +967,7 @@ impl InputBinder {
             run_id: budget.run_id().clone(),
             call_id: call_id.clone(),
             tool: compiled.descriptor().tool.clone(),
+            selection,
             descriptor_digest: compiled.descriptor_digest().clone(),
             compiled_digest: compiled.digest().clone(),
             compiler_version: compiled.compiler_version().into(),
@@ -1195,6 +1221,71 @@ async fn bounded<T>(
     }
 }
 
+async fn resolved_tool_selection(
+    snapshot: &RunSnapshot,
+    compiled: &CompiledTool,
+    context: &ExecutionContext,
+    budget: &RunBudget,
+) -> Result<Option<ToolBindingRef>, ContractError> {
+    let Some(reference) = &snapshot.assembly_ref else {
+        if snapshot
+            .profile
+            .profile()
+            .tools
+            .iter()
+            .any(|selection| matches!(selection, ToolBindingRef::Export(_)))
+        {
+            return Err(error(ErrorCode::InvalidSnapshot, "bound_input.assembly"));
+        }
+        return Ok(None);
+    };
+    let inputs = if let Some(reference) = &snapshot.system_inputs {
+        let record = bounded(
+            context,
+            budget,
+            budget
+                .store()
+                .read_record(budget.scope(), &reference.snapshot_ref),
+        )
+        .await?;
+        let input = RunSystemInputs::from_value(record.value(), reference, budget.scope())?;
+        SystemInputRegistry::new(input.definitions().values().cloned().collect())?
+    } else {
+        SystemInputRegistry::default()
+    };
+    let record = bounded(
+        context,
+        budget,
+        budget.store().read_record(budget.scope(), reference),
+    )
+    .await?;
+    let assembly = crate::ResolvedAssembly::restore(
+        &serde_json::to_string(record.value())
+            .map_err(|_| error(ErrorCode::InvalidJson, "bound_input.assembly"))?,
+        &snapshot.profile,
+        &inputs,
+        &reference.digest,
+    )?;
+    let matches: Vec<_> = assembly
+        .tools()
+        .iter()
+        .filter(|binding| {
+            binding.compiled.digest() == compiled.digest()
+                && binding.compiled.descriptor().name == compiled.descriptor().name
+        })
+        .collect();
+    if matches.len() != 1 {
+        return Err(error(
+            ErrorCode::SystemInputsMismatch,
+            "bound_input.selection",
+        ));
+    }
+    Ok(match &matches[0].selection {
+        selection @ ToolBindingRef::Export(_) => Some(selection.clone()),
+        _ => None,
+    })
+}
+
 async fn saved_tool_transform(
     snapshot: &RunSnapshot,
     compiled: &CompiledTool,
@@ -1387,6 +1478,15 @@ pub(crate) fn validate_bound_record(
         call,
         snapshot.system_inputs.as_ref(),
     )?;
+    if input
+        .selection()
+        .is_some_and(|selection| !snapshot.profile.profile().tools.contains(selection))
+    {
+        return Err(error(
+            ErrorCode::SystemInputsMismatch,
+            "bound_input.selection",
+        ));
+    }
     for bound in input.system_inputs().values() {
         let data = run_inputs
             .ok_or_else(|| error(ErrorCode::SystemInputsMismatch, "bound_input.run_snapshot"))?;

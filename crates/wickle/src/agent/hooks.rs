@@ -4,9 +4,9 @@ impl Agent {
     pub(super) async fn before_run(
         &self,
         budget: &RunBudget,
-        context: &ExecutionContext,
+        segment: &SegmentBindings,
     ) -> Result<Vec<ContextItem>, ContractError> {
-        let Some(hooks) = &self.inner.bindings.hooks else {
+        let Some(hooks) = &segment.hooks else {
             return Ok(vec![]);
         };
         let saved = self
@@ -22,7 +22,7 @@ impl Agent {
                     user_input: saved.snapshot.request.input.clone(),
                     context_items: vec![],
                 },
-                context,
+                &segment.context,
                 budget,
             )
             .await?;
@@ -33,10 +33,10 @@ impl Agent {
         step: &Id,
         user_input: Vec<InputContent>,
         context_items: Vec<ContextItem>,
-        context: &ExecutionContext,
+        segment: &SegmentBindings,
         budget: &RunBudget,
     ) -> Result<Vec<ContextItem>, ContractError> {
-        let Some(hooks) = &self.inner.bindings.hooks else {
+        let Some(hooks) = &segment.hooks else {
             return Ok(context_items);
         };
         let transformed = hooks
@@ -48,7 +48,7 @@ impl Agent {
                     user_input,
                     context_items,
                 },
-                context,
+                &segment.context,
                 budget,
             )
             .await?;
@@ -64,10 +64,10 @@ impl Agent {
     pub(super) async fn after_run(
         &self,
         saved: &StoredRun,
-        context: &ExecutionContext,
+        segment: &SegmentBindings,
         local: &LocalRun,
     ) {
-        let Some(hooks) = &self.inner.bindings.hooks else {
+        let Some(hooks) = &segment.hooks else {
             return;
         };
         let Some(outcome) = &saved.snapshot.outcome else {
@@ -76,7 +76,7 @@ impl Agent {
         if !saved.snapshot.status.is_terminal() {
             return;
         }
-        let mut data = context.data.clone();
+        let mut data = segment.context.data.clone();
         data.system_inputs = None;
         let cleanup = ExecutionContext::new(data, CancellationToken::new());
         let observed = caller_read(&cleanup, Some(Duration::from_secs(30)), async {
@@ -118,12 +118,12 @@ impl Agent {
         run_id: &Id,
         target: HookTarget,
         input: HookInput,
-        context: &ExecutionContext,
+        segment: &SegmentBindings,
     ) -> Option<ContractError> {
-        let Some(hooks) = &self.inner.bindings.hooks else {
+        let Some(hooks) = &segment.hooks else {
             return None;
         };
-        let mut data = context.data.clone();
+        let mut data = segment.context.data.clone();
         data.system_inputs = None;
         let cleanup = ExecutionContext::new(data, CancellationToken::new());
         hooks
