@@ -305,6 +305,61 @@ impl RunBudget {
         }
     }
 
+    pub(crate) fn scope(&self) -> &Scope {
+        &self.scope
+    }
+    pub(crate) fn run_id(&self) -> &Id {
+        &self.run_id
+    }
+    pub(crate) fn lease(&self) -> &RunLease {
+        &self.lease
+    }
+    pub(crate) fn store(&self) -> &Arc<dyn StateStore> {
+        &self.store
+    }
+    pub(crate) fn cancellation(&self) -> &CancellationToken {
+        &self.cancellation
+    }
+
+    pub(crate) fn call_deadline(&self) -> Result<tokio::time::Instant, ContractError> {
+        let (_, now) = self.progress(0)?;
+        let remaining = self
+            .timing
+            .deadline_at_ms
+            .checked_sub(now)
+            .and_then(|ms| u64::try_from(ms).ok())
+            .ok_or_else(|| failure(ErrorCode::DeadlineExceeded, "budget.elapsed"))?;
+        tokio::time::Instant::now()
+            .checked_add(std::time::Duration::from_millis(remaining))
+            .ok_or_else(|| failure(ErrorCode::ClockUnavailable, "clock.deadline"))
+    }
+
+    // State settlement is allowed after cancellation/deadline if the lease still
+    // permits a commit. The caller keeps the saved elapsed high-water mark.
+    pub(crate) fn settlement_time(&self, saved_elapsed: u64) -> Result<(u64, i64), ContractError> {
+        let elapsed = self.elapsed_ms()?.max(saved_elapsed);
+        let now = i64::try_from(elapsed)
+            .ok()
+            .and_then(|ms| self.timing.started_at_ms.checked_add(ms))
+            .ok_or_else(|| failure(ErrorCode::ClockUnavailable, "clock.elapsed"))?;
+        Ok((elapsed, now))
+    }
+
+    pub(crate) async fn backoff(&self, delay_ms: u64) -> Result<(), ContractError> {
+        self.check_boundary().await?;
+        let deadline = self
+            .clock
+            .now()?
+            .monotonic_ms
+            .checked_add(delay_ms)
+            .ok_or_else(|| failure(ErrorCode::ClockUnavailable, "clock.backoff"))?;
+        tokio::select! {
+            biased;
+            stopped = self.wait_for_cancellation_or_deadline() => stopped,
+            result = self.clock.sleep_until(deadline) => result,
+        }
+    }
+
     fn check_cancelled(&self) -> Result<(), ContractError> {
         if self.cancellation.is_cancelled() {
             Err(failure(ErrorCode::Cancelled, "budget"))

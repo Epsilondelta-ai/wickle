@@ -1052,6 +1052,7 @@ fn route_roundtrip_keeps_model_api_deployment_and_adapter_versions_distinct() {
         selection_reason: id("policy-default"),
         request_digest: digest("request"),
         state: ModelAttemptState::Completed {},
+        response_ref: None,
         provider_request_id: None,
         reported_model_id: None,
         reported_model_version: None,

@@ -64,6 +64,7 @@ def main():
             'edition = "2024"\npublish = false\n\n[workspace]\n\n'
             f'[dependencies]\nwickle = {{ path = "../{package_name}" }}\n'
             f'serde_json = "{versions["serde_json"]}"\n'
+            f'futures-util = {{ version = "{versions["futures-util"]}", default-features = false, features = ["std", "async-await"] }}\n'
             f'tokio = {{ version = "{versions["tokio"]}", features = ["rt", "macros"] }}\n',
             encoding="utf-8",
         )
