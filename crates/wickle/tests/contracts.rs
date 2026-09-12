@@ -691,8 +691,23 @@ fn request() -> RunRequest {
             text: "Find supporting evidence".into(),
         }],
         trigger: RunTrigger::User {},
+        model_options: JsonObject::new(),
         output_contract: None,
     }
+}
+
+#[test]
+fn absent_model_options_preserve_existing_request_encodings_and_digests() {
+    let mut legacy = serde_json::to_value(request()).unwrap();
+    legacy.as_object_mut().unwrap().remove("model_options");
+    let restored = RunRequest::from_json(&legacy.to_string()).unwrap();
+    assert!(restored.model_options.is_empty());
+    assert_eq!(
+        canonical_digest(&serde_json::to_value(restored).unwrap()),
+        canonical_digest(&legacy)
+    );
+    legacy["model_options"] = json!(null);
+    assert!(RunRequest::from_json(&legacy.to_string()).is_err());
 }
 
 async fn checkpoint() -> RunSnapshot {

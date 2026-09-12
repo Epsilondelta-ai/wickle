@@ -54,6 +54,7 @@ fn model_request(tool: ModelTool) -> ModelRequest {
         tools: vec![tool],
         output: ModelOutput::Text {},
         max_output_tokens: 256.try_into().unwrap(),
+        options: JsonObject::new(),
         limits: ModelResponseLimits {
             max_input_bytes: 16_384,
             max_response_bytes: 4096,

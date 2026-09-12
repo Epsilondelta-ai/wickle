@@ -171,6 +171,7 @@ impl Fixture {
                     text: "Current requested work".into(),
                 }],
                 trigger: RunTrigger::User {},
+                model_options: JsonObject::new(),
                 output_contract: None,
             },
             run_id: id("current-run"),
@@ -217,6 +218,7 @@ impl Fixture {
             route: route(),
             output: ModelOutput::Text {},
             max_output_tokens: 128.try_into().unwrap(),
+            options: JsonObject::new(),
             response_limits: ModelResponseLimits {
                 max_input_bytes: 100_000,
                 max_response_bytes: 4096,
@@ -263,6 +265,71 @@ fn message(
         content,
         visibility: Visibility::UserAndModel,
     }
+}
+
+#[tokio::test]
+async fn host_model_options_reach_the_port_without_becoming_prompt_content() {
+    use std::{sync::Mutex, time::Duration};
+    struct ObserveOptions(Mutex<Option<JsonObject>>);
+    impl ModelPort for ObserveOptions {
+        fn binding(&self) -> ModelPortBinding {
+            let route = route();
+            ModelPortBinding {
+                provider: route.provider,
+                adapter: route.adapter,
+                connection_ref: route.connection_ref,
+            }
+        }
+        fn generate<'a>(
+            &'a self,
+            request: &'a ModelRequest,
+            _: &'a ModelCallContext,
+        ) -> PortStream<'a, ModelEvent> {
+            *self.0.lock().unwrap() = Some(request.options.clone());
+            Box::pin(futures_util::stream::iter([Ok(
+                ModelEvent::ResponseCompleted {
+                    finish: ModelFinish::Stop,
+                    metadata: ModelResponseMetadata::default(),
+                    continuation: vec![],
+                },
+            )]))
+        }
+    }
+    let fixture = Fixture::new().await;
+    let transcript = vec![fixture.current_message(1)];
+    let assembler = ContextAssembler::new();
+    let baseline = assembler
+        .project(&fixture.prompt, fixture.input(&transcript, &[], &[]))
+        .unwrap();
+    let options = object(json!({"reasoning_effort":"high", "provider_mode":{"budget":32}}));
+    let mut input = fixture.input(&transcript, &[], &[]);
+    input.options = options.clone();
+    let projected = assembler.project(&fixture.prompt, input).unwrap();
+    assert_eq!(projected.request.messages, baseline.request.messages);
+    assert_eq!(projected.request.tools, baseline.request.tools);
+    assert_ne!(projected.request.digest(), baseline.request.digest());
+    let port = ObserveOptions(Mutex::new(None));
+    let call = ModelCallContext {
+        attempt_id: id("attempt"),
+        run_id: fixture.run_id.clone(),
+        scope: fixture.scope.clone(),
+        cancellation: Default::default(),
+        deadline: tokio::time::Instant::now() + Duration::from_secs(1),
+    };
+    collect_model_response(&projected.request, port.generate(&projected.request, &call))
+        .await
+        .unwrap();
+    assert_eq!(*port.0.lock().unwrap(), Some(options.clone()));
+    let mut limited = fixture.input(&transcript, &[], &[]);
+    limited.options = options;
+    limited.limits.max_bytes = serde_json::to_vec(&baseline.request).unwrap().len();
+    assert_eq!(
+        assembler
+            .project(&fixture.prompt, limited)
+            .unwrap_err()
+            .code,
+        ErrorCode::ContextBudgetExceeded
+    );
 }
 fn text(value: &str) -> ContentBlock {
     ContentBlock::Content {

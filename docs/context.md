@@ -58,6 +58,19 @@ The stored transcript already includes the current request. Supply its message I
 so the assembler can verify the Run and exact input, include it once, and retain
 later user steering. The logical model request ID and model step ID must agree.
 
+`RunRequest.model_options` stores request-specific logical options, such as
+`{"reasoning_effort":"high"}`, with the admitted request. Its digest and replay
+checks include those options. The Host prepares `ProjectionInput.options`; the
+assembler preserves it in `ModelRequest.options` outside the prompt content.
+Options count toward request bytes and remain unchanged on same-route retries.
+
+Supported keys and values come from the selected model and binding catalog
+schemas, not a core reasoning-effort enum. The Host must check those schemas
+before dispatch. An adapter maps accepted logical keys to its chosen provider
+API explicitly; the map is not a raw request-body merge. Output-token limits
+remain in `max_output_tokens`. Automatic Run-to-route option selection and
+provider wire mappings belong to the runtime driver and adapters.
+
 The projection preserves model-owned Tool arguments and public Tool observations.
 It omits bound-input references, effect receipts, raw diagnostics, internal-only
 messages, and reference ownership scope. Artifact/evidence metadata is included

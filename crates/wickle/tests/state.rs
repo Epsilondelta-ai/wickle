@@ -8,6 +8,86 @@ mod support;
 use support::*;
 
 #[tokio::test]
+async fn admitted_model_options_are_fixed_for_replay_and_later_commits() {
+    fn with_effort(mut input: AdmissionInput, effort: &str) -> AdmissionInput {
+        input.snapshot.request.model_options =
+            JsonObject::from([("reasoning_effort".into(), json!(effort))]);
+        input.snapshot.request_digest =
+            admission_digest(&input.snapshot.request, &input.snapshot.profile, None);
+        let RunEventPayload::RunStarted { request_ref, .. } = &mut input.events[0].payload else {
+            unreachable!()
+        };
+        let record = ProtectedRecord::new(
+            request_ref.record_id.clone(),
+            request_ref.revision,
+            serde_json::to_value(&input.snapshot.request).unwrap(),
+        );
+        let old_ref = request_ref.clone();
+        *request_ref = record.reference().clone();
+        *input
+            .records
+            .iter_mut()
+            .find(|record| record.reference() == &old_ref)
+            .unwrap() = record;
+        input
+    }
+    let store = MemoryStateStore::new();
+    let first = with_effort(
+        admission("run", "request", "session", "input", "1").await,
+        "high",
+    );
+    let expected_options = first.snapshot.request.model_options.clone();
+    let original = store.admit(&scope(), first).await.unwrap().state;
+    let replay = with_effort(
+        admission("replacement", "request", "session", "input", "2").await,
+        "high",
+    );
+    let replay = store.admit(&scope(), replay).await.unwrap();
+    assert!(!replay.created);
+    assert_eq!(
+        replay.state.snapshot.request.model_options,
+        expected_options
+    );
+    let changed = with_effort(
+        admission("replacement", "request", "session", "input", "2").await,
+        "low",
+    );
+    assert_ne!(
+        changed.snapshot.request_digest,
+        original.snapshot.request_digest
+    );
+    assert_eq!(
+        store.admit(&scope(), changed).await.unwrap_err().code,
+        ErrorCode::RequestConflict
+    );
+
+    let lease = store
+        .acquire_lease(&scope(), &id("run"), &id("worker"), 1, 100)
+        .await
+        .unwrap();
+    let mut change = prepared(&original.snapshot, lease, 2);
+    change
+        .snapshot
+        .request
+        .model_options
+        .insert("reasoning_effort".into(), json!("low"));
+    change.snapshot.request_digest =
+        admission_digest(&change.snapshot.request, &change.snapshot.profile, None);
+    assert_eq!(
+        store
+            .commit(&scope(), &id("run"), change)
+            .await
+            .unwrap_err()
+            .code,
+        ErrorCode::InvalidTransition
+    );
+    let saved = store.load(&scope(), &id("run")).await.unwrap().snapshot;
+    let restored = RunSnapshot::from_json(&serde_json::to_string(&saved).unwrap()).unwrap();
+    assert_eq!(restored.request.model_options, expected_options);
+    assert_eq!(restored.request_digest, original.snapshot.request_digest);
+}
+
+#[tokio::test]
 async fn identical_retries_return_the_original_run_without_replacing_resolved_metadata() {
     let store = MemoryStateStore::new();
     let first = admission("run-a", "request", "session", "input", "1").await;

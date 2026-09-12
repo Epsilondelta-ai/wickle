@@ -1,7 +1,8 @@
 use crate::{
     ArtifactRef, AttemptReservation, CompletionPolicy, ContractError, ErrorCode, Failure, Id,
-    InputContent, JsonDigest, ModelAttemptState, ModelInvocationRecord, RecordRef, ReservationKind,
-    ResolvedProfile, RunLimits, RunTiming, Scope, ToolCall, ToolResult, VersionedRef,
+    InputContent, JsonDigest, JsonObject, ModelAttemptState, ModelInvocationRecord, RecordRef,
+    ReservationKind, ResolvedProfile, RunLimits, RunTiming, Scope, ToolCall, ToolResult,
+    VersionedRef,
     serialization::{data_digest, decode, optional},
 };
 use serde::{Deserialize, Serialize};
@@ -74,6 +75,10 @@ pub struct RunRequest {
     pub input: Vec<InputContent>,
     /// Verified trigger provenance.
     pub trigger: RunTrigger,
+    /// Logical model options authorized by the Host and pinned with the admitted request.
+    /// Catalog schemas define supported keys; credentials and raw provider bodies do not belong here.
+    #[serde(default, skip_serializing_if = "JsonObject::is_empty")]
+    pub model_options: JsonObject,
     /// Optional output override; Host policy must authorize its use.
     #[serde(
         default,

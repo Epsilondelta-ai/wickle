@@ -3,7 +3,7 @@ use crate::{
     serialization::{data_digest, optional},
 };
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeSet, num::NonZeroU64};
+use std::{collections::BTreeSet, fmt, num::NonZeroU64};
 
 /// Logical purpose of a model call; all purposes consume the run's model budget.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -120,7 +120,7 @@ pub enum ModelFailureKind {
 }
 
 /// Selection request; the router returns data and does not invoke a model.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RouteRequest {
     /// Profile's Host binding/routing configuration name.
@@ -133,6 +133,10 @@ pub struct RouteRequest {
     pub input_tokens: u64,
     /// Reserved output tokens.
     pub max_output_tokens: NonZeroU64,
+    /// Host-owned logical options that each candidate's catalog schemas must accept.
+    /// No provider wire format or reasoning-effort vocabulary is implied by these keys.
+    #[serde(default, skip_serializing_if = "JsonObject::is_empty")]
+    pub options: JsonObject,
     /// Authenticated routing/data scope.
     pub scope: Scope,
     /// Explicitly allowed binding names.
@@ -154,6 +158,20 @@ pub struct RouteRequest {
         skip_serializing_if = "Option::is_none"
     )]
     pub previous_failure: Option<ModelFailureKind>,
+}
+
+impl fmt::Debug for RouteRequest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RouteRequest")
+            .field("model_binding", &self.model_binding)
+            .field("purpose", &self.purpose)
+            .field("required_capabilities", &self.required_capabilities)
+            .field("input_tokens", &self.input_tokens)
+            .field("max_output_tokens", &self.max_output_tokens)
+            .field("option_count", &self.options.len())
+            .field("version_policy", &self.version_policy)
+            .finish_non_exhaustive()
+    }
 }
 
 /// Whether token counts were measured by the provider or estimated by the Host.

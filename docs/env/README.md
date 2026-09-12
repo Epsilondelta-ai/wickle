@@ -1,26 +1,26 @@
 # 모델 테스트용 `.env` 설정
 
-접근 가능한 프로바이더의 모델만 준비하면 됩니다. 인증 정보는 프로바이더별로 한 번 설정하고, 테스트할 모델·버전은 번호를 붙여 각각 추가합니다. 에이전트 검증에는 텍스트 응답과 Tool calling을 지원하는 모델을 준비합니다. 공급자를 켜는 별도 환경변수는 사용하지 않습니다.
+접근 가능한 프로바이더의 인증 정보와 **실제 호출할 모델 ID 또는 배포명**을 준비합니다. 버전이 포함된 모델 ID는 그대로 한 번만 입력합니다. 별도의 모델 `VERSION` 입력은 없습니다. 모델별 effort/thinking 수준과 출력 토큰 한도도 설정할 수 있습니다.
 
-**이 `.env`와 모델 번호 변수는 Wickle의 실제 연결 테스트 전용입니다. 라이브러리 사용자의 런타임 설정 규약이 아닙니다.**
-
-이 문서는 테스트 연결 설정을 준비하기 위한 규약입니다. 실제 어댑터와 모델별 테스트는 구현 중이며, 모델 등록·버전 확인과 실제 호출 결과를 별도로 기록합니다.
+**이 파일과 환경변수는 실제 연결 테스트 전용입니다. Wickle 라이브러리는 `.env`를 읽지 않으며, 실제 서비스에서는 Host가 구성한 어댑터와 호출 옵션을 전달합니다.** 제공 경로 어댑터와 live test runner는 구현 중입니다.
 
 ## 프로바이더별 가이드
 
-| 사용할 경로 | 설정 가이드 | 모델 변수 prefix |
+| 경로 | 호출 대상 | 추론 조절 옵션 |
 | --- | --- | --- |
-| OpenAI GPT | [OpenAI](openai.md) | `OPENAI_MODEL_<N>_` |
-| Azure Foundry OpenAI GPT | [Azure OpenAI](azure-openai.md) | `AZURE_OPENAI_MODEL_<N>_` |
-| Anthropic Claude 직접 API | [Claude](anthropic.md) | `ANTHROPIC_MODEL_<N>_` |
-| AWS Bedrock Claude | [Bedrock](bedrock.md) | `BEDROCK_MODEL_<N>_` |
-| Google AI Studio / Gemini API | [Gemini API](gemini.md) | `GEMINI_MODEL_<N>_` |
-| Google Cloud Vertex AI Gemini | [Vertex AI](vertex-ai.md) | `VERTEX_MODEL_<N>_` |
-| xAI Grok | [Grok](xai.md) | `XAI_MODEL_<N>_` |
+| [OpenAI GPT](openai.md) | `OPENAI_MODEL_<N>_ID` | `REASONING_EFFORT` |
+| [Azure OpenAI GPT](azure-openai.md) | `AZURE_OPENAI_MODEL_<N>_DEPLOYMENT` | `REASONING_EFFORT` |
+| [Anthropic Claude](anthropic.md) | `ANTHROPIC_MODEL_<N>_ID` | `EFFORT`, 필요한 모델의 thinking 설정 |
+| [AWS Bedrock Claude](bedrock.md) | `BEDROCK_MODEL_<N>_ID` | `EFFORT`, 필요한 모델의 thinking 설정 |
+| [Gemini API](gemini.md) | `GEMINI_MODEL_<N>_ID` | `THINKING_LEVEL` 또는 지원되는 thinking token budget |
+| [Vertex AI Gemini](vertex-ai.md) | `VERTEX_MODEL_<N>_ID` | `THINKING_LEVEL` 또는 지원되는 thinking token budget |
+| [xAI Grok](xai.md) | `XAI_MODEL_<N>_ID` | `REASONING_EFFORT` |
+
+추론 옵션 이름은 각 `MODEL_<N>_` 뒤에 붙입니다. 모든 경로에서 같은 번호의 `MAX_OUTPUT_TOKENS`로 출력 토큰 한도를 정합니다. 지원 옵션과 값은 모델·API별로 다릅니다. 빈 옵션은 전송하지 않고, 지정한 미지원 옵션은 오류로 처리합니다.
 
 ## 파일 만들기
 
-Wickle 저장소에서 [`.env.example`](../../.env.example)을 참고해 `.env`를 만듭니다. 기존 파일이 있으면 필요한 항목만 편집합니다.
+Wickle 저장소의 [`.env.example`](../../.env.example)을 참고해 `.env`를 만듭니다. 기존 파일이 있으면 필요한 항목만 편집합니다.
 
 ```sh
 if [ ! -e .env ]; then
@@ -28,43 +28,37 @@ if [ ! -e .env ]; then
 fi
 ```
 
-`.env`와 `.env.*`는 Git에서 제외됩니다. 실제 키나 credential JSON을 문서·커밋에 넣지 않습니다. 테스트 실행기가 `.env`를 읽어 모델별 어댑터를 구성합니다. Core 라이브러리는 파일을 읽거나 이 환경변수에 의존하지 않고 구성된 어댑터를 전달받습니다. `.env`와 `.env.example`은 배포용 `.crate` 패키지에도 포함하지 않습니다. 실제 서비스의 설정 방식은 Host 애플리케이션이 결정합니다.
+`.env`와 `.env.*`는 Git에서 제외됩니다. 실제 키와 credential JSON은 커밋하지 않습니다. `.env`와 `.env.example`은 배포용 `.crate`에도 포함하지 않습니다.
 
-## 모델을 여러 개 추가하기
-
-예를 들어 OpenAI 계정 하나에서 두 모델을 테스트하려면 다음처럼 작성합니다. 빈칸에는 콘솔이나 공식 모델 문서에서 확인한 실제 값을 넣습니다.
+## 모델과 effort별로 설정하기
 
 ```dotenv
 OPENAI_API_KEY=
 OPENAI_BASE_URL=https://api.openai.com/v1
 
 OPENAI_MODEL_1_ID=
-OPENAI_MODEL_1_VERSION=
+OPENAI_MODEL_1_REASONING_EFFORT=high
+OPENAI_MODEL_1_MAX_OUTPUT_TOKENS=4096
 
 OPENAI_MODEL_2_ID=
-OPENAI_MODEL_2_VERSION=
+OPENAI_MODEL_2_REASONING_EFFORT=low
+OPENAI_MODEL_2_MAX_OUTPUT_TOKENS=4096
 ```
 
-- 번호는 프로바이더별로 `1`, `2`, `3`처럼 붙입니다. 같은 모델의 서로 다른 버전도 번호를 나누어 작성합니다.
-- 모델 ID가 입력된 각 항목이 독립 테스트 대상입니다. 사용할 수 없는 프로바이더와 아직 준비하지 않은 모델 항목은 비워 둡니다.
-- `_VERSION`은 모델 release 정보입니다. API 버전·deployment 이름·SDK 버전과 구분합니다. 모르는 값은 준비 단계에서 비워 두고, 실제 테스트 전에 확인합니다. 임의 날짜나 버전을 만들어 넣지 않습니다.
-- 공급자가 전체 모델 ID로 고정 release를 식별한다면, 공식적으로 확인한 그 ID를 `_VERSION`에도 사용할 수 있습니다. `latest` 같은 alias를 고정 버전으로 간주하지 않습니다.
-- Azure deployment와 Bedrock inference profile처럼 모델마다 달라지는 호출 대상은 해당 번호의 항목으로 작성합니다. 각 가이드에 필요한 변수를 제시합니다.
-- 다른 계정·endpoint·region·project를 사용해야 한다면 `.env.azure-dev`, `.env.bedrock-seoul`처럼 별도 파일로 나누어 같은 규약을 사용합니다. 공통 설정이 서로 다른 계정을 섞지 않습니다.
-- 중복된 변수 이름을 추가하지 않습니다. 모델을 추가할 때는 해당 모델 블록의 번호를 바꾸고, 공통 API 키는 그대로 사용합니다.
+각 ID 칸에 접근 가능한 정확한 모델 이름을 넣습니다. 두 칸에 같은 모델 ID를 넣으면 effort별 비교가 되고, 서로 다른 모델 또는 snapshot ID를 넣으면 모델·버전별 비교가 됩니다. 위 `high`와 `low`도 선택한 모델이 지원할 때만 사용합니다.
 
-이전 예제의 `OPENAI_MODEL_ID` / `OPENAI_MODEL_VERSION`처럼 번호 없는 모델 변수는 각각 `OPENAI_MODEL_1_ID` / `OPENAI_MODEL_1_VERSION` 형태로 옮깁니다. 다른 프로바이더도 같은 규칙입니다. 인증 변수 이름은 유지됩니다.
+- 모델 ID가 입력된 각 번호가 독립 테스트 대상입니다. Azure는 배포명이 기준입니다. 공급자를 켜는 별도 변수는 없습니다.
+- 번호는 프로바이더별로 `1`, `2`, `3`처럼 늘립니다. 인증 정보는 한 번만 작성합니다.
+- `MAX_OUTPUT_TOKENS=4096`은 예시 출력 예산입니다. 큰 effort에서 출력이 한도에 걸리면 테스트 목적과 모델 한도에 맞춰 조정합니다.
+- API 버전, region, endpoint, 인증은 실제 연결에 필요한 값이므로 해당 가이드를 따릅니다. 계정·리소스·region이 다르면 별도 `.env` 파일로 나눕니다.
+- 모델 버전과 고정 여부는 모델 ID·배포 metadata를 확인해 결과에 기록합니다. 이름에서 날짜를 만들거나 요청값을 공급자가 보고한 버전으로 복사하지 않습니다.
 
-## 준비할 정보
+이전 설정에서 `*_MODEL_<N>_VERSION`은 삭제합니다. Azure는 실제 배포명만 유지하고, Bedrock은 profile로 호출한다면 그 profile ID/ARN을 `BEDROCK_MODEL_<N>_ID`에 넣습니다. 별도의 기반 모델 ID를 중복 입력하지 않습니다.
 
-| 정보 | 필요한 경우 |
-| --- | --- |
-| API 키 또는 클라우드 인증 방식 | 각 프로바이더의 호출 권한 |
-| 모델 ID | 모든 모델 항목 |
-| 정확한 모델 release/version | 버전별 지원 및 고정 검증 |
-| Deployment 이름 | Azure OpenAI의 각 모델 항목 |
-| Inference profile ID/ARN | Bedrock 호출에 필요한 모델 항목 |
-| Region·project·endpoint | 해당 클라우드 리소스 또는 별도 연결 설정 |
-| API version/mode | 선택한 제공 경로의 HTTP 계약 |
+## 호출 옵션 전달
 
-파일을 준비한 뒤에는 파일 경로와 작성한 프로바이더·모델 항목을 알려주면 됩니다. 키 값 자체를 메시지로 보낼 필요는 없습니다. 검증 결과는 `(제공 경로, 모델 ID, 모델 버전, API/배포 설정)`별로 기록하며, 설정 누락·호출 불가·미확인 버전을 성공으로 처리하지 않습니다.
+테스트 실행기는 effort/thinking 값을 Host 모델 옵션으로 구성하고, 출력 한도는 모델 요청의 별도 token budget으로 전달합니다. `REASONING_EFFORT`는 `reasoning_effort`, `EFFORT`는 `effort`, thinking 설정은 `thinking_mode`·`thinking_level`·`thinking_budget_tokens`라는 옵션 키로 다룹니다. 해당 키는 선택한 모델 binding의 schema가 허용해야 합니다.
+
+이 옵션 map을 HTTP body에 임의로 합치지 않습니다. 어댑터가 해당 모델·API의 필드로 변환합니다. 모델별 지원 검사는 옵션을 조용히 제거하거나 다른 수준으로 바꾸지 않고 실제 전송과 응답까지 확인해야 합니다.
+
+파일 준비 후 파일 경로와 작성한 모델 항목을 알려주면 됩니다. 비밀 키 자체를 메시지로 보낼 필요는 없습니다. 설정 누락·미지원 옵션·호출 실패·미확인 버전을 성공으로 기록하지 않습니다.

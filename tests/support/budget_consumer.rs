@@ -74,6 +74,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             text: "Count available records".into(),
         }],
         trigger: RunTrigger::User {},
+        model_options: JsonObject::new(),
         output_contract: None,
     };
     let request_record =

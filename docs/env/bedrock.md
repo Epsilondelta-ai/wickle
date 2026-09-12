@@ -8,9 +8,10 @@ AWS 계정의 인증 정보, 호출을 시작할 리전, 해당 리전에서 사
 AWS_REGION=
 
 BEDROCK_MODEL_1_ID=
-BEDROCK_MODEL_1_VERSION=
-# 모델 호출에 inference profile을 사용할 때만 설정합니다.
-# BEDROCK_MODEL_1_INFERENCE_PROFILE_ID=
+BEDROCK_MODEL_1_EFFORT=
+BEDROCK_MODEL_1_THINKING_MODE=
+BEDROCK_MODEL_1_THINKING_BUDGET_TOKENS=
+BEDROCK_MODEL_1_MAX_OUTPUT_TOKENS=4096
 
 # 이름 있는 AWS profile을 사용할 때만 설정합니다.
 # AWS_PROFILE=
@@ -48,9 +49,9 @@ aws bedrock list-inference-profiles \
   --output json
 ```
 
-첫 목록의 foundation model ID를 `BEDROCK_MODEL_1_ID`에 복사합니다. Console과 공식 모델 문서에서 확인한 release를 `BEDROCK_MODEL_1_VERSION`에 기록합니다. 공식적으로 고정 release를 식별하는 전체 model ID를 버전 식별자로 사용할 수 있지만, 임의의 날짜나 suffix를 만들지는 않습니다. [foundation model 목록](https://docs.aws.amazon.com/cli/latest/reference/bedrock/list-foundation-models.html), [제공 경로별 모델 ID](https://platform.claude.com/docs/en/about-claude/models/model-ids-and-versions).
+`BEDROCK_MODEL_1_ID`에는 실제 요청의 `modelId`로 사용할 식별자 하나를 입력합니다. Foundation model로 호출하면 그 model ID를, inference profile로 호출하면 해당 profile ID 또는 ARN을 넣습니다. 기반 모델 ID나 release를 별도 입력하지 않으며 임의의 suffix를 만들지 않습니다. [foundation model 목록](https://docs.aws.amazon.com/cli/latest/reference/bedrock/list-foundation-models.html), [profile로 추론하기](https://docs.aws.amazon.com/bedrock/latest/userguide/inference-profiles-use.html).
 
-Inference profile로 호출한다면 그 ID 또는 ARN을 같은 번호의 `BEDROCK_MODEL_1_INFERENCE_PROFILE_ID`에 넣고, 아래 명령으로 실제 연결된 모델과 리전을 확인합니다. `BEDROCK_MODEL_1_ID`에는 기반 foundation model을 유지합니다. 호출 시 profile이 `modelId` 대상이 되며, `AWS_REGION`은 요청의 출발 리전입니다. [profile 조회](https://docs.aws.amazon.com/cli/latest/reference/bedrock/get-inference-profile.html), [profile로 추론하기](https://docs.aws.amazon.com/bedrock/latest/userguide/inference-profiles-use.html).
+Inference profile이 가리키는 실제 모델·release·리전은 테스트 검증 단계에서 조회하여 내부 metadata로 기록합니다. 준비 중에는 아래 명령으로도 확인할 수 있습니다. `AWS_REGION`은 요청의 출발 리전입니다. [profile 조회](https://docs.aws.amazon.com/cli/latest/reference/bedrock/get-inference-profile.html).
 
 ```sh
 aws bedrock get-inference-profile \
@@ -60,12 +61,24 @@ aws bedrock get-inference-profile \
   --output json
 ```
 
-같은 계정·인증·출발 리전에서 다른 모델이나 버전을 검사하려면 다음 번호를 추가합니다.
+## Effort와 thinking 설정
+
+`BEDROCK_MODEL_1_EFFORT`는 논리 옵션 `effort`입니다. 같은 Claude 계열이라도 모델과 Bedrock API 경로에 따라 지원 여부·허용 수준이 다릅니다. [Claude effort](https://platform.claude.com/docs/en/build-with-claude/effort).
+
+`THINKING_MODE`와 `THINKING_BUDGET_TOKENS`는 각각 `thinking_mode`, `thinking_budget_tokens` 논리 옵션입니다. `adaptive`는 모드이고 effort 값이 아닙니다. 수동 thinking 예산을 지원하는 모델에서만 해당 토큰 설정을 사용합니다. [Adaptive thinking](https://platform.claude.com/docs/en/build-with-claude/adaptive-thinking), [수동 thinking](https://platform.claude.com/docs/en/build-with-claude/extended-thinking).
+
+빈 옵션은 전송하지 않습니다. 선택한 모델·API의 schema에 없는 값이나 조합은 명시적으로 거부하며, 직접 Claude API 설정을 Bedrock 요청에 그대로 복사하거나 지원하지 않는 옵션을 조용히 무시하지 않습니다. 실제 wire 필드 매핑은 Bedrock 어댑터가 담당하며 SDK 연결은 아직 구현 전입니다.
+
+`MAX_OUTPUT_TOKENS=4096`은 응답 한 번의 출력 예산 예시입니다. 모델의 요건과 thinking·도구 호출을 포함한 작업량에 맞춰 조정합니다. 긴 tool loop에 충분한 예산을 보장하는 값은 아닙니다.
+
+같은 계정·인증·출발 리전에서 다른 호출 대상을 추가하거나, 같은 `modelId`에 서로 다른 effort를 적용하려면 다음 번호를 사용합니다.
 
 ```dotenv
 BEDROCK_MODEL_2_ID=
-BEDROCK_MODEL_2_VERSION=
-# BEDROCK_MODEL_2_INFERENCE_PROFILE_ID=
+BEDROCK_MODEL_2_EFFORT=
+BEDROCK_MODEL_2_THINKING_MODE=
+BEDROCK_MODEL_2_THINKING_BUDGET_TOKENS=
+BEDROCK_MODEL_2_MAX_OUTPUT_TOKENS=4096
 ```
 
-번호는 양의 정수이며 ID를 채운 각 번호가 독립된 검사 대상입니다. VERSION은 준비 중 미확인이면 비워 두되 실제 검사 전에 확인하고, 미확인을 통과로 기록하지 않습니다. 계정·role/profile·출발 리전·endpoint가 다르면 별도의 `.env` 파일을 사용합니다. 이 설정에는 직접 Anthropic API의 키나 `ANTHROPIC_API_VERSION`을 넣지 않습니다.
+번호는 양의 정수이며 ID를 채운 각 번호가 독립된 모델·옵션 검사 대상입니다. 같은 모델의 effort를 비교할 때는 두 슬롯에 같은 실제 호출 ID와 서로 다른 허용 effort 값을 넣습니다. 계정·role/profile·출발 리전·endpoint가 다르면 별도의 `.env` 파일을 사용합니다. 이 설정에는 직접 Anthropic API의 키나 `ANTHROPIC_API_VERSION`을 넣지 않습니다.

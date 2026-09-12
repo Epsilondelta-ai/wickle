@@ -518,6 +518,7 @@ async fn compiled_model_tool_rejects_a_model_supplied_hidden_uuid_in_real_respon
         tools: vec![compiled.to_model_tool()],
         output: ModelOutput::Text {},
         max_output_tokens: 128.try_into().unwrap(),
+        options: JsonObject::new(),
         limits: ModelResponseLimits {
             max_input_bytes: 16384,
             max_response_bytes: 4096,

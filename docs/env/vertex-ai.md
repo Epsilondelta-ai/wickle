@@ -10,7 +10,9 @@ GOOGLE_CLOUD_LOCATION=
 VERTEX_API_VERSION=v1
 
 VERTEX_MODEL_1_ID=
-VERTEX_MODEL_1_VERSION=
+VERTEX_MODEL_1_THINKING_LEVEL=
+VERTEX_MODEL_1_THINKING_BUDGET_TOKENS=
+VERTEX_MODEL_1_MAX_OUTPUT_TOKENS=4096
 
 # 특정 credential/federation 설정 파일을 선택할 때만 설정합니다.
 # GOOGLE_APPLICATION_CREDENTIALS=
@@ -22,7 +24,7 @@ VERTEX_MODEL_1_VERSION=
 
 1. Google Cloud Console에서 사용할 프로젝트를 선택합니다. **프로젝트 ID**를 `GOOGLE_CLOUD_PROJECT`에 복사하고, 결제 연결과 `aiplatform.googleapis.com` 활성화를 확인합니다. 호출 주체에는 `roles/aiplatform.user` 또는 필요한 추론 권한을 담은 별도 역할이 필요합니다. [프로젝트·권한 준비](https://docs.cloud.google.com/vertex-ai/generative-ai/docs/start/quickstart).
 2. Console의 모델 카탈로그에서 Gemini 모델을 선택한 뒤 [모델 ID·release 목록](https://docs.cloud.google.com/vertex-ai/generative-ai/docs/learn/model-versions)과 [지원 위치](https://docs.cloud.google.com/vertex-ai/generative-ai/docs/learn/locations)를 확인합니다. 지원되는 리전 또는 `global`을 `GOOGLE_CLOUD_LOCATION`에 넣습니다. 같은 모델이라도 모든 위치에서 사용할 수 있다고 가정하지 않습니다.
-3. 모델 요청에 사용할 정확한 Google 모델 ID를 `VERTEX_MODEL_1_ID`에 복사하고, 확인한 release 식별자를 `VERTEX_MODEL_1_VERSION`에 기록합니다. 표시 이름·프로젝트 ID·endpoint ID를 모델 ID 대신 넣지 않습니다. 별도 release 값이 없으면 공식적으로 고정 release를 식별한다고 확인한 전체 모델 ID를 사용할 수 있습니다. [모델 버전과 수명주기](https://docs.cloud.google.com/vertex-ai/generative-ai/docs/learn/model-versions).
+3. 모델 요청에 사용할 정확한 Google 모델 ID를 `VERTEX_MODEL_1_ID` 하나에 복사합니다. 표시 이름·프로젝트 ID·endpoint ID를 모델 ID 대신 넣지 않습니다. 실제 release와 고정 여부는 테스트 검증 단계에서 조회하여 내부 metadata로 기록하므로 별도 버전을 중복 입력하지 않습니다. [모델 버전과 수명주기](https://docs.cloud.google.com/vertex-ai/generative-ai/docs/learn/model-versions).
 
 CLI에서 접근 가능한 프로젝트를 조회하고 로컬 ADC를 준비할 수도 있습니다. API 활성화 명령의 프로젝트 ID는 실제 값으로 바꿉니다.
 
@@ -42,13 +44,23 @@ gcloud auth application-default login
 gcloud auth application-default set-quota-project '<quota 프로젝트 ID>'
 ```
 
-같은 프로젝트·ADC·위치에서 다른 모델이나 버전도 검사하려면 다음 번호를 추가합니다.
+## Thinking 설정
+
+`VERTEX_MODEL_1_THINKING_LEVEL`은 논리 옵션 `thinking_level`입니다. 구형 모델의 토큰 예산 방식에는 `THINKING_BUDGET_TOKENS`를 사용해 `thinking_budget_tokens`를 전달합니다. 어댑터가 선택된 Vertex API의 `thinkingConfig`에 매핑하며, 지원 level·예산 범위·동시 설정 제약은 모델과 API별로 검사합니다. [Vertex Gemini thinking](https://docs.cloud.google.com/vertex-ai/generative-ai/docs/thinking).
+
+빈 옵션은 전송하지 않습니다. 모든 모델에 공통 enum을 가정하거나 지원하지 않는 설정을 조용히 버리지 않고 명시적으로 거부합니다. 실제 SDK 매핑은 Vertex 어댑터의 책임이며 아직 구현 전입니다.
+
+`MAX_OUTPUT_TOKENS=4096`은 응답 한 번의 출력 예산 예시입니다. 모델별 호출 요건과 thinking·도구 호출에 필요한 공간에 맞춰 조정합니다. 긴 tool loop에 충분한 전체 예산을 뜻하지 않습니다.
+
+같은 프로젝트·ADC·위치에서 다른 모델을 추가하거나, 동일한 모델 ID에 서로 다른 thinking level을 적용해 비교하려면 다음 번호를 사용합니다.
 
 ```dotenv
 VERTEX_MODEL_2_ID=
-VERTEX_MODEL_2_VERSION=
+VERTEX_MODEL_2_THINKING_LEVEL=
+VERTEX_MODEL_2_THINKING_BUDGET_TOKENS=
+VERTEX_MODEL_2_MAX_OUTPUT_TOKENS=4096
 ```
 
-번호는 양의 정수이며 ID를 채운 각 번호가 독립된 모델·버전 검사 대상입니다. 미확인 VERSION은 준비 중에는 비워 두고 실제 검사 전에 확인합니다. 미확인을 통과로 기록하지 않습니다. 프로젝트·인증 계정·리전·endpoint가 다르면 별도의 `.env` 파일을 사용합니다.
+번호는 양의 정수이며 ID를 채운 각 번호가 독립된 모델·옵션 검사 대상입니다. 같은 모델을 비교할 때는 ID를 동일하게 넣고 thinking 설정에 각각 다른 허용값을 입력합니다. 프로젝트·인증 계정·리전·endpoint가 다르면 별도의 `.env` 파일을 사용합니다.
 
 `VERTEX_API_VERSION=v1`은 API 계약 버전입니다. 모델 버전과는 별개이며, 일반 endpoint는 선택한 location에 맞춰 구성합니다. [공식 호출 예제](https://docs.cloud.google.com/vertex-ai/generative-ai/docs/start/quickstart). AI Studio 키를 준비한 경우에는 [Gemini API 가이드](gemini.md)의 경로를 사용합니다.

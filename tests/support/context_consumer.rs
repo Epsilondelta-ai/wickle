@@ -78,6 +78,7 @@ fn request(run: &str, text: &str) -> RunRequest {
         session_id: id("session"),
         input: vec![InputContent::Text { text: text.into() }],
         trigger: RunTrigger::User {},
+        model_options: JsonObject::from([("reasoning_effort".into(), json!("high"))]),
         output_contract: None,
     }
 }
@@ -177,6 +178,7 @@ fn project(
             route: route(),
             output: ModelOutput::Text {},
             max_output_tokens: 128.try_into().unwrap(),
+            options: stored.snapshot.request.model_options.clone(),
             response_limits: ModelResponseLimits {
                 max_input_bytes: 32_768,
                 max_response_bytes: 4096,
@@ -258,6 +260,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
     let first = store.admit(&scope, first_input).await?.state;
     let first_projection = project(&prompt, &first)?;
+    assert_eq!(first_projection.request.options, first.snapshot.request.model_options);
     assert_eq!(first_projection.request.messages[0].role, ModelRole::System);
     assert_eq!(
         projected_user_occurrences(&first_projection, "Review the available evidence"),

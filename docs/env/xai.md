@@ -15,13 +15,15 @@ xAI 직접 API의 인증 정보와 모델별 테스트 대상을 준비합니다
 XAI_API_KEY=
 XAI_BASE_URL=https://api.x.ai/v1
 
-# 첫 번째 모델: 실제 사용 가능한 ID와 확인한 릴리스
+# 첫 번째 모델: 실제 사용 가능한 호출 ID
 XAI_MODEL_1_ID=
-XAI_MODEL_1_VERSION=
+XAI_MODEL_1_REASONING_EFFORT=
+XAI_MODEL_1_MAX_OUTPUT_TOKENS=4096
 
 # 두 번째 모델 또는 같은 모델의 다른 릴리스
 XAI_MODEL_2_ID=
-XAI_MODEL_2_VERSION=
+XAI_MODEL_2_REASONING_EFFORT=
+XAI_MODEL_2_MAX_OUTPUT_TOKENS=4096
 ```
 
 | 설정 | 입력할 값 |
@@ -29,12 +31,21 @@ XAI_MODEL_2_VERSION=
 | `XAI_API_KEY` | 선택한 xAI 계정·팀에서 만든 API key |
 | `XAI_BASE_URL` | `/v1`을 포함한 xAI API 주소 |
 | `XAI_MODEL_1_ID` | 실제 요청의 `model`에 전달할 정확한 모델 ID |
-| `XAI_MODEL_1_VERSION` | 공식 자료로 확인한 해당 모델의 릴리스 식별자 |
+| `XAI_MODEL_1_REASONING_EFFORT` | 선택한 모델·API에서 허용하는 reasoning effort |
+| `XAI_MODEL_1_MAX_OUTPUT_TOKENS` | 한 번의 모델 응답에 허용할 출력 토큰 수 |
 
-`_VERSION`은 테스트 대상의 릴리스를 기록하는 값입니다. 실제 호출 버전은 `_ID`에 넣는 모델 ID로 선택하므로 `_VERSION`만 바꿔 alias를 특정 버전으로 고정할 수는 없습니다. 공급자가 전체 릴리스 ID로만 버전을 구분한다면, 확인한 그 ID를 `_ID`와 `_VERSION`에 동일하게 적습니다. `/v1`은 API 경로 버전이며 모델 릴리스와 별개입니다.
+모델 식별자는 `_ID` 하나만 입력합니다. 실제 release와 alias의 고정 여부는 검증 단계에서 확인하여 내부 metadata에 기록합니다. `/v1`은 API 경로 버전이며 모델 릴리스와 별개입니다.
 
-두 모델은 각각 `_1_ID`와 `_2_ID`에 넣습니다. 같은 모델의 두 버전은 각 슬롯에 실제로 존재하는 서로 다른 릴리스 ID를 넣습니다. 더 필요하면 `XAI_MODEL_3_ID`, `XAI_MODEL_3_VERSION`처럼 양의 정수 번호를 늘립니다.
+## Reasoning effort 설정
 
-ID가 채워진 슬롯마다 독립 테스트 대상이 됩니다. 사용하지 않는 슬롯은 ID를 비워둡니다. 릴리스를 아직 확인하지 못했다면 준비 중에는 `_VERSION`을 비워두고 실제 테스트 전에 확인하세요. 별도 계정이나 endpoint를 사용할 때는 별도 `.env` 파일로 준비합니다.
+`XAI_MODEL_1_REASONING_EFFORT`는 논리 옵션 `reasoning_effort`입니다. 현재 공식 Responses API 예제에서는 `reasoning.effort`에 대응합니다. 지원 여부와 허용 수준은 모델·API별로 다르므로 선택한 조합의 schema를 확인합니다. 구형 모델의 제한을 모든 Grok 모델에 적용하지 않습니다. [xAI reasoning](https://docs.x.ai/developers/model-capabilities/text/reasoning).
+
+빈 effort는 전송하지 않습니다. 지원하지 않는 값이 공급자에서 무시·대체될 수 있더라도 테스트에서는 명시적으로 거부하며 조용히 낮은 수준으로 바꾸지 않습니다. 논리 옵션을 실제 요청 필드로 변환하는 어댑터의 SDK 연결은 아직 구현 전입니다.
+
+`MAX_OUTPUT_TOKENS=4096`은 응답 한 번의 출력 예산 예시입니다. 모델의 요건과 reasoning·도구 호출에 필요한 토큰에 맞춰 조정합니다. 긴 tool loop 전체에 충분한 예산이라는 뜻은 아닙니다.
+
+두 모델은 각각 `_1_ID`와 `_2_ID`에 넣습니다. 같은 모델에 다른 effort를 비교하려면 두 ID를 동일하게 넣고 각 슬롯의 `REASONING_EFFORT`에 다른 허용값을 입력합니다. 더 필요하면 `XAI_MODEL_3_ID`, `XAI_MODEL_3_REASONING_EFFORT`, `XAI_MODEL_3_MAX_OUTPUT_TOKENS`처럼 양의 정수 번호를 늘립니다.
+
+ID가 채워진 슬롯마다 독립적인 모델·옵션 테스트 대상이 됩니다. 사용하지 않는 슬롯은 ID를 비워둡니다. 별도 계정이나 endpoint를 사용할 때는 별도 `.env` 파일로 준비합니다.
 
 이 문서는 모델별 실제 연결 테스트용 설정 규약입니다. `.env` 저장만으로 호출이 실행되지 않으며 코어 라이브러리가 파일을 직접 읽지 않습니다. 준비 및 실행 범위는 [공통 설정 안내](README.md)를 따릅니다.

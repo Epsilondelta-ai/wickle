@@ -676,6 +676,7 @@ async fn snapshot() -> RunSnapshot {
             text: "private-user-input".into(),
         }],
         trigger: RunTrigger::User {},
+        model_options: JsonObject::new(),
         output_contract: None,
     };
     let system_inputs = Some(SystemInputSnapshotRef {

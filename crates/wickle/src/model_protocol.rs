@@ -256,6 +256,10 @@ pub struct ModelRequest {
     pub output: ModelOutput,
     /// Finite provider output-token request.
     pub max_output_tokens: NonZeroU64,
+    /// Host-owned logical options; the Host/router must validate selected catalog schemas.
+    /// Adapters explicitly map supported keys to their API; this is not a raw wire-body merge.
+    #[serde(default, skip_serializing_if = "JsonObject::is_empty")]
+    pub options: JsonObject,
     /// Input and response decoding limits selected for this route.
     pub limits: ModelResponseLimits,
 }

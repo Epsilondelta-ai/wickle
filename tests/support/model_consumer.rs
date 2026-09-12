@@ -54,6 +54,7 @@ fn request(provider: &str) -> ModelRequest {
         tools: vec![],
         output: ModelOutput::Text {},
         max_output_tokens: 32.try_into().unwrap(),
+        options: JsonObject::from([("reasoning_effort".into(), json!("high"))]),
         limits: ModelResponseLimits {
             max_input_bytes: 4096,
             max_response_bytes: 1024,
@@ -69,6 +70,7 @@ struct ObservedCall {
     connection: VersionedRef,
     credential: &'static str,
     opaque_blocks: usize,
+    options: JsonObject,
 }
 
 // These are synthetic Host-owned credentials. No real accounts or keys are used.
@@ -92,6 +94,7 @@ fn observe(observed: &Mutex<Vec<ObservedCall>>, request: &ModelRequest, credenti
     observed.lock().unwrap().push(ObservedCall {
         connection: request.route.connection_ref.clone(),
         credential,
+        options: request.options.clone(),
         opaque_blocks: request
             .messages
             .iter()
@@ -228,6 +231,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             connection: route("first").connection_ref,
             credential: "synthetic-first-credential",
             opaque_blocks: 0,
+            options: JsonObject::from([("reasoning_effort".into(), json!("high"))]),
         }]
     );
     assert_eq!(
@@ -236,6 +240,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             connection: route("second").connection_ref,
             credential: "synthetic-second-credential",
             opaque_blocks: 0,
+            options: JsonObject::from([("reasoning_effort".into(), json!("high"))]),
         }]
     );
     println!(
