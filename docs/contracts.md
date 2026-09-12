@@ -1,8 +1,8 @@
 # Data contracts and profile validation
 
-Wickle currently provides profile validation and the data contracts used by an
-agent runtime. The model/tool driver and runtime component assembly are not yet
-implemented.
+Wickle provides profile validation, scoped state and policy contracts, and a
+bounded model-call boundary. The full agent loop and runtime component assembly
+are still being implemented.
 
 `AgentProfile` contains data and registered references. A `ProfileResolver` is
 Host code that supplies approved metadata for a scope. `ProfileValidator` checks
@@ -79,6 +79,40 @@ scope, exact component versions, and definition digests. Its deserializer checks
 the saved digest consistency. Use `ensure_matches` to reject a different profile
 or scope and `ensure_same_resolution` to reject changed component metadata.
 These checks do not replace authentication or the authoritative store.
+
+## Model calls and response assembly
+
+`ModelPort` is a `Send + Sync` trait whose `generate` method returns a boxed stream
+for exactly one physical request. `ModelPortBinding` identifies the provider,
+adapter version, and Host connection revision. Credentials remain in the adapter's
+Host binding. `ModelRequest` contains an explicit model projection and finite
+input/response limits; execution context and system tool inputs are not copied in.
+
+`collect_model_response` accepts complete text and tool proposals only after the
+whole stream passes protocol validation. Missing completion, malformed or ambiguous
+JSON, duplicate call IDs, contradictory finish reasons, and exceeded limits return
+`ModelProtocolError`. Failed responses expose bounded partial text, with no partial
+tool plan. Unknown tools and schema-invalid arguments remain explicit rejection
+states in `ProposedToolCall`; these proposals are not authorized executions.
+
+`OpaqueContinuation` is tied to the exact route digest, including model and
+connection versions. A different route must receive a valid fresh projection.
+A standalone collector needs a caller-owned timeout for a stream that stops yielding.
+
+`ModelExchange` combines the port with `PolicyGate` and a run's `RunBudget`. It
+persists each reservation and selected route before dispatch, rechecks permission
+and cancellation, and stores the complete or failed response with its invocation.
+Retries are disabled by default. Explicit finite retries share the run's model,
+recovery, and elapsed-time limits; context overflow requires actual reprojection.
+
+`ModelInvocationRecord.response_ref` points to a protected `StoredModelResponse`.
+The store checks its attempt, route, outcome, and reported metadata against the
+ledger. A later budget or cancellation error leaves already stored partial failures
+available for authorized recovery. The agent driver must still commit the accepted
+transcript and tool plans before executing any tool.
+
+The [model consumer](../tests/support/model_consumer.rs) demonstrates two concrete
+adapters used through the same trait, with connection and continuation isolation.
 
 ## Execution and storage data
 

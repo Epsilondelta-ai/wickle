@@ -10,10 +10,11 @@ use serde_json::Value;
 
 use crate::{
     ApprovalTarget, BudgetUsage, ContentBlock, ContractError, ErrorCode, Id, Message,
-    ModelAttemptState, ModelInvocationRecord, OutcomeResult, PortFuture, RecordRef, ResumeAction,
-    ResumeCommand, RunEvent, RunEventPayload, RunPhase, RunSnapshot, RunStatus, Scope,
-    SessionSchemaVersion, SessionSnapshot, ToolCall, ToolCallState, ToolResult,
-    VerificationSummary, WaitState, WaitTarget, admission_digest, canonical_digest,
+    ModelAttemptState, ModelExchangeOutcome, ModelFinish, ModelInvocationRecord, OutcomeResult,
+    PortFuture, RecordRef, ResumeAction, ResumeCommand, RunEvent, RunEventPayload, RunPhase,
+    RunSnapshot, RunStatus, Scope, SessionSchemaVersion, SessionSnapshot, StoredModelResponse,
+    ToolCall, ToolCallState, ToolResult, VerificationSummary, WaitState, WaitTarget,
+    admission_digest, canonical_digest,
 };
 
 /// Guarantees offered by a state-store implementation.
@@ -801,6 +802,11 @@ fn validate_snapshot_refs(
     if let Some(inputs) = &snapshot.system_inputs {
         references.push(&inputs.snapshot_ref);
     }
+    for invocation in &snapshot.model_ledger {
+        if let Some(reference) = &invocation.response_ref {
+            validate_model_response(state, additions, invocation, reference)?;
+        }
+    }
     references.extend(snapshot.assembly_ref.iter());
     references.extend(&snapshot.context_batches);
     references.extend(snapshot.source_states.iter().map(|s| &s.batch_ref));
@@ -834,6 +840,57 @@ fn validate_snapshot_refs(
     }
     for reference in references {
         record_value(state, additions, reference)?;
+    }
+    Ok(())
+}
+
+fn validate_model_response(
+    state: &ScopeState,
+    additions: &BTreeMap<RecordKey, ProtectedRecord>,
+    invocation: &ModelInvocationRecord,
+    reference: &RecordRef,
+) -> Result<(), ContractError> {
+    let invalid = || error(ErrorCode::InvalidSnapshot, "model_ledger.response_ref");
+    let saved: StoredModelResponse =
+        serde_json::from_value(record_value(state, additions, reference)?.clone())
+            .map_err(|_| invalid())?;
+    let route_digest = invocation.route.digest();
+    if saved.request_id != invocation.attempt_id || saved.route_digest != route_digest {
+        return Err(invalid());
+    }
+    let metadata = match (&invocation.state, &saved.outcome) {
+        (ModelAttemptState::Completed {}, ModelExchangeOutcome::Completed { response }) => {
+            let mut call_ids = BTreeSet::new();
+            if response.request_id != invocation.attempt_id
+                || response.route_digest != route_digest
+                || response
+                    .continuation
+                    .iter()
+                    .any(|continuation| continuation.route_digest() != &route_digest)
+                || response.finish == ModelFinish::Length
+                || (response.finish == ModelFinish::ToolCalls) != !response.tool_calls.is_empty()
+                || response
+                    .tool_calls
+                    .iter()
+                    .any(|call| !call_ids.insert(&call.provider_call_id))
+            {
+                return Err(invalid());
+            }
+            &response.metadata
+        }
+        (ModelAttemptState::Failed { kind }, ModelExchangeOutcome::Failed { failure })
+            if *kind == failure.kind =>
+        {
+            &failure.metadata
+        }
+        _ => return Err(invalid()),
+    };
+    if metadata.provider_request_id != invocation.provider_request_id
+        || metadata.reported_model_id != invocation.reported_model_id
+        || metadata.reported_model_version != invocation.reported_model_version
+        || metadata.usage != invocation.usage
+    {
+        return Err(invalid());
     }
     Ok(())
 }

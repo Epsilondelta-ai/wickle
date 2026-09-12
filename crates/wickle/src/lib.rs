@@ -1,7 +1,8 @@
 //! Wickle, an agent engine for Rust applications.
 //!
 //! Profiles, scoped metadata resolution, and versioned execution data contracts.
-//! Model calls, tool dispatch, and the agent driver are not implemented yet.
+//! Model calls use scoped ports and persisted attempt accounting. Tool dispatch
+//! and the agent driver are not implemented yet.
 //!
 //! Runtime objects stay in Host code. Only documented data contracts are
 //! serialized; successful decoding does not authenticate a caller.
@@ -17,6 +18,8 @@ mod context;
 mod error;
 mod message;
 mod model;
+mod model_execution;
+mod model_protocol;
 mod policy;
 mod profile;
 mod resolution;
@@ -27,6 +30,12 @@ mod views;
 
 pub use budget::{AttemptReservation, ReservationKind, RunBudget, RunTiming};
 pub use clock::{Clock, ClockReading, IdSource, RandomIdSource, SystemClock};
+pub use model_protocol::{
+    ModelCallContext, ModelContent, ModelEvent, ModelFinish, ModelMessage, ModelOutput, ModelPort,
+    ModelPortBinding, ModelProtocolError, ModelProtocolErrorCode, ModelRequest, ModelResponse,
+    ModelResponseLimits, ModelResponseMetadata, ModelRole, ModelTool, OpaqueContinuation,
+    ProposedToolCall, ToolCallValidation, collect_model_response,
+};
 pub use policy::{
     ApprovalChallenge, Guarded, PolicyAction, PolicyContext, PolicyDecision, PolicyGate,
     PolicyPort, PolicyRequest, ToolPolicyInput,
@@ -49,6 +58,9 @@ pub use model::{
     ApiContract, ModelAttemptState, ModelFailureKind, ModelInvocationRecord, ModelPurpose,
     ModelUsage, ResolvedModelRoute, RouteRequest, UsageMeasurement, VersionPolicy,
     VersionSemantics,
+};
+pub use model_execution::{
+    ModelExchange, ModelExchangeOutcome, ModelRetryPolicy, StoredModelResponse,
 };
 pub use profile::{
     AdapterBindingRef, AgentProfile, CatalogHookRef, CatalogSourceRef, CatalogToolRef,

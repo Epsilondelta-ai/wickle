@@ -1,5 +1,5 @@
 use crate::{
-    Id, JsonDigest, JsonObject, Scope, VersionedRef,
+    Id, JsonDigest, JsonObject, RecordRef, Scope, VersionedRef,
     serialization::{data_digest, optional},
 };
 use serde::{Deserialize, Serialize};
@@ -225,6 +225,14 @@ pub struct ModelInvocationRecord {
     pub request_digest: JsonDigest,
     /// Invocation state.
     pub state: ModelAttemptState,
+    /// Protected complete or failed response, including bounded partial text.
+    /// This is retained even when a later recovery reservation is exhausted.
+    #[serde(
+        default,
+        deserialize_with = "optional",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub response_ref: Option<RecordRef>,
     /// Provider correlation identifier, when reported.
     #[serde(
         default,

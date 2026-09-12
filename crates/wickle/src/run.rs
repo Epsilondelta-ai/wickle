@@ -1,7 +1,7 @@
 use crate::{
     ArtifactRef, AttemptReservation, CompletionPolicy, ContractError, ErrorCode, Failure, Id,
-    InputContent, JsonDigest, ModelInvocationRecord, RecordRef, ResolvedProfile, RunLimits,
-    RunTiming, Scope, ToolCall, ToolResult, VersionedRef,
+    InputContent, JsonDigest, ModelAttemptState, ModelInvocationRecord, RecordRef, ReservationKind,
+    ResolvedProfile, RunLimits, RunTiming, Scope, ToolCall, ToolResult, VersionedRef,
     serialization::{data_digest, decode, optional},
 };
 use serde::{Deserialize, Serialize};
@@ -729,12 +729,28 @@ impl RunSnapshot {
             }
         }
         let mut attempts = BTreeSet::new();
-        if self
-            .model_ledger
+        let model_reservations: BTreeMap<_, _> = self
+            .reservations
             .iter()
-            .any(|a| a.run_id != self.run_id || !attempts.insert(&a.attempt_id))
-        {
-            return Err(invalid("model_ledger.attempt_id"));
+            .filter_map(|reservation| match reservation.kind {
+                ReservationKind::Model { purpose } => Some((&reservation.attempt_id, purpose)),
+                _ => None,
+            })
+            .collect();
+        for invocation in &self.model_ledger {
+            if invocation.run_id != self.run_id || !attempts.insert(&invocation.attempt_id) {
+                return Err(invalid("model_ledger.attempt_id"));
+            }
+            if model_reservations.get(&invocation.attempt_id) != Some(&invocation.purpose) {
+                return Err(invalid("model_ledger.reservation"));
+            }
+            let settled = matches!(
+                invocation.state,
+                ModelAttemptState::Completed {} | ModelAttemptState::Failed { .. }
+            );
+            if settled != invocation.response_ref.is_some() {
+                return Err(invalid("model_ledger.response_ref"));
+            }
         }
         if self
             .source_states
