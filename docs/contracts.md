@@ -117,6 +117,9 @@ transcript and tool plans before executing any tool.
 The [model consumer](../tests/support/model_consumer.rs) demonstrates two concrete
 adapters used through the same trait, with connection and continuation isolation.
 
+Session prompt reuse and bounded message projection are described in
+[Pin and project model context](context.md).
+
 ## Execution and storage data
 
 | Contract | Purpose |

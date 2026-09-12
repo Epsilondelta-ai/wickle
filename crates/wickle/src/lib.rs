@@ -15,6 +15,7 @@
 mod budget;
 mod clock;
 mod context;
+mod context_projection;
 mod error;
 mod message;
 mod model;
@@ -31,6 +32,11 @@ mod views;
 
 pub use budget::{AttemptReservation, ReservationKind, RunBudget, RunTiming};
 pub use clock::{Clock, ClockReading, IdSource, RandomIdSource, SystemClock};
+pub use context_projection::{
+    CONTEXT_ASSEMBLER_VERSION, ContextAssembler, ContextItem, ContextLifetime, ContextOrigin,
+    ContextPriority, ContextProjection, InstructionAssetContent, PinnedPromptTool, ProjectionInput,
+    ProjectionLimits, PromptSnapshot, PromptToolBinding, ScopedOpaque, SkillManifest,
+};
 pub use model_protocol::{
     ModelCallContext, ModelContent, ModelEvent, ModelFinish, ModelMessage, ModelOutput, ModelPort,
     ModelPortBinding, ModelProtocolError, ModelProtocolErrorCode, ModelRequest, ModelResponse,
