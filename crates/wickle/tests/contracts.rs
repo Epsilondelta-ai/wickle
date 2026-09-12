@@ -719,6 +719,14 @@ async fn checkpoint() -> RunSnapshot {
         request_digest: admission_digest(&request, &p, system_inputs.as_ref()),
         request,
         scope: scope(),
+        timing: RunTiming::new(0, p.profile().limits.max_elapsed_ms.get()).unwrap(),
+        reservations: vec![AttemptReservation {
+            attempt_id: id("first-model-attempt"),
+            kind: ReservationKind::Model {
+                purpose: ModelPurpose::Agent,
+            },
+            reserved_at_ms: 0,
+        }],
         limits: p.profile().limits.clone(),
         profile: p,
         status: RunStatus::Waiting,

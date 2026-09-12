@@ -1,7 +1,7 @@
 use crate::{
-    ArtifactRef, CompletionPolicy, ContractError, ErrorCode, Failure, Id, InputContent, JsonDigest,
-    ModelInvocationRecord, RecordRef, ResolvedProfile, RunLimits, Scope, ToolCall, ToolResult,
-    VersionedRef,
+    ArtifactRef, AttemptReservation, CompletionPolicy, ContractError, ErrorCode, Failure, Id,
+    InputContent, JsonDigest, ModelInvocationRecord, RecordRef, ResolvedProfile, RunLimits,
+    RunTiming, Scope, ToolCall, ToolResult, VersionedRef,
     serialization::{data_digest, decode, optional},
 };
 use serde::{Deserialize, Serialize};
@@ -588,6 +588,10 @@ pub struct RunSnapshot {
     pub limits: RunLimits,
     /// Saved usage/reservations.
     pub usage: BudgetUsage,
+    /// Original admission/deadline and persisted monotonic elapsed-time anchor.
+    pub timing: RunTiming,
+    /// Append-only charged attempt reservations, preserved across errors and resume.
+    pub reservations: Vec<AttemptReservation>,
     /// Physical model attempt records.
     pub model_ledger: Vec<ModelInvocationRecord>,
     /// Saved tool plans and states.
@@ -641,6 +645,7 @@ impl RunSnapshot {
     /// Check static checkpoint invariants without performing recovery or authorization.
     pub fn validate(&self) -> Result<(), ContractError> {
         let invalid = |path| ContractError::new(ErrorCode::InvalidSnapshot, path);
+        crate::budget::validate_budget(self)?;
         if &self.scope != self.profile.scope()
             || self.request_digest
                 != admission_digest(&self.request, &self.profile, self.system_inputs.as_ref())

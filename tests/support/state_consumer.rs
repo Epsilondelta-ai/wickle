@@ -69,6 +69,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         request_digest: admission_digest(&request, &profile, None),
         request: request.clone(),
         scope: scope.clone(),
+        timing: RunTiming::new(1000, profile.profile().limits.max_elapsed_ms.get()).unwrap(),
+        reservations: vec![],
         limits: profile.profile().limits.clone(),
         profile,
         status: RunStatus::Running,

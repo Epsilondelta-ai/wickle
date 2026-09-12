@@ -15,6 +15,14 @@ pub enum ErrorCode {
     Cancelled,
     /// The Host has not supplied the required asynchronous runtime.
     RuntimeUnavailable,
+    /// A configured call, repair, or recovery budget has no remaining capacity.
+    BudgetExceeded,
+    /// A required time reading or timer could not be obtained.
+    ClockUnavailable,
+    /// A monotonic reading regressed or a resumed UTC clock predates saved progress.
+    ClockRegression,
+    /// The Host identifier source could not generate an internal execution identifier.
+    IdGenerationFailed,
     /// Input is not unambiguous, finite JSON.
     InvalidJson,
     /// Input does not match a data contract.

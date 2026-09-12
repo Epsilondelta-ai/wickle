@@ -9,6 +9,7 @@ publish = false
 include = ["Cargo.toml", "src/**"]
 
 [dependencies]
+getrandom.workspace = true
 futures-util.workspace = true
 jsonschema.workspace = true
 serde.workspace = true
