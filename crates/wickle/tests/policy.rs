@@ -693,6 +693,14 @@ async fn snapshot() -> RunSnapshot {
         request_digest: admission_digest(&request, &profile, system_inputs.as_ref()),
         request,
         scope: scope(),
+        timing: RunTiming::new(0, profile.profile().limits.max_elapsed_ms.get()).unwrap(),
+        reservations: vec![AttemptReservation {
+            attempt_id: id("first-model-attempt"),
+            kind: ReservationKind::Model {
+                purpose: ModelPurpose::Agent,
+            },
+            reserved_at_ms: 0,
+        }],
         limits: profile.profile().limits.clone(),
         profile,
         status: RunStatus::Failed,

@@ -9,11 +9,11 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 
 use crate::{
-    ApprovalTarget, ContentBlock, ContractError, ErrorCode, Id, Message, ModelAttemptState,
-    ModelInvocationRecord, OutcomeResult, PortFuture, RecordRef, ResumeAction, ResumeCommand,
-    RunEvent, RunEventPayload, RunPhase, RunSnapshot, RunStatus, Scope, SessionSchemaVersion,
-    SessionSnapshot, ToolCall, ToolCallState, ToolResult, VerificationSummary, WaitState,
-    WaitTarget, admission_digest, canonical_digest,
+    ApprovalTarget, BudgetUsage, ContentBlock, ContractError, ErrorCode, Id, Message,
+    ModelAttemptState, ModelInvocationRecord, OutcomeResult, PortFuture, RecordRef, ResumeAction,
+    ResumeCommand, RunEvent, RunEventPayload, RunPhase, RunSnapshot, RunStatus, Scope,
+    SessionSchemaVersion, SessionSnapshot, ToolCall, ToolCallState, ToolResult,
+    VerificationSummary, WaitState, WaitTarget, admission_digest, canonical_digest,
 };
 
 /// Guarantees offered by a state-store implementation.
@@ -189,6 +189,15 @@ pub trait StateStore: Send + Sync {
         scope: &'a Scope,
         session_id: &'a Id,
     ) -> PortFuture<'a, SessionSnapshot>;
+    /// Validate owner/generation against the current stored expiry without renewing.
+    /// Return the latest lease metadata, including any concurrent heartbeat renewal.
+    fn check_lease<'a>(
+        &'a self,
+        scope: &'a Scope,
+        run_id: &'a Id,
+        lease: &'a RunLease,
+        now_ms: i64,
+    ) -> PortFuture<'a, RunLease>;
     /// Acquire a new generation after any previous lease has expired or been released.
     fn acquire_lease<'a>(
         &'a self,
@@ -337,6 +346,8 @@ impl StateStore for MemoryStateStore {
                 || input.snapshot.phase != RunPhase::Admission
                 || !input.snapshot.model_ledger.is_empty()
                 || !input.snapshot.tool_ledger.is_empty()
+                || !input.snapshot.reservations.is_empty()
+                || input.snapshot.usage != BudgetUsage::default()
             {
                 return Err(error(ErrorCode::InvalidSnapshot, "admission"));
             }
@@ -437,6 +448,24 @@ impl StateStore for MemoryStateStore {
                 .get(session_id)
                 .map(|session| session.snapshot.clone())
                 .ok_or_else(not_found)
+        })
+    }
+
+    fn check_lease<'a>(
+        &'a self,
+        scope: &'a Scope,
+        run_id: &'a Id,
+        lease: &'a RunLease,
+        now_ms: i64,
+    ) -> PortFuture<'a, RunLease> {
+        Box::pin(async move {
+            let scopes = self.lock()?;
+            let run = namespace(&scopes, scope)?
+                .runs
+                .get(run_id)
+                .ok_or_else(not_found)?;
+            validate_lease(run, scope, run_id, lease, now_ms)?;
+            Ok(run.lease.as_ref().expect("validated lease").clone())
         })
     }
 
@@ -1038,6 +1067,7 @@ fn validate_transition(previous: &RunSnapshot, next: &RunSnapshot) -> Result<(),
         return Err(error(ErrorCode::InvalidTransition, "run.status"));
     }
     next.validate()?;
+    crate::budget::validate_budget_transition(previous, next)?;
     if previous.run_id != next.run_id
         || previous.request != next.request
         || previous.request_digest != next.request_digest

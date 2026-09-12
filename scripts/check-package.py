@@ -14,7 +14,7 @@ import tempfile
 ROOT = Path(__file__).resolve().parent.parent
 # Changes to core dependencies require an explicit boundary review.
 CORE_DEPENDENCIES = {
-    "futures-util", "jsonschema", "serde", "serde_json", "sha2", "thiserror",
+    "futures-util", "getrandom", "jsonschema", "serde", "serde_json", "sha2", "thiserror",
     "tokio", "tokio-util",
 }
 

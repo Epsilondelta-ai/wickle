@@ -11,6 +11,8 @@
 //! use wickle::serialization::canonical_digest;
 //! ```
 
+mod budget;
+mod clock;
 mod context;
 mod error;
 mod message;
@@ -23,6 +25,8 @@ mod serialization;
 mod state;
 mod views;
 
+pub use budget::{AttemptReservation, ReservationKind, RunBudget, RunTiming};
+pub use clock::{Clock, ClockReading, IdSource, RandomIdSource, SystemClock};
 pub use policy::{
     ApprovalChallenge, Guarded, PolicyAction, PolicyContext, PolicyDecision, PolicyGate,
     PolicyPort, PolicyRequest, ToolPolicyInput,

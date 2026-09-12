@@ -10,6 +10,7 @@ rust-version = "1.85"
 repository = "https://github.com/Epsilondelta-ai/wickle"
 
 [workspace.dependencies]
+getrandom = { version = "=0.3.4", default-features = false }
 futures-util = { version = "=0.3.34", default-features = false, features = ["std", "async-await"] }
 jsonschema = { version = "=0.56.0", default-features = false }
 serde = { version = "=1.0.229", features = ["derive"] }
