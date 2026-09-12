@@ -385,6 +385,8 @@ pub enum ContextOrigin {
     Memory,
     /// Verification feedback, not a Host instruction replacement.
     Verification,
+    /// Bounded data added by a selected lifecycle hook; it carries no system authority.
+    Hook,
 }
 
 /// Scope of context lifetime. An item outside its lifetime is explicitly omitted.

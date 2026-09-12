@@ -27,13 +27,17 @@ impl Agent {
             bindings.policy.clone(),
             bindings.ids.clone(),
         ));
-        SerialToolRound::new(
+        let mut round = SerialToolRound::new(
             registry,
             binder,
             bindings.policy.clone(),
             bindings.ids.clone(),
         )
-        .with_limits(bindings.settings.tool_execution_limits)
+        .with_limits(bindings.settings.tool_execution_limits)?;
+        if let Some(hooks) = &bindings.hooks {
+            round = round.with_hooks(hooks.clone());
+        }
+        Ok(round)
     }
 
     /// Commit the original complete model plan before any resolver or tool runs.
@@ -262,6 +266,7 @@ impl Agent {
         context: &ExecutionContext,
         budget: &RunBudget,
         cancelled: bool,
+        local: &LocalRun,
     ) -> Result<(), ContractError> {
         let requests: std::collections::BTreeSet<_> = snapshot
             .tool_ledger
@@ -298,6 +303,7 @@ impl Agent {
                     budget,
                 )
                 .await?;
+            self.remember_observer_error(local, round.observer_error());
         }
         Ok(())
     }

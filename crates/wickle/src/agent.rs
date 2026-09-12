@@ -15,6 +15,7 @@ use tokio_util::sync::CancellationToken;
 
 mod admission;
 mod driver;
+mod hooks;
 mod resume;
 mod tools;
 
@@ -132,6 +133,8 @@ pub struct AgentBindings {
     pub system_input_resolver: Option<Arc<dyn SystemInputResolver>>,
     /// Optional read-only verifier for externally supplied effect receipts.
     pub external_receipt_verifier: Option<Arc<dyn ExternalReceiptVerifier>>,
+    /// Optional scope-bound lifecycle runtime; selected definitions are pinned at admission.
+    pub hooks: Option<Arc<HookRuntime>>,
     /// Time source and timers.
     pub clock: Arc<dyn Clock>,
     /// New internal run/message/event identities, never business foreign keys.
@@ -157,6 +160,7 @@ struct LocalRun {
     cancel: CancellationToken,
     reason: Mutex<Option<Id>>,
     error: Mutex<Option<ContractError>>,
+    observer_error: Mutex<Option<ContractError>>,
     done: AtomicBool,
     notify: Notify,
 }
@@ -167,6 +171,7 @@ impl LocalRun {
             cancel: CancellationToken::new(),
             reason: Mutex::new(None),
             error: Mutex::new(None),
+            observer_error: Mutex::new(None),
             done: AtomicBool::new(false),
             notify: Notify::new(),
         }
@@ -195,7 +200,6 @@ pub fn create_agent(
         || !profile.skills.is_empty()
         || !profile.connectors.is_empty()
         || profile.adapters.as_ref().is_some_and(|v| !v.is_empty())
-        || profile.hooks.as_ref().is_some_and(|v| !v.is_empty())
         || profile
             .context_sources
             .as_ref()
@@ -204,6 +208,22 @@ pub fn create_agent(
         || profile.context_policy.strategy.as_str() != "bounded"
     {
         return Err(fail(ErrorCode::CapabilityUnsupported, "agent.profile"));
+    }
+    match &bindings.hooks {
+        Some(hooks) => {
+            if hooks.scope() != &bindings.scope {
+                return Err(fail(ErrorCode::AccessDenied, "agent.hooks_scope"));
+            }
+            hooks.plan(&profile)?;
+        }
+        None if profile
+            .hooks
+            .as_ref()
+            .is_some_and(|hooks| !hooks.is_empty()) =>
+        {
+            return Err(fail(ErrorCode::CapabilityUnsupported, "agent.hooks"));
+        }
+        None => {}
     }
     match &bindings.tools {
         Some(registry) => {
@@ -251,6 +271,16 @@ pub enum CancelReceipt {
     AlreadyTerminal,
     /// No local driver is owned here. No remote cancellation was accepted or sent.
     NotLocal,
+}
+
+/// Protected observer reports and a local report-persistence failure, independent
+/// of the saved execution outcome. An observer does not change business success.
+#[derive(Debug)]
+pub struct HookObservationView {
+    /// Reports that the StateStore actually accepted.
+    pub reports: Vec<HookObservation>,
+    /// A local failure to persist an observer report, when this handle knows it.
+    pub local_error: Option<ContractError>,
 }
 
 impl Agent {
@@ -353,6 +383,63 @@ impl Agent {
 }
 
 impl RunHandle {
+    /// Read committed hook observations under current protected-details permission.
+    pub async fn hook_observations(
+        &self,
+        context: &ExecutionContext,
+    ) -> Result<Guarded<HookObservationView>, ContractError> {
+        self.agent.check_scope(context)?;
+        let bindings = &self.agent.inner.bindings;
+        let request = PolicyRequest {
+            owner_scope: bindings.scope.clone(),
+            resource_id: self.run_id.clone(),
+            action: PolicyAction::ReadRunDetails {},
+        };
+        if let Guarded::ApprovalRequired(challenge) = bindings
+            .policy
+            .guard(&request, context, None, None, || async { Ok(()) })
+            .await?
+        {
+            return Ok(Guarded::ApprovalRequired(challenge));
+        }
+        let reports = caller_read(
+            context,
+            None,
+            bindings
+                .state
+                .read_hook_observations(&bindings.scope, &self.run_id),
+        )
+        .await?;
+        if reports
+            .iter()
+            .any(|report| report.scope != bindings.scope || report.run_id != self.run_id)
+        {
+            return Err(fail(
+                ErrorCode::InvalidSnapshot,
+                "agent.hook_observation_scope",
+            ));
+        }
+        let local_error = self
+            .current_local()?
+            .map(|local| {
+                local
+                    .observer_error
+                    .lock()
+                    .map(|error| error.clone())
+                    .map_err(|_| fail(ErrorCode::InvalidContract, "agent.observer_state"))
+            })
+            .transpose()?
+            .flatten();
+        bindings
+            .policy
+            .guard(&request, context, None, None, || async {
+                Ok(HookObservationView {
+                    reports,
+                    local_error,
+                })
+            })
+            .await
+    }
     /// Stable saved run identity.
     pub fn run_id(&self) -> &Id {
         &self.run_id
@@ -578,9 +665,6 @@ impl RunHandle {
         Ok(())
     }
     fn current_local(&self) -> Result<Option<Arc<LocalRun>>, ContractError> {
-        if let Some(local) = &self.local {
-            return Ok(Some(local.clone()));
-        }
         Ok(self
             .agent
             .inner
@@ -589,7 +673,8 @@ impl RunHandle {
             .map_err(|_| fail(ErrorCode::InvalidContract, "agent.local_state"))?
             .get(&self.run_id)
             .filter(|local| local.segment_start_revision == self.segment_start_revision)
-            .cloned())
+            .cloned()
+            .or_else(|| self.local.clone()))
     }
     fn segment_end(&self, snapshot: &RunSnapshot) -> Result<Option<u64>, ContractError> {
         if let Some(receipt) = snapshot

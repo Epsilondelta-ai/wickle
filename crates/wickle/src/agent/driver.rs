@@ -105,6 +105,7 @@ impl Agent {
         // final heartbeat was lost after the terminal transaction succeeded.
         if let Ok(saved) = bindings.state.load(&bindings.scope, run_id).await {
             if saved.snapshot.status.is_terminal() {
+                self.after_run(&saved, &context, local).await;
                 return Ok(());
             }
         }
@@ -180,12 +181,10 @@ impl Agent {
         let mut pending_round = saved.snapshot.tool_ledger.iter().find(|entry| !matches!(&entry.state, ToolCallState::Settled { result } if result.status != ToolResultStatus::Unknown && result.effect != ToolEffect::Unknown)).map(|entry| entry.call.model_request_id.clone());
         let attempt = loop {
             if let Some(request_id) = pending_round.take() {
-                match self
-                    .tool_round(budget)
-                    .await?
-                    .execute(&request_id, context, budget)
-                    .await
-                {
+                let round = self.tool_round(budget).await?;
+                let result = round.execute(&request_id, context, budget).await;
+                self.remember_observer_error(local, round.observer_error());
+                match result {
                     Ok(ToolRoundOutcome::Completed) => {}
                     Ok(outcome) => {
                         waiting = Some(self.tool_wait(outcome, budget).await?);
@@ -205,7 +204,9 @@ impl Agent {
                         break Some(Err(error));
                     }
                     let round = self.tool_round(budget).await?;
-                    match round.execute(&response.request_id, context, budget).await {
+                    let result = round.execute(&response.request_id, context, budget).await;
+                    self.remember_observer_error(local, round.observer_error());
+                    match result {
                         Ok(ToolRoundOutcome::Completed) => continue,
                         Ok(outcome) => {
                             waiting = Some(self.tool_wait(outcome, budget).await?);
@@ -348,6 +349,7 @@ impl Agent {
     ) -> Result<Guarded<ModelExchangeOutcome>, ContractError> {
         let bindings = &self.inner.bindings;
         budget.check_boundary().await?;
+        let run_context = self.before_run(budget, context).await?;
         let mut snapshot = bindings.state.load(&bindings.scope, run_id).await?.snapshot;
         let expected_revision = snapshot.revision;
         let step = bindings.ids.next_id()?;
@@ -386,6 +388,15 @@ impl Agent {
                     && rule.purpose == ModelPurpose::Agent
             })
             .ok_or_else(|| fail(ErrorCode::ModelRouteDenied, "agent.routing"))?;
+        let context_items = self
+            .before_model(
+                &step,
+                saved.snapshot.request.input.clone(),
+                run_context,
+                context,
+                budget,
+            )
+            .await?;
         let input = RoutedModelInput {
             model_step_id: step,
             routing: RouteRequest {
@@ -415,6 +426,7 @@ impl Agent {
             settings: bindings.settings.clone(),
             estimator: bindings.token_estimator.clone(),
             state: bindings.state.clone(),
+            context_items,
         };
         bindings
             .model_exchange
@@ -511,6 +523,7 @@ impl Agent {
                     context,
                     budget,
                     matches!(result, OutcomeResult::Cancelled { .. }),
+                    local,
                 )
                 .await?;
                 saved = bindings.state.load(&bindings.scope, run_id).await?;
@@ -727,6 +740,7 @@ struct Projector {
     settings: AgentSettings,
     estimator: Arc<dyn ModelTokenEstimator>,
     state: Arc<dyn StateStore>,
+    context_items: Vec<ContextItem>,
 }
 impl ModelRequestProjector for Projector {
     fn project<'a>(
@@ -815,7 +829,7 @@ impl ModelRequestProjector for Projector {
                     current_request: &self.saved.snapshot.request,
                     current_request_message_id: &request_message.message_id,
                     transcript: &self.saved.messages,
-                    context_items: &[],
+                    context_items: &self.context_items,
                     opaque_records: &opaque_records,
                     expected_prompt_digest: &self.saved.session.prompt_snapshot.digest,
                     request_id: input.model_step_id.clone(),

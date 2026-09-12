@@ -18,6 +18,7 @@ mod clock;
 mod context;
 mod context_projection;
 mod error;
+mod hooks;
 mod input_binding;
 mod message;
 mod model;
@@ -37,8 +38,8 @@ mod tool_schema;
 mod views;
 
 pub use agent::{
-    Agent, AgentBindings, AgentSettings, CancelReceipt, ModelTokenEstimator, RunHandle,
-    create_agent,
+    Agent, AgentBindings, AgentSettings, CancelReceipt, HookObservationView, ModelTokenEstimator,
+    RunHandle, create_agent,
 };
 pub use budget::{AttemptReservation, ReservationKind, RunBudget, RunTiming};
 pub use clock::{Clock, ClockReading, IdSource, RandomIdSource, SystemClock};
@@ -46,6 +47,11 @@ pub use context_projection::{
     CONTEXT_ASSEMBLER_VERSION, ContextAssembler, ContextItem, ContextLifetime, ContextOrigin,
     ContextPriority, ContextProjection, InstructionAssetContent, PinnedPromptTool, ProjectionInput,
     ProjectionLimits, PromptSnapshot, PromptToolBinding, ScopedOpaque, SkillManifest,
+};
+pub use hooks::{
+    HookApplication, HookApplicationRecord, HookContext, HookContextAddition, HookDefinition,
+    HookHandler, HookInput, HookObservation, HookObservationStatus, HookOutput, HookPlan,
+    HookRegistration, HookRegistry, HookRuntime, HookTarget, HookTransform,
 };
 pub use input_binding::{
     BoundSystemInput, BoundToolInput, InputBinder, InputBindingLimits, ResolvedSystemInput,

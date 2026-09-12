@@ -37,7 +37,7 @@ SQLite and synthetic ports; they make no provider network calls. Run them with
 `AgentBindings` contains the exact scope, `StateStore`, current `PolicyGate`,
 `ProfileResolver`, pinned `ModelRouter`, configured `ModelExchange`, trusted Host
 instructions, `SystemInputRegistry`, optional `ToolRegistry`,
-`SystemInputResolver`, and `ExternalReceiptVerifier`, clock, ID source, token
+`SystemInputResolver`, `ExternalReceiptVerifier`, and `HookRuntime`, clock, ID source, token
 estimator, and `AgentSettings`.
 A single Agent instance owns one scope; use separately configured instances for
 other scopes.
@@ -54,10 +54,16 @@ request/response/context sizes, admission preparation, lease renewal, and observ
 polling. Run-wide model, tool, recovery, and elapsed limits come from the profile.
 
 The driver supports text instructions, text output, the bounded context strategy,
-registered catalog tools, and `turn_end` completion. Skills, Hooks, connector and
+registered catalog tools and lifecycle Hooks, and `turn_end` completion. Skills, connector and
 adapter execution, automatic context sources, asset loading, and verified
 completion are not connected to this driver. Profiles requiring these components
 are rejected explicitly.
+
+Selected lifecycle Hooks can add bounded context, transform model-owned tool
+arguments, or observe committed results. Their saved transformations are reused
+across retry and resume; observer reports stay separate from execution outcomes.
+See [lifecycle Hooks](hooks.md) for registration, permission, timeout, and failure
+contracts. Hooks do not patch model options or replace completion verification.
 
 ## Register tools and separate their inputs
 

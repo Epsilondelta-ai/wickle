@@ -335,6 +335,18 @@ struct BoundInputData {
     compiled_digest: JsonDigest,
     compiler_version: String,
     original_model_inputs: JsonObject,
+    #[serde(
+        default,
+        deserialize_with = "crate::serialization::optional",
+        skip_serializing_if = "Option::is_none"
+    )]
+    effective_model_inputs: Option<JsonObject>,
+    #[serde(
+        default,
+        deserialize_with = "crate::serialization::optional",
+        skip_serializing_if = "Option::is_none"
+    )]
+    transformation_ref: Option<RecordRef>,
     normalized_model_inputs: JsonObject,
     run_inputs_ref: Option<SystemInputSnapshotRef>,
     system_inputs: BTreeMap<String, BoundSystemInput>,
@@ -398,7 +410,18 @@ impl BoundToolInput {
     pub fn original_model_inputs(&self) -> &JsonObject {
         &self.data.original_model_inputs
     }
-    /// Original model arguments plus declared optional top-level defaults.
+    /// Validated hook-transformed arguments, or the unchanged original arguments.
+    pub fn effective_model_inputs(&self) -> &JsonObject {
+        self.data
+            .effective_model_inputs
+            .as_ref()
+            .unwrap_or(&self.data.original_model_inputs)
+    }
+    /// Exact saved final transformation record, when hooks transformed this call.
+    pub fn transformation_ref(&self) -> Option<&RecordRef> {
+        self.data.transformation_ref.as_ref()
+    }
+    /// Effective model arguments plus declared optional top-level defaults.
     pub fn normalized_model_inputs(&self) -> &JsonObject {
         &self.data.normalized_model_inputs
     }
@@ -490,9 +513,14 @@ impl BoundToolInput {
             return Err(error(ErrorCode::SystemInputsMismatch, "bound_input.digest"));
         }
         let mut execution = bound.data.normalized_model_inputs.clone();
+        if bound.data.effective_model_inputs.is_some() != bound.data.transformation_ref.is_some() {
+            return Err(error(
+                ErrorCode::SystemInputsMismatch,
+                "bound_input.transformation",
+            ));
+        }
         if bound
-            .data
-            .original_model_inputs
+            .effective_model_inputs()
             .iter()
             .any(|(key, value)| execution.get(key) != Some(value))
         {
@@ -564,7 +592,8 @@ impl BoundToolInput {
             ));
         }
         compiled.validate_model_inputs(self.original_model_inputs())?;
-        if normalize_model_inputs(compiled, self.original_model_inputs())?
+        compiled.validate_model_inputs(self.effective_model_inputs())?;
+        if normalize_model_inputs(compiled, self.effective_model_inputs())?
             != *self.normalized_model_inputs()
         {
             return Err(error(
@@ -714,6 +743,8 @@ impl InputBinder {
                 ));
             }
         }
+        let transformed =
+            saved_tool_transform(&saved.snapshot, compiled, &call, context, budget).await?;
         if let Some(reference) = &call.bound_input_ref {
             boundary(context, budget).await?;
             let record = bounded(
@@ -731,6 +762,17 @@ impl InputBinder {
                 saved.snapshot.system_inputs.as_ref(),
             )?;
             validate_bound_record(record.value(), &saved.snapshot, &call, run_inputs.as_ref())?;
+            if input.transformation_ref() != transformed.as_ref().map(|(_, reference)| reference)
+                || input.effective_model_inputs()
+                    != transformed
+                        .as_ref()
+                        .map_or(&call.model_inputs, |(inputs, _)| inputs)
+            {
+                return Err(error(
+                    ErrorCode::SystemInputsMismatch,
+                    "bound_input.transformation",
+                ));
+            }
             check_size(&input, self.limits.max_bound_bytes)?;
             for value in input
                 .system_inputs()
@@ -766,7 +808,10 @@ impl InputBinder {
         ) {
             return Err(error(ErrorCode::InvalidTransition, "tool_call.state"));
         }
-        let normalized = normalize_model_inputs(compiled, &call.model_inputs)?;
+        let effective = transformed
+            .as_ref()
+            .map_or(&call.model_inputs, |(inputs, _)| inputs);
+        let normalized = normalize_model_inputs(compiled, effective)?;
         check_size(&normalized, self.limits.max_bound_bytes)?;
         let mut execution_args = normalized.clone();
         let mut system_inputs = BTreeMap::new();
@@ -901,6 +946,8 @@ impl InputBinder {
             compiled_digest: compiled.digest().clone(),
             compiler_version: compiled.compiler_version().into(),
             original_model_inputs: call.model_inputs.clone(),
+            effective_model_inputs: transformed.as_ref().map(|(inputs, _)| inputs.clone()),
+            transformation_ref: transformed.map(|(_, reference)| reference),
             normalized_model_inputs: normalized,
             run_inputs_ref: saved.snapshot.system_inputs.clone(),
             system_inputs,
@@ -1145,6 +1192,185 @@ async fn bounded<T>(
             budget.call_deadline()?;
             result
         }
+    }
+}
+
+async fn saved_tool_transform(
+    snapshot: &RunSnapshot,
+    compiled: &CompiledTool,
+    call: &ToolCall,
+    context: &ExecutionContext,
+    budget: &RunBudget,
+) -> Result<Option<(JsonObject, RecordRef)>, ContractError> {
+    let Some(reference) = &snapshot.hook_plan_ref else {
+        return Ok(None);
+    };
+    let record = bounded(
+        context,
+        budget,
+        budget.store().read_record(budget.scope(), reference),
+    )
+    .await?;
+    let plan = crate::HookPlan::restore(
+        &serde_json::to_string(record.value())
+            .map_err(|_| error(ErrorCode::InvalidJson, "hooks.plan"))?,
+        budget.scope(),
+        &reference.digest,
+    )?;
+    let definitions: Vec<_> = plan
+        .definitions()
+        .iter()
+        .filter(|definition| definition.position == crate::HookPosition::BeforeTool)
+        .collect();
+    if definitions.is_empty() {
+        return Ok(None);
+    }
+    let target = crate::HookTarget::BeforeTool {
+        call_id: call.call_id.clone(),
+    };
+    let applications: Vec<_> = snapshot
+        .hook_applications
+        .iter()
+        .filter(|application| application.target == target)
+        .collect();
+    if applications.len() != definitions.len() {
+        return Err(error(
+            ErrorCode::InvalidTransition,
+            "hooks.before_tool_missing",
+        ));
+    }
+    let mut inputs = call.model_inputs.clone();
+    for (definition, application) in definitions.iter().zip(&applications) {
+        if definition.hook != application.hook {
+            return Err(error(ErrorCode::InvalidSnapshot, "hooks.order"));
+        }
+        let record = bounded(
+            context,
+            budget,
+            budget
+                .store()
+                .read_record(budget.scope(), &application.result_ref),
+        )
+        .await?;
+        let record = crate::HookApplicationRecord::restore(
+            &record,
+            &plan,
+            application,
+            budget.scope(),
+            budget.run_id(),
+        )?;
+        let crate::HookInput::BeforeTool {
+            tool,
+            descriptor_digest,
+            compiled_digest,
+            original_model_inputs,
+            model_inputs,
+        } = &record.input
+        else {
+            return Err(error(ErrorCode::InvalidSnapshot, "hooks.tool_input"));
+        };
+        if tool != &compiled.to_model_tool()
+            || descriptor_digest != compiled.descriptor_digest()
+            || compiled_digest != compiled.digest()
+            || original_model_inputs != &call.model_inputs
+            || model_inputs != &inputs
+        {
+            return Err(error(
+                ErrorCode::SystemInputsMismatch,
+                "hooks.tool_identity",
+            ));
+        }
+        let Some(crate::HookOutput::Tool { model_inputs, deny }) = record.output else {
+            return Err(error(ErrorCode::InvalidSnapshot, "hooks.tool_output"));
+        };
+        if deny.is_some() {
+            return Err(error(ErrorCode::AccessDenied, "hooks.tool_denied"));
+        }
+        compiled.validate_model_inputs(&model_inputs)?;
+        inputs = model_inputs;
+    }
+    Ok(Some((
+        inputs,
+        applications
+            .last()
+            .expect("nonempty definitions")
+            .result_ref
+            .clone(),
+    )))
+}
+
+/// Validate the exact saved transformation that a bound candidate claims to use.
+pub(crate) fn validate_bound_transformation(
+    value: &Value,
+    snapshot: &RunSnapshot,
+    call: &ToolCall,
+    transformation: Option<&Value>,
+) -> Result<(), ContractError> {
+    let bound = BoundToolInput::from_value(value)?;
+    let target = crate::HookTarget::BeforeTool {
+        call_id: call.call_id.clone(),
+    };
+    let application = snapshot
+        .hook_applications
+        .iter()
+        .rev()
+        .find(|application| application.target == target);
+    if bound.transformation_ref() != application.map(|application| &application.result_ref) {
+        return Err(error(
+            ErrorCode::SystemInputsMismatch,
+            "bound_input.transform_reference",
+        ));
+    }
+    match (bound.transformation_ref(), transformation) {
+        (None, None) => Ok(()),
+        (Some(reference), Some(value)) => {
+            if crate::canonical_digest(value) != reference.digest {
+                return Err(error(
+                    ErrorCode::SystemInputsMismatch,
+                    "bound_input.transform_digest",
+                ));
+            }
+            let record: crate::HookApplicationRecord = serde_json::from_value(value.clone())
+                .map_err(|_| error(ErrorCode::InvalidSnapshot, "bound_input.transform_record"))?;
+            let crate::HookInput::BeforeTool {
+                descriptor_digest,
+                compiled_digest,
+                original_model_inputs,
+                ..
+            } = record.input
+            else {
+                return Err(error(
+                    ErrorCode::InvalidSnapshot,
+                    "bound_input.transform_input",
+                ));
+            };
+            if record.scope != snapshot.scope
+                || record.run_id != snapshot.run_id
+                || record.target != target
+                || &descriptor_digest != bound.descriptor_digest()
+                || &compiled_digest != bound.compiled_digest()
+                || original_model_inputs != call.model_inputs
+            {
+                return Err(error(
+                    ErrorCode::SystemInputsMismatch,
+                    "bound_input.transform_identity",
+                ));
+            }
+            match record.output {
+                Some(crate::HookOutput::Tool {
+                    model_inputs,
+                    deny: None,
+                }) if &model_inputs == bound.effective_model_inputs() => Ok(()),
+                _ => Err(error(
+                    ErrorCode::SystemInputsMismatch,
+                    "bound_input.transform_output",
+                )),
+            }
+        }
+        _ => Err(error(
+            ErrorCode::SystemInputsMismatch,
+            "bound_input.transform_record",
+        )),
     }
 }
 

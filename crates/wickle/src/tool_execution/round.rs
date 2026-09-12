@@ -79,6 +79,7 @@ impl SerialToolRound {
                     ToolResultStatus::Failed,
                     "unknown_tool",
                     budget,
+                    context,
                 )
                 .await?;
                 continue;
@@ -94,9 +95,45 @@ impl SerialToolRound {
                     ToolResultStatus::Failed,
                     "invalid_arguments",
                     budget,
+                    context,
                 )
                 .await?;
                 continue;
+            }
+            if call.bound_input_ref.is_none() {
+                if let Some(hooks) = &self.hooks {
+                    let transformed = hooks
+                        .transform(
+                            HookTarget::BeforeTool {
+                                call_id: call_id.clone(),
+                            },
+                            HookInput::BeforeTool {
+                                tool: registered.compiled.to_model_tool(),
+                                descriptor_digest: registered.compiled.descriptor_digest().clone(),
+                                compiled_digest: registered.compiled.digest().clone(),
+                                original_model_inputs: call.model_inputs.clone(),
+                                model_inputs: call.model_inputs.clone(),
+                            },
+                            context,
+                            budget,
+                        )
+                        .await?;
+                    if let Some(reason) = transformed.deny {
+                        self.reject(
+                            &call,
+                            call_message_id,
+                            ToolResultStatus::Denied,
+                            reason.as_str(),
+                            budget,
+                            context,
+                        )
+                        .await?;
+                        continue;
+                    }
+                    if let Some(inputs) = transformed.model_inputs {
+                        registered.compiled.validate_model_inputs(&inputs)?;
+                    }
+                }
             }
             let bound = match self
                 .binder
@@ -117,6 +154,7 @@ impl SerialToolRound {
                         status,
                         &code_name(error.code),
                         budget,
+                        context,
                     )
                     .await?;
                     continue;
@@ -146,6 +184,7 @@ impl SerialToolRound {
                         ToolResultStatus::Denied,
                         "access_denied",
                         budget,
+                        context,
                     )
                     .await?;
                     continue;
@@ -198,6 +237,7 @@ impl SerialToolRound {
                         ToolResultStatus::Denied,
                         "access_denied",
                         budget,
+                        context,
                     )
                     .await?;
                     continue;
@@ -214,6 +254,7 @@ impl SerialToolRound {
                         ToolResultStatus::Cancelled,
                         &code_name(error.code),
                         budget,
+                        context,
                     )
                     .await?;
                     return Err(error);
@@ -226,6 +267,7 @@ impl SerialToolRound {
                         ToolResultStatus::Denied,
                         &code_name(error.code),
                         budget,
+                        context,
                     )
                     .await?;
                     continue;
@@ -242,6 +284,7 @@ impl SerialToolRound {
                         ToolResultStatus::Cancelled,
                         "deadline_exceeded",
                         budget,
+                        context,
                     )
                     .await?;
                     return Err(error);
@@ -339,7 +382,7 @@ impl SerialToolRound {
                 }
             };
             let result_ref = self
-                .settle(&call_id, state, result, records, budget)
+                .settle(&call_id, state, result, records, budget, context)
                 .await?;
             if unresolved {
                 return Ok(ToolRoundOutcome::Unresolved {
@@ -384,6 +427,7 @@ impl SerialToolRound {
                     status,
                     code.as_str(),
                     budget,
+                    context,
                 )
                 .await?;
             }
@@ -517,6 +561,7 @@ impl SerialToolRound {
         status: ToolResultStatus,
         code: &str,
         budget: &RunBudget,
+        context: &ExecutionContext,
     ) -> Result<(), ContractError> {
         let result = ToolResult {
             call_id: call.call_id.clone(),
@@ -538,6 +583,7 @@ impl SerialToolRound {
             result,
             vec![],
             budget,
+            context,
         )
         .await?;
         Ok(())
@@ -662,6 +708,7 @@ impl SerialToolRound {
         result: ToolResult,
         mut records: Vec<ProtectedRecord>,
         budget: &RunBudget,
+        context: &ExecutionContext,
     ) -> Result<RecordRef, ContractError> {
         let saved = budget.store().load(budget.scope(), budget.run_id()).await?;
         let mut snapshot = saved.snapshot;
@@ -677,6 +724,8 @@ impl SerialToolRound {
             return Err(error(ErrorCode::InvalidTransition, "tool.settlement"));
         }
         entry.state = state.clone();
+        let intended_state = state.clone();
+        let observer_input = HookInput::tool_observed(call_id, &result);
         let record = ProtectedRecord::new(
             self.ids.next_id()?,
             1,
@@ -684,6 +733,7 @@ impl SerialToolRound {
                 .map_err(|_| error(ErrorCode::InvalidJson, "tool.result"))?,
         );
         let reference = record.reference().clone();
+        let intended_value = record.value().clone();
         records.push(record);
         snapshot.last_event_seq = snapshot
             .last_event_seq
@@ -729,8 +779,49 @@ impl SerialToolRound {
             origin: MessageOrigin::Tool,
             visibility: Visibility::UserAndModel,
         };
-        self.commit(snapshot, vec![message], vec![event], records, budget)
-            .await?;
+        let committed = self
+            .commit(snapshot, vec![message], vec![event], records, budget)
+            .await;
+        if let Err(error) = committed {
+            let restored = budget.store().read_record(budget.scope(), &reference).await;
+            if !restored.is_ok_and(|record| {
+                record.reference() == &reference && record.value() == &intended_value
+            }) {
+                return Err(error);
+            }
+            let Ok(saved) = budget.store().load(budget.scope(), budget.run_id()).await else {
+                return Err(error);
+            };
+            let found = saved
+                .snapshot
+                .tool_ledger
+                .iter()
+                .find(|entry| &entry.call.call_id == call_id);
+            if !found.is_some_and(|entry| entry.state == intended_state) {
+                return Err(error);
+            }
+        }
+        if let Some(hooks) = &self.hooks {
+            let mut data = context.data.clone();
+            data.system_inputs = None;
+            let cleanup = ExecutionContext::new(data, CancellationToken::new());
+            if let Err(error) = hooks
+                .observe(
+                    budget.run_id(),
+                    HookTarget::AfterTool {
+                        call_id: call_id.clone(),
+                        result_ref: reference.clone(),
+                    },
+                    observer_input,
+                    &cleanup,
+                )
+                .await
+            {
+                if let Ok(mut slot) = self.observer_error.lock() {
+                    *slot = Some(ContractError::new(error.code, "hooks.observer_report"));
+                }
+            }
+        }
         Ok(reference)
     }
     async fn commit(

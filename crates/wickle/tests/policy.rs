@@ -704,6 +704,8 @@ async fn snapshot() -> RunSnapshot {
         scope: scope(),
         timing: RunTiming::new(0, profile.profile().limits.max_elapsed_ms.get()).unwrap(),
         resume_receipts: vec![],
+        hook_plan_ref: None,
+        hook_applications: vec![],
         reservations: vec![AttemptReservation {
             attempt_id: id("first-model-attempt"),
             kind: ReservationKind::Model {
