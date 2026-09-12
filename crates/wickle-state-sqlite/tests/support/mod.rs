@@ -255,7 +255,7 @@ pub async fn populate_protected_run(store: Arc<dyn StateStore>) -> Value {
         provider_call_id: proposal.provider_call_id.clone(),
         tool_name: proposal.name.clone(),
         model_inputs: proposal.model_inputs.clone(),
-        descriptor_digest: compiled.descriptor_digest().clone(),
+        descriptor_digest: Some(compiled.descriptor_digest().clone()),
         bound_input_ref: None,
     };
     let planned = ProtectedRecord::new(id("planned-call"), 1, serde_json::to_value(&call).unwrap());
@@ -310,6 +310,7 @@ pub async fn populate_protected_run(store: Arc<dyn StateStore>) -> Value {
         call_id: id("call"),
         call_message_id: id("call-message"),
         status: ToolResultStatus::Succeeded,
+        effect: ToolEffect::Applied,
         content: vec![InputContent::Text {
             text: "Observed reports".into(),
         }],

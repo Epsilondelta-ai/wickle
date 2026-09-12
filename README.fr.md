@@ -12,4 +12,4 @@ Wickle est un moteur d’agents qu’EpsilonDelta développe en Rust. Il vise à
 
 Sa conception repose sur des profils d’agent (Agent Profiles) pour configurer le comportement des agents et sur des adaptateurs pour connecter différents modèles et outils.
 
-**État :** En développement. Les agents textuels peuvent exécuter des requêtes, conserver les résultats, relire les événements et annuler explicitement une exécution. L’exécution des outils et les autres extensions sont en cours de développement. [Exécuter un agent](docs/agents.md) · [Contrats de données](docs/contracts.md).
+**État :** En développement. Les agents prennent en charge les boucles d’appels séquentiels au modèle et aux outils, la persistance des résultats, la relecture des événements et l’annulation explicite. Les implémentations enregistrées de `ToolExecutor` reçoivent les arguments validés du modèle, combinés aux `SystemInputs` gérés séparément par le Host. Si une approbation est nécessaire ou si l’effet d’une écriture reste inconnu, l’exécution s’arrête en `Waiting` ; `resume` n’est pas encore pris en charge. [Exécuter un agent](docs/agents.md) · [Contrats de données](docs/contracts.md).

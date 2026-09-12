@@ -364,7 +364,7 @@ impl Fixture {
             provider_call_id: id(&format!("provider-{call_id}")),
             tool_name: self.tool.descriptor().name.clone(),
             model_inputs,
-            descriptor_digest: self.tool.descriptor_digest().clone(),
+            descriptor_digest: Some(self.tool.descriptor_digest().clone()),
             bound_input_ref: None,
         };
         let record = ProtectedRecord::new(

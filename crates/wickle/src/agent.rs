@@ -15,6 +15,7 @@ use tokio_util::sync::CancellationToken;
 
 mod admission;
 mod driver;
+mod tools;
 
 /// Host tokenizer or conservative estimator. This synchronous callback must not
 /// perform I/O; returned tokens are estimates, not provider-reported usage.
@@ -44,6 +45,8 @@ pub struct AgentSettings {
     pub response_limits: ModelResponseLimits,
     /// Context byte/item bounds, distinct from token estimates.
     pub projection_limits: ProjectionLimits,
+    /// Per-tool callback and receipt limits; total attempts still use RunLimits.
+    pub tool_execution_limits: ToolExecutionLimits,
     /// Require a durable StateStore at admission.
     pub require_durable: bool,
 }
@@ -68,6 +71,7 @@ impl Default for AgentSettings {
                 max_bytes: 1_048_576,
                 max_items: 1024,
             },
+            tool_execution_limits: ToolExecutionLimits::default(),
             require_durable: false,
         }
     }
@@ -92,6 +96,9 @@ impl AgentSettings {
             || self.response_limits.max_response_bytes == 0
             || self.response_limits.max_delta_bytes == 0
             || self.response_limits.max_events == 0
+            || self.tool_execution_limits.timeout_ms == 0
+            || self.tool_execution_limits.timeout_ms > 86_400_000
+            || self.tool_execution_limits.max_receipt_bytes == 0
         {
             return Err(fail(ErrorCode::InvalidConfiguration, "agent.settings"));
         }
@@ -118,6 +125,10 @@ pub struct AgentBindings {
     pub host_instructions: Vec<String>,
     /// Registered system-input metadata; values arrive through ExecutionContext.
     pub system_inputs: SystemInputRegistry,
+    /// Existing tool executors and compiled contracts, restricted to this scope.
+    pub tools: Option<Arc<ToolRegistry>>,
+    /// Optional read-only source for registered resolver-owned system inputs.
+    pub system_input_resolver: Option<Arc<dyn SystemInputResolver>>,
     /// Time source and timers.
     pub clock: Arc<dyn Clock>,
     /// New internal run/message/event identities, never business foreign keys.
@@ -165,7 +176,8 @@ impl fmt::Debug for Agent {
 }
 
 /// Validate the initial text/turn-end runtime without invoking any Host callback.
-/// Tools, asset loaders, verifiers and extension execution require later runtime bindings.
+/// Catalog tools use already-created executors. Asset loaders, adapter exports,
+/// verifiers and extension execution require their separate runtime bindings.
 pub fn create_agent(
     profile: AgentProfile,
     bindings: AgentBindings,
@@ -175,7 +187,6 @@ pub fn create_agent(
     if !matches!(profile.instructions, Instructions::Text(_))
         || !matches!(profile.output_contract, OutputContract::Text {})
         || !matches!(profile.completion_policy, CompletionPolicy::TurnEnd {})
-        || !profile.tools.is_empty()
         || !profile.skills.is_empty()
         || !profile.connectors.is_empty()
         || profile.adapters.as_ref().is_some_and(|v| !v.is_empty())
@@ -188,6 +199,18 @@ pub fn create_agent(
         || profile.context_policy.strategy.as_str() != "bounded"
     {
         return Err(fail(ErrorCode::CapabilityUnsupported, "agent.profile"));
+    }
+    match &bindings.tools {
+        Some(registry) => {
+            if registry.scope() != &bindings.scope {
+                return Err(fail(ErrorCode::AccessDenied, "agent.tools_scope"));
+            }
+            registry.prompt_bindings(&profile)?;
+        }
+        None if !profile.tools.is_empty() => {
+            return Err(fail(ErrorCode::CapabilityUnsupported, "agent.tools"));
+        }
+        None => {}
     }
     Ok(Agent {
         inner: Arc::new(Inner {
@@ -408,7 +431,9 @@ impl RunHandle {
                         bindings.state.load(&bindings.scope, &handle.run_id),
                     )
                     .await?;
-                    if saved.snapshot.status.is_terminal() {
+                    if saved.snapshot.status.is_terminal()
+                        || saved.snapshot.status == RunStatus::Waiting
+                    {
                         if cursor >= saved.snapshot.last_event_seq {
                             return Ok(None);
                         }

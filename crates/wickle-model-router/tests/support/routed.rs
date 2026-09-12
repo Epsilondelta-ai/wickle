@@ -626,7 +626,7 @@ pub async fn seed_tool(fixture: &Fixture, state: ToolCallState) {
         provider_call_id: id("earlier-call"),
         tool_name: id("tool"),
         model_inputs: JsonObject::new(),
-        descriptor_digest: canonical_digest(&json!("descriptor")),
+        descriptor_digest: Some(canonical_digest(&json!("descriptor"))),
         bound_input_ref: None,
     };
     let mut change = core::prepared(&saved, fixture.lease.clone(), 0);
@@ -647,6 +647,7 @@ pub fn unknown_tool_result() -> ToolCallState {
             call_id: id("unsettled-call"),
             call_message_id: id("earlier-message"),
             status: ToolResultStatus::Unknown,
+            effect: ToolEffect::Unknown,
             content: vec![],
             effect_receipt_ref: None,
             error: None,

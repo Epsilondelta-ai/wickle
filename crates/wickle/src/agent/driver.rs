@@ -136,7 +136,31 @@ impl Agent {
         lease: &RunLease,
         local: &Arc<LocalRun>,
     ) -> Result<(), ContractError> {
-        let attempt = self.generate(run_id, prompt, context, budget, lease).await;
+        let mut waiting = None;
+        let attempt = loop {
+            match self
+                .generate(run_id, prompt.clone(), context, budget, lease)
+                .await
+            {
+                Ok(Guarded::Completed(ModelExchangeOutcome::Completed { response }))
+                    if response.finish == ModelFinish::ToolCalls =>
+                {
+                    if let Err(error) = self.plan_tools(&response, &prompt, budget).await {
+                        break Some(Err(error));
+                    }
+                    let round = self.tool_round()?;
+                    match round.execute(&response.request_id, context, budget).await {
+                        Ok(ToolRoundOutcome::Completed) => continue,
+                        Ok(outcome) => {
+                            waiting = Some(self.tool_wait(outcome, budget).await?);
+                            break None;
+                        }
+                        Err(error) => break Some(Err(error)),
+                    }
+                }
+                result => break Some(result),
+            }
+        };
         if let Some(error) = local
             .error
             .lock()
@@ -145,6 +169,23 @@ impl Agent {
         {
             return Err(error);
         }
+        if let Some((wait, unresolved_effects)) = waiting {
+            return self
+                .finish(
+                    run_id,
+                    PreparedOutcome {
+                        result: OutcomeResult::Waiting { wait },
+                        output: vec![],
+                        continuation: vec![],
+                        unresolved_effects,
+                    },
+                    budget,
+                    context,
+                    local,
+                )
+                .await;
+        }
+        let attempt = attempt.expect("non-waiting loop result");
         let mut continuation = vec![];
         let (result, output) = match attempt {
             Ok(Guarded::Completed(ModelExchangeOutcome::Completed { response }))
@@ -188,6 +229,10 @@ impl Agent {
                         | ErrorCode::StateNotFound
                         | ErrorCode::ClockUnavailable
                         | ErrorCode::ClockRegression
+                        | ErrorCode::InvalidTransition
+                        | ErrorCode::InvalidSnapshot
+                        | ErrorCode::InvalidEvent
+                        | ErrorCode::RecordConflict
                 ) =>
             {
                 return Err(error);
@@ -228,9 +273,10 @@ impl Agent {
                 result,
                 output,
                 continuation,
+                unresolved_effects: vec![],
             },
             budget,
-            lease,
+            context,
             local,
         )
         .await
@@ -289,7 +335,11 @@ impl Agent {
             routing: RouteRequest {
                 model_binding: saved.snapshot.profile.profile().model_binding.clone(),
                 purpose: ModelPurpose::Agent,
-                required_capabilities: std::collections::BTreeSet::from([Id::new("text")?]),
+                required_capabilities: if prompt.tools().is_empty() {
+                    std::collections::BTreeSet::from([Id::new("text")?])
+                } else {
+                    std::collections::BTreeSet::from([Id::new("text")?, Id::new("tool_calling")?])
+                },
                 input_tokens: 0,
                 max_output_tokens: bindings.settings.max_output_tokens,
                 options: saved.snapshot.request.model_options.clone(),
@@ -327,76 +377,84 @@ impl Agent {
         run_id: &Id,
         candidate: PreparedOutcome,
         budget: &RunBudget,
-        lease: &RunLease,
+        context: &ExecutionContext,
         local: &Arc<LocalRun>,
     ) -> Result<(), ContractError> {
         let PreparedOutcome {
             mut result,
             mut output,
             continuation,
+            unresolved_effects,
         } = candidate;
         let bindings = &self.inner.bindings;
-        let saved = bindings.state.load(&bindings.scope, run_id).await?;
-        let mut snapshot = saved.snapshot;
-        if snapshot.status.is_terminal() {
+        let lease = budget.lease();
+        let mut saved = bindings.state.load(&bindings.scope, run_id).await?;
+        if saved.snapshot.status.is_terminal() {
             return Ok(());
         }
-        let (elapsed, now) = budget.settlement_time(snapshot.usage.elapsed_ms)?;
-        bindings
-            .state
-            .check_lease(&bindings.scope, run_id, lease, now)
-            .await?;
-        if local.cancel.is_cancelled() && matches!(result, OutcomeResult::Succeeded { .. }) {
-            result = OutcomeResult::Cancelled {
-                reason: local
-                    .reason
-                    .lock()
-                    .map_err(|_| fail(ErrorCode::InvalidContract, "agent.cancel"))?
-                    .as_ref()
-                    .map(ToString::to_string)
-                    .unwrap_or_else(|| "cancelled".into()),
-            };
-            output.clear();
-        }
-        if elapsed >= snapshot.limits.max_elapsed_ms.get()
-            && matches!(result, OutcomeResult::Succeeded { .. })
-        {
-            result = OutcomeResult::Exhausted {
-                budget: BudgetKind::Elapsed,
-            };
-            output.clear();
-        }
         if output.is_empty() && !matches!(result, OutcomeResult::Succeeded { .. }) {
-            output = self.saved_partial_output(&snapshot).await?;
+            output = self.saved_partial_output(&saved.snapshot).await?;
         }
-        // Protected response reads may have waited. Refresh settlement time and
-        // the stored lease before the final transaction.
-        let (_, check_at) = budget.settlement_time(snapshot.usage.elapsed_ms)?;
-        let current_lease = bindings
-            .state
-            .check_lease(&bindings.scope, run_id, lease, check_at)
-            .await?;
-        let (elapsed, now) = budget.settlement_time(snapshot.usage.elapsed_ms)?;
-        if now >= current_lease.expires_at_ms {
-            return Err(fail(ErrorCode::LeaseLost, "agent.finish"));
-        }
-        if matches!(result, OutcomeResult::Succeeded { .. }) {
-            if local.cancel.is_cancelled() {
-                result = OutcomeResult::Cancelled {
-                    reason: local
-                        .reason
-                        .lock()
-                        .map_err(|_| fail(ErrorCode::InvalidContract, "agent.cancel"))?
-                        .as_ref()
-                        .map(ToString::to_string)
-                        .unwrap_or_else(|| "cancelled".into()),
-                };
-            } else if elapsed >= snapshot.limits.max_elapsed_ms.get() {
-                result = OutcomeResult::Exhausted {
-                    budget: BudgetKind::Elapsed,
-                };
+        // Finalization remains possible after cancellation/deadline, but only
+        // under the stored lease. A stop during these reads also closes untouched
+        // plans; it never invents a result for an uncertain dispatched operation.
+        let mut cleaned = false;
+        let (elapsed, now) = loop {
+            let (_, check_at) = budget.settlement_time(saved.snapshot.usage.elapsed_ms)?;
+            let current_lease = bindings
+                .state
+                .check_lease(&bindings.scope, run_id, lease, check_at)
+                .await?;
+            let (elapsed, now) = budget.settlement_time(saved.snapshot.usage.elapsed_ms)?;
+            if now >= current_lease.expires_at_ms {
+                return Err(fail(ErrorCode::LeaseLost, "agent.finish"));
             }
-        }
+            if matches!(
+                result,
+                OutcomeResult::Succeeded { .. } | OutcomeResult::Waiting { .. }
+            ) {
+                if local.cancel.is_cancelled() {
+                    result = OutcomeResult::Cancelled {
+                        reason: local
+                            .reason
+                            .lock()
+                            .map_err(|_| fail(ErrorCode::InvalidContract, "agent.cancel"))?
+                            .as_ref()
+                            .map(ToString::to_string)
+                            .unwrap_or_else(|| "cancelled".into()),
+                    };
+                } else if elapsed >= saved.snapshot.limits.max_elapsed_ms.get() {
+                    result = OutcomeResult::Exhausted {
+                        budget: BudgetKind::Elapsed,
+                    };
+                }
+            }
+            if !matches!(
+                result,
+                OutcomeResult::Succeeded { .. } | OutcomeResult::Waiting { .. }
+            ) && saved.snapshot.tool_ledger.iter().any(|entry| {
+                matches!(
+                    entry.state,
+                    ToolCallState::Planned {} | ToolCallState::ApprovalPending { .. }
+                )
+            }) {
+                if cleaned {
+                    return Err(fail(ErrorCode::InvalidTransition, "agent.pending_tools"));
+                }
+                self.settle_unstarted_tools(
+                    &saved.snapshot,
+                    context,
+                    budget,
+                    matches!(result, OutcomeResult::Cancelled { .. }),
+                )
+                .await?;
+                saved = bindings.state.load(&bindings.scope, run_id).await?;
+                cleaned = true;
+                continue;
+            }
+            break (elapsed, now);
+        };
+        let mut snapshot = saved.snapshot;
         let expected_revision = snapshot.revision;
         snapshot.revision = snapshot
             .revision
@@ -409,7 +467,16 @@ impl Agent {
         snapshot.usage.elapsed_ms = elapsed;
         snapshot.timing.last_observed_at_ms = now;
         snapshot.status = result.status();
-        snapshot.phase = RunPhase::Finish;
+        snapshot.phase = if snapshot.status == RunStatus::Waiting {
+            RunPhase::Waiting
+        } else {
+            RunPhase::Finish
+        };
+        snapshot.wait = if let OutcomeResult::Waiting { wait } = &result {
+            Some(wait.clone())
+        } else {
+            None
+        };
         if let OutcomeResult::Failed { failure } = &mut result {
             failure.diagnostic_ref = snapshot
                 .model_ledger
@@ -423,7 +490,7 @@ impl Agent {
             usage: snapshot.usage.clone(),
             checkpoint_revision: snapshot.revision,
             verification: None,
-            unresolved_effects: vec![],
+            unresolved_effects,
         };
         let record = ProtectedRecord::new(
             bindings.ids.next_id()?,
@@ -431,6 +498,18 @@ impl Agent {
             serde_json::to_value(&outcome)
                 .map_err(|_| fail(ErrorCode::InvalidJson, "agent.outcome"))?,
         );
+        let wait_record = snapshot
+            .wait
+            .as_ref()
+            .map(|wait| {
+                Ok::<_, ContractError>(ProtectedRecord::new(
+                    bindings.ids.next_id()?,
+                    1,
+                    serde_json::to_value(wait)
+                        .map_err(|_| fail(ErrorCode::InvalidJson, "agent.wait"))?,
+                ))
+            })
+            .transpose()?;
         let event = RunEvent {
             schema_version: RunEventSchemaVersion::V1,
             event_id: bindings.ids.next_id()?,
@@ -442,11 +521,18 @@ impl Agent {
                 .try_into()
                 .map_err(|_| fail(ErrorCode::InvalidSnapshot, "agent.event"))?,
             timestamp_ms: now,
-            payload: RunEventPayload::RunFinished {
-                outcome_ref: record.reference().clone(),
+            payload: if let Some(wait_record) = &wait_record {
+                RunEventPayload::RunWaiting {
+                    wait_ref: wait_record.reference().clone(),
+                }
+            } else {
+                RunEventPayload::RunFinished {
+                    outcome_ref: record.reference().clone(),
+                }
             },
         };
         let mut records = vec![record];
+        records.extend(wait_record);
         let mut content: Vec<_> = output
             .into_iter()
             .map(|content| ContentBlock::Content { content })
@@ -567,6 +653,7 @@ struct PreparedOutcome {
     result: OutcomeResult,
     output: Vec<InputContent>,
     continuation: Vec<OpaqueContinuation>,
+    unresolved_effects: Vec<RecordRef>,
 }
 
 struct Projector {

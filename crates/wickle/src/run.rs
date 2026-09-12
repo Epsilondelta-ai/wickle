@@ -463,6 +463,13 @@ pub enum ToolCallState {
         /// Stable key for external deduplication/reconciliation.
         idempotency_key: Id,
     },
+    /// A charged attempt was stopped for approval before entering the executor.
+    ApprovalPending {
+        /// Reservation that remains charged even though execution did not start.
+        attempt_id: Id,
+        /// Frozen effect key reused if execution is later authorized.
+        idempotency_key: Id,
+    },
     /// Result was recorded.
     Settled {
         /// Paired tool result.
@@ -723,8 +730,32 @@ impl RunSnapshot {
             if !calls.insert(&entry.call.call_id) {
                 return Err(invalid("tool_ledger.call_id"));
             }
+            let unregistered_safe = match &entry.state {
+                ToolCallState::Planned {} => true,
+                ToolCallState::Settled { result } => {
+                    result.effect == crate::ToolEffect::NotApplied
+                        && matches!(
+                            result.status,
+                            crate::ToolResultStatus::Failed
+                                | crate::ToolResultStatus::Denied
+                                | crate::ToolResultStatus::Cancelled
+                        )
+                }
+                _ => false,
+            };
+            if entry.call.descriptor_digest.is_none()
+                && (entry.call.bound_input_ref.is_some() || !unregistered_safe)
+            {
+                return Err(invalid("tool_ledger.unregistered"));
+            }
             match &entry.state {
-                ToolCallState::Dispatching { .. } | ToolCallState::Unknown { .. }
+                ToolCallState::Dispatching { attempt_id, .. } | ToolCallState::Unknown { attempt_id, .. } | ToolCallState::ApprovalPending { attempt_id, .. }
+                    if !self.reservations.iter().any(|reservation| &reservation.attempt_id == attempt_id
+                        && matches!(&reservation.kind, ReservationKind::Tool { call_id } if call_id == &entry.call.call_id)) =>
+                {
+                    return Err(invalid("tool_ledger.reservation"));
+                }
+                ToolCallState::Dispatching { .. } | ToolCallState::Unknown { .. } | ToolCallState::ApprovalPending { .. }
                     if entry.call.bound_input_ref.is_none() =>
                 {
                     return Err(invalid("tool_ledger.bound_input_ref"));
@@ -735,7 +766,7 @@ impl RunSnapshot {
                 _ => {}
             }
             if self.status == RunStatus::Succeeded
-                && !matches!(&entry.state, ToolCallState::Settled { result } if result.status != crate::ToolResultStatus::Unknown)
+                && !matches!(&entry.state, ToolCallState::Settled { result } if result.status != crate::ToolResultStatus::Unknown && result.effect != crate::ToolEffect::Unknown)
             {
                 return Err(invalid("tool_ledger.unsettled"));
             }
@@ -798,6 +829,16 @@ pub enum RunEventPayload {
     ToolSettled {
         /// Protected result record.
         result_ref: RecordRef,
+    },
+    /// A recorded result cannot establish whether an external operation applied.
+    #[serde(rename = "tool.unresolved")]
+    ToolUnresolved {
+        /// Protected paired Unknown result.
+        result_ref: RecordRef,
+        /// Uncertain physical attempt whose reservation remains charged.
+        attempt_id: Id,
+        /// Original external effect key, retained for reconciliation.
+        idempotency_key: Id,
     },
     /// Verifier decision committed.
     #[serde(rename = "verification.completed")]

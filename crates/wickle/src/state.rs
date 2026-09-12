@@ -402,7 +402,15 @@ impl StateStore for MemoryStateStore {
             let additions = validate_records(state, &input.records)?;
             record_value(state, &additions, &input.prompt_snapshot)?;
             validate_snapshot_refs(state, &additions, &input.snapshot)?;
-            validate_events(state, &additions, &input.snapshot, 0, &input.events, true)?;
+            validate_events(
+                state,
+                &additions,
+                &input.snapshot,
+                0,
+                &input.events,
+                true,
+                &input.messages,
+            )?;
             let previous_sequence = previous_session.map_or(0, |s| s.snapshot.transcript_revision);
             let transcript_revision = validate_messages(
                 state,
@@ -600,6 +608,7 @@ impl StateStore for MemoryStateStore {
                 run.snapshot.last_event_seq,
                 &input.events,
                 false,
+                &input.messages,
             )?;
             let session = state
                 .sessions
@@ -1030,6 +1039,43 @@ fn validate_messages(
     Ok(sequence)
 }
 
+fn validate_tool_pair(
+    state: &ScopeState,
+    snapshot: &RunSnapshot,
+    additions: &[Message],
+    result: &ToolResult,
+) -> Result<(), ContractError> {
+    let existing = state
+        .sessions
+        .get(&snapshot.request.session_id)
+        .map_or(&[][..], |session| session.messages.as_slice());
+    let entry = snapshot
+        .tool_ledger
+        .iter()
+        .find(|entry| entry.call.call_id == result.call_id)
+        .ok_or_else(|| error(ErrorCode::InvalidSnapshot, "tool.result_call"))?;
+    let paired = existing.iter().chain(additions).any(|message| {
+        message.message_id == result.call_message_id
+            && message.run_id == snapshot.run_id
+            && message.role == crate::MessageRole::Assistant
+            && message.origin == crate::MessageOrigin::Model
+            && message.content.iter().any(|content| {
+                let ContentBlock::ToolCall { call } = content else {
+                    return false;
+                };
+                let mut original = call.clone();
+                if original.bound_input_ref.is_none() {
+                    original.bound_input_ref = entry.call.bound_input_ref.clone();
+                }
+                original == entry.call
+            })
+    });
+    if !paired {
+        return Err(error(ErrorCode::InvalidSnapshot, "tool.result_message"));
+    }
+    Ok(())
+}
+
 fn tool_result_refs(result: &ToolResult) -> Vec<&RecordRef> {
     result
         .effect_receipt_ref
@@ -1043,6 +1089,7 @@ fn tool_result_refs(result: &ToolResult) -> Vec<&RecordRef> {
         .collect()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn validate_events(
     state: &ScopeState,
     additions: &BTreeMap<RecordKey, ProtectedRecord>,
@@ -1050,6 +1097,7 @@ fn validate_events(
     previous_seq: u64,
     events: &[RunEvent],
     admission: bool,
+    messages: &[Message],
 ) -> Result<(), ContractError> {
     let mut sequence = previous_seq;
     let mut seen = BTreeSet::new();
@@ -1114,6 +1162,26 @@ fn validate_events(
                     )
                 }) {
                     return Err(error(ErrorCode::InvalidEvent, "events.tool_settled"));
+                }
+                validate_tool_pair(state, snapshot, messages, &result)?;
+                result_ref
+            }
+            RunEventPayload::ToolUnresolved {
+                result_ref,
+                attempt_id,
+                idempotency_key,
+            } => {
+                let result: ToolResult = event_record(state, additions, result_ref)?;
+                if result.status != crate::ToolResultStatus::Unknown || result.effect != crate::ToolEffect::Unknown
+                    || !snapshot.tool_ledger.iter().any(|entry| entry.call.call_id == result.call_id
+                        && matches!(&entry.state, ToolCallState::Unknown { attempt_id: saved, idempotency_key: key }
+                            if saved == attempt_id && key == idempotency_key))
+                {
+                    return Err(error(ErrorCode::InvalidEvent, "events.tool_unresolved"));
+                }
+                validate_tool_pair(state, snapshot, messages, &result)?;
+                for reference in tool_result_refs(&result) {
+                    record_value(state, additions, reference)?;
                 }
                 result_ref
             }
@@ -1263,8 +1331,14 @@ fn validate_transition(previous: &RunSnapshot, next: &RunSnapshot) -> Result<(),
             || (matches!(old.state, ToolCallState::Settled { .. }) && old != new)
             || (matches!(
                 old.state,
-                ToolCallState::Dispatching { .. } | ToolCallState::Unknown { .. }
+                ToolCallState::Dispatching { .. }
+                    | ToolCallState::Unknown { .. }
+                    | ToolCallState::ApprovalPending { .. }
             ) && matches!(new.state, ToolCallState::Planned { .. }))
+            || (matches!(old.state, ToolCallState::Unknown { .. })
+                && matches!(new.state, ToolCallState::ApprovalPending { .. }))
+            || (matches!(old.state, ToolCallState::ApprovalPending { .. })
+                && matches!(new.state, ToolCallState::Unknown { .. }))
         {
             return Err(error(ErrorCode::InvalidTransition, "tool_ledger"));
         }
@@ -1276,6 +1350,10 @@ fn validate_transition(previous: &RunSnapshot, next: &RunSnapshot) -> Result<(),
             | ToolCallState::Unknown {
                 attempt_id: old_attempt,
                 idempotency_key: old_key,
+            }
+            | ToolCallState::ApprovalPending {
+                attempt_id: old_attempt,
+                idempotency_key: old_key,
             },
             ToolCallState::Dispatching {
                 attempt_id: new_attempt,
@@ -1284,11 +1362,17 @@ fn validate_transition(previous: &RunSnapshot, next: &RunSnapshot) -> Result<(),
             | ToolCallState::Unknown {
                 attempt_id: new_attempt,
                 idempotency_key: new_key,
+            }
+            | ToolCallState::ApprovalPending {
+                attempt_id: new_attempt,
+                idempotency_key: new_key,
             },
         ) = (&old.state, &new.state)
         {
-            let retry = matches!(old.state, ToolCallState::Unknown { .. })
-                && matches!(new.state, ToolCallState::Dispatching { .. });
+            let retry = matches!(
+                old.state,
+                ToolCallState::Unknown { .. } | ToolCallState::ApprovalPending { .. }
+            ) && matches!(new.state, ToolCallState::Dispatching { .. });
             if old_key != new_key || (!retry && old_attempt != new_attempt) {
                 return Err(error(ErrorCode::InvalidTransition, "tool_ledger.attempt"));
             }

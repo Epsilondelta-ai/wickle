@@ -137,6 +137,7 @@ impl PolicyGate {
                 RunEventPayload::RunStarted { .. } => "run.started",
                 RunEventPayload::ToolPlanned { .. } => "tool.planned",
                 RunEventPayload::ToolSettled { .. } => "tool.settled",
+                RunEventPayload::ToolUnresolved { .. } => "tool.unresolved",
                 RunEventPayload::VerificationCompleted { .. } => "verification.completed",
                 RunEventPayload::RunWaiting { .. } => "run.waiting",
                 RunEventPayload::RunResumed { .. } => "run.resumed",

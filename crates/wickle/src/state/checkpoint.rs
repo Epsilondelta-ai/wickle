@@ -403,6 +403,7 @@ fn validate_history(
     let mut sequence = 0_u64;
     let mut started = 0;
     let mut finished = 0;
+    let mut unresolved_keys = BTreeMap::new();
     for event in &run.events {
         sequence = sequence
             .checked_add(1)
@@ -458,6 +459,50 @@ fn validate_history(
                 if !run.snapshot.tool_ledger.iter().any(|entry| matches!(&entry.state, ToolCallState::Settled { result: current } if current == &result)) {
                     return Err(invalid("checkpoint.tool_settled"));
                 }
+                validate_tool_pair(state, &run.snapshot, &[], &result)?;
+                for reference in tool_result_refs(&result) {
+                    record_value(state, &empty, reference)?;
+                }
+            }
+            RunEventPayload::ToolUnresolved {
+                result_ref,
+                attempt_id,
+                idempotency_key,
+            } => {
+                let result: ToolResult = event_record(state, &empty, result_ref)?;
+                if result.status != crate::ToolResultStatus::Unknown || result.effect != crate::ToolEffect::Unknown
+                    || !run.snapshot.tool_ledger.iter().any(|entry| entry.call.call_id == result.call_id)
+                    || !run.snapshot.reservations.iter().any(|reservation| &reservation.attempt_id == attempt_id
+                        && matches!(&reservation.kind, crate::ReservationKind::Tool { call_id } if call_id == &result.call_id))
+                {
+                    return Err(invalid("checkpoint.tool_unresolved"));
+                }
+                let entry = run
+                    .snapshot
+                    .tool_ledger
+                    .iter()
+                    .find(|entry| entry.call.call_id == result.call_id)
+                    .expect("call membership checked above");
+                let current_key = match &entry.state {
+                    ToolCallState::Dispatching {
+                        idempotency_key, ..
+                    }
+                    | ToolCallState::ApprovalPending {
+                        idempotency_key, ..
+                    }
+                    | ToolCallState::Unknown {
+                        idempotency_key, ..
+                    } => Some(idempotency_key),
+                    _ => None,
+                };
+                if current_key.is_some_and(|key| key != idempotency_key)
+                    || unresolved_keys
+                        .insert(result.call_id.clone(), idempotency_key)
+                        .is_some_and(|key| key != idempotency_key)
+                {
+                    return Err(invalid("checkpoint.tool_unresolved_key"));
+                }
+                validate_tool_pair(state, &run.snapshot, &[], &result)?;
                 for reference in tool_result_refs(&result) {
                     record_value(state, &empty, reference)?;
                 }
