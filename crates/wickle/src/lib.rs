@@ -61,7 +61,8 @@ pub use policy::{
 };
 pub use state::{
     AdmissionInput, AdmissionResult, CommitInput, EventPage, MAX_EVENT_PAGE_SIZE, MemoryStateStore,
-    ProtectedRecord, RunLease, StateStore, StateStoreCapabilities, StoredRun,
+    ProtectedRecord, RunLease, STATE_STORE_CHECKPOINT_VERSION, StateStore, StateStoreCapabilities,
+    StateStoreCheckpoint, StoredRun,
 };
 pub use tool_schema::{
     CompiledTool, SchemaCompiler, SystemInputDefinition, SystemInputRegistry, SystemInputSource,

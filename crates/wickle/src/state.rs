@@ -8,6 +8,9 @@ use std::{
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
+mod checkpoint;
+pub use checkpoint::{STATE_STORE_CHECKPOINT_VERSION, StateStoreCheckpoint};
+
 use crate::{
     ApprovalTarget, BudgetUsage, ContentBlock, ContractError, ErrorCode, Id, Message,
     ModelAttemptState, ModelExchangeOutcome, ModelFinish, ModelInvocationRecord, OutcomeResult,
@@ -251,7 +254,7 @@ pub trait StateStore: Send + Sync {
 type ScopeKey = (Id, Id, Option<Id>);
 type RecordKey = (Id, u64);
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct ScopeState {
     sessions: BTreeMap<Id, SessionState>,
     runs: BTreeMap<Id, RunState>,
@@ -261,11 +264,13 @@ struct ScopeState {
     message_ids: BTreeSet<Id>,
 }
 
+#[derive(Clone)]
 struct SessionState {
     snapshot: SessionSnapshot,
     messages: Vec<Message>,
 }
 
+#[derive(Clone)]
 struct RunState {
     snapshot: RunSnapshot,
     events: Vec<RunEvent>,
