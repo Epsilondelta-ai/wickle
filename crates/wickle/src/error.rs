@@ -5,6 +5,16 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum ErrorCode {
+    /// Current policy or exact owner scope denies access.
+    AccessDenied,
+    /// The trusted policy failed or panicked; no permission was granted.
+    PolicyUnavailable,
+    /// The call's finite deadline elapsed.
+    DeadlineExceeded,
+    /// The current operation was cancelled.
+    Cancelled,
+    /// The Host has not supplied the required asynchronous runtime.
+    RuntimeUnavailable,
     /// Input is not unambiguous, finite JSON.
     InvalidJson,
     /// Input does not match a data contract.

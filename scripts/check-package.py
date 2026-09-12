@@ -68,6 +68,11 @@ def main():
             encoding="utf-8",
         )
         shutil.copyfile(ROOT / "tests/support/consumer.rs", consumer / "src/main.rs")
+        examples = sorted((ROOT / "tests/support").glob("*_consumer.rs"))
+        if examples:
+            (consumer / "src/bin").mkdir()
+            for example in examples:
+                shutil.copyfile(example, consumer / "src/bin" / example.name)
         # Keep consumer builds independent of the checkout and its build cache.
         env["CARGO_TARGET_DIR"] = str(base / "target")
         subprocess.run(["cargo", "generate-lockfile", "--offline"],
@@ -78,8 +83,11 @@ def main():
                 manifest = Path(package["manifest_path"]).resolve()
                 if not manifest.is_relative_to(base):
                     raise RuntimeError(f"Consumer depends on an external path: {manifest}")
-        subprocess.run(["cargo", "run", "--locked", "--offline"],
+        subprocess.run(["cargo", "run", "--locked", "--offline", "--bin", "wickle-package-consumer"],
                        cwd=consumer, env=env, check=True)
+        for example in examples:
+            subprocess.run(["cargo", "run", "--locked", "--offline", "--bin", example.stem],
+                           cwd=consumer, env=env, check=True)
     print("Independent package consumer: passed (profile validation and restore)", flush=True)
 
 
