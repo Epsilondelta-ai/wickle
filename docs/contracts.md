@@ -121,6 +121,10 @@ adapters used through the same trait, with connection and continuation isolation
 Session prompt reuse and bounded message projection are described in
 [Pin and project model context](context.md).
 
+Versioned model definitions, bindings, capability checks, and the separate
+immutable catalog implementation are described in
+[Register versioned models](model-catalog.md).
+
 ## Execution and storage data
 
 | Contract | Purpose |

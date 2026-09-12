@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify the core dependency boundary and consume an extracted Cargo package."""
+"""Verify the core dependency boundary and consume extracted Cargo packages."""
 
 import argparse
 import hashlib
@@ -36,6 +36,7 @@ def main():
 
     workspace = metadata(ROOT)
     core = next(p for p in workspace["packages"] if p["name"] == "wickle")
+    catalog = next(p for p in workspace["packages"] if p["name"] == "wickle-model-router")
     versions = {d["name"]: d["req"] for d in core["dependencies"] if d["kind"] is None}
     for dep in core["dependencies"]:
         if dep["kind"] != "dev":
@@ -57,15 +58,40 @@ def main():
             raise RuntimeError("The consumer must be outside the source repository")
         # The archive is produced by cargo package above, not supplied externally.
         subprocess.run(["tar", "-xzf", str(archive), "-C", str(base)], check=True)
+        # Cargo 1.85 resolves unpublished path dependencies through the registry
+        # when packaging. Stage the sources so the temporary patch and its lock
+        # update cannot alter the checkout. The consumer verifies the archive.
+        staged = base / "staged"
+        staged.mkdir()
+        for filename in ["Cargo.toml", "Cargo.lock"]:
+            shutil.copyfile(ROOT / filename, staged / filename)
+        for package in [core, catalog]:
+            manifest = Path(package["manifest_path"])
+            destination = staged / manifest.parent.relative_to(ROOT)
+            destination.mkdir(parents=True)
+            shutil.copyfile(manifest, destination / "Cargo.toml")
+            shutil.copytree(manifest.parent / "src", destination / "src")
+        patch = f'patch.crates-io.wickle.path="{base / package_name}"'
+        subprocess.run(
+            ["cargo", "package", "-p", "wickle-model-router", "--allow-dirty",
+             "--offline", "--no-verify", "--config", patch],
+            cwd=staged, env={**env, "CARGO_TARGET_DIR": str(staged / "target")}, check=True,
+        )
+        catalog_name = f"wickle-model-router-{catalog['version']}"
+        catalog_archive = staged / "target/package" / f"{catalog_name}.crate"
+        print(f"Catalog package SHA-256: {hashlib.sha256(catalog_archive.read_bytes()).hexdigest()}", flush=True)
+        subprocess.run(["tar", "-xzf", str(catalog_archive), "-C", str(base)], check=True)
         consumer = base / "consumer"
         (consumer / "src").mkdir(parents=True)
         (consumer / "Cargo.toml").write_text(
             '[package]\nname = "wickle-package-consumer"\nversion = "0.0.0"\n'
             'edition = "2024"\npublish = false\n\n[workspace]\n\n'
             f'[dependencies]\nwickle = {{ path = "../{package_name}" }}\n'
+            f'wickle-model-router = {{ path = "../{catalog_name}" }}\n'
             f'serde_json = "{versions["serde_json"]}"\n'
             f'futures-util = {{ version = "{versions["futures-util"]}", default-features = false, features = ["std", "async-await"] }}\n'
-            f'tokio = {{ version = "{versions["tokio"]}", features = ["rt", "macros"] }}\n',
+            f'tokio = {{ version = "{versions["tokio"]}", features = ["rt", "macros"] }}\n'
+            f'\n[patch.crates-io]\nwickle = {{ path = "../{package_name}" }}\n',
             encoding="utf-8",
         )
         shutil.copyfile(ROOT / "tests/support/consumer.rs", consumer / "src/main.rs")
@@ -79,17 +105,27 @@ def main():
         subprocess.run(["cargo", "generate-lockfile", "--offline"],
                        cwd=consumer, env=env, check=True)
         resolved = metadata(consumer)
+        allowed_registry = {(p["name"], p["version"], p["source"])
+                            for p in workspace["packages"] if p["source"] is not None}
+        package_paths = {core["name"]: base / package_name,
+                         catalog["name"]: base / catalog_name}
         for package in resolved["packages"]:
+            if package["name"] in package_paths:
+                expected = package_paths[package["name"]] / "Cargo.toml"
+                if Path(package["manifest_path"]).resolve() != expected:
+                    raise RuntimeError(f"Consumer substituted a package: {package['name']}")
             if package["source"] is None:
                 manifest = Path(package["manifest_path"]).resolve()
                 if not manifest.is_relative_to(base):
                     raise RuntimeError(f"Consumer depends on an external path: {manifest}")
+            elif (package["name"], package["version"], package["source"]) not in allowed_registry:
+                raise RuntimeError(f"Consumer resolved an unpinned dependency: {package['name']} {package['version']}")
         subprocess.run(["cargo", "run", "--locked", "--offline", "--bin", "wickle-package-consumer"],
                        cwd=consumer, env=env, check=True)
         for example in examples:
             subprocess.run(["cargo", "run", "--locked", "--offline", "--bin", example.stem],
                            cwd=consumer, env=env, check=True)
-    print("Independent package consumer: passed (profile validation and restore)", flush=True)
+    print("Independent package consumers: passed (core and model catalog)", flush=True)
 
 
 if __name__ == "__main__":

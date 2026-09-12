@@ -27,6 +27,24 @@ pub enum ErrorCode {
     InvalidJson,
     /// Input does not match a data contract.
     InvalidContract,
+    /// The requested model, version, binding or alias is not registered.
+    ModelNotRegistered,
+    /// An exact model/API/adapter/target binding or its evidence is inconsistent.
+    ModelBindingInvalid,
+    /// The required feature or declared capability limit is unsupported.
+    ModelCapabilityUnsupported,
+    /// Provider options do not satisfy the model and exact-binding contracts.
+    ModelOptionUnsupported,
+    /// The model or deployment is not verified immutable under the requested policy.
+    ModelVersionUnpinned,
+    /// The selected release is retired or otherwise unavailable.
+    ModelUnavailable,
+    /// Catalog scope-independent revision, identity or serialized integrity differs.
+    ModelCatalogMismatch,
+    /// Required support evidence is absent, failed, or of an insufficient kind.
+    ModelSupportInsufficient,
+    /// Estimated input plus reserved output exceeds this model/binding context budget.
+    ModelContextIncompatible,
     /// Tool exposure, binding metadata, or a registered input schema is inconsistent.
     InvalidToolInputContract,
     /// The compiler cannot safely project this input schema or reference form.
