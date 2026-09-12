@@ -35,6 +35,12 @@ pub enum ErrorCode {
     InvalidArguments,
     /// A supplied system value does not satisfy its registered input contract.
     SystemInputInvalid,
+    /// Context identity, provenance structure, or call/result protocol is invalid.
+    InvalidContext,
+    /// Context scope, pinned assets, or protected-record identity does not match.
+    ContextMismatch,
+    /// Required context cannot fit the explicit byte or item bounds without truncation.
+    ContextBudgetExceeded,
     /// The document format is not supported.
     UnsupportedSchemaVersion,
     /// A reference or binding is missing or inconsistent.
