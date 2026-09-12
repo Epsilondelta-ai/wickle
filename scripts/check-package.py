@@ -37,6 +37,8 @@ def main():
     workspace = metadata(ROOT)
     core = next(p for p in workspace["packages"] if p["name"] == "wickle")
     catalog = next(p for p in workspace["packages"] if p["name"] == "wickle-model-router")
+    sqlite = next(p for p in workspace["packages"] if p["name"] == "wickle-state-sqlite")
+    libraries = [core, catalog, sqlite]
     versions = {d["name"]: d["req"] for d in core["dependencies"] if d["kind"] is None}
     for dep in core["dependencies"]:
         if dep["kind"] != "dev":
@@ -65,29 +67,35 @@ def main():
         staged.mkdir()
         for filename in ["Cargo.toml", "Cargo.lock"]:
             shutil.copyfile(ROOT / filename, staged / filename)
-        for package in [core, catalog]:
+        for package in libraries:
             manifest = Path(package["manifest_path"])
             destination = staged / manifest.parent.relative_to(ROOT)
             destination.mkdir(parents=True)
             shutil.copyfile(manifest, destination / "Cargo.toml")
             shutil.copytree(manifest.parent / "src", destination / "src")
         patch = f'patch.crates-io.wickle.path="{base / package_name}"'
-        subprocess.run(
-            ["cargo", "package", "-p", "wickle-model-router", "--allow-dirty",
-             "--offline", "--no-verify", "--config", patch],
-            cwd=staged, env={**env, "CARGO_TARGET_DIR": str(staged / "target")}, check=True,
-        )
-        catalog_name = f"wickle-model-router-{catalog['version']}"
-        catalog_archive = staged / "target/package" / f"{catalog_name}.crate"
-        print(f"Catalog package SHA-256: {hashlib.sha256(catalog_archive.read_bytes()).hexdigest()}", flush=True)
-        subprocess.run(["tar", "-xzf", str(catalog_archive), "-C", str(base)], check=True)
+        package_paths = {core["name"]: base / package_name}
+        for package in [catalog, sqlite]:
+            subprocess.run(
+                ["cargo", "package", "-p", package["name"], "--allow-dirty",
+                 "--offline", "--no-verify", "--config", patch],
+                cwd=staged, env={**env, "CARGO_TARGET_DIR": str(staged / "target")}, check=True,
+            )
+            name = f"{package['name']}-{package['version']}"
+            packaged = staged / "target/package" / f"{name}.crate"
+            print(f"{package['name']} package SHA-256: {hashlib.sha256(packaged.read_bytes()).hexdigest()}", flush=True)
+            subprocess.run(["tar", "-xzf", str(packaged), "-C", str(base)], check=True)
+            package_paths[package["name"]] = base / name
         consumer = base / "consumer"
         (consumer / "src").mkdir(parents=True)
+        library_dependencies = ''.join(
+            f'{name} = {{ path = "../{path.name}" }}\n'
+            for name, path in package_paths.items()
+        )
         (consumer / "Cargo.toml").write_text(
             '[package]\nname = "wickle-package-consumer"\nversion = "0.0.0"\n'
             'edition = "2024"\npublish = false\n\n[workspace]\n\n'
-            f'[dependencies]\nwickle = {{ path = "../{package_name}" }}\n'
-            f'wickle-model-router = {{ path = "../{catalog_name}" }}\n'
+            f'[dependencies]\n{library_dependencies}'
             f'serde_json = "{versions["serde_json"]}"\n'
             f'futures-util = {{ version = "{versions["futures-util"]}", default-features = false, features = ["std", "async-await"] }}\n'
             f'tokio = {{ version = "{versions["tokio"]}", features = ["rt", "macros"] }}\n'
@@ -107,8 +115,6 @@ def main():
         resolved = metadata(consumer)
         allowed_registry = {(p["name"], p["version"], p["source"])
                             for p in workspace["packages"] if p["source"] is not None}
-        package_paths = {core["name"]: base / package_name,
-                         catalog["name"]: base / catalog_name}
         for package in resolved["packages"]:
             if package["name"] in package_paths:
                 expected = package_paths[package["name"]] / "Cargo.toml"
@@ -125,7 +131,7 @@ def main():
         for example in examples:
             subprocess.run(["cargo", "run", "--locked", "--offline", "--bin", example.stem],
                            cwd=consumer, env=env, check=True)
-    print("Independent package consumers: passed (core and model catalog)", flush=True)
+    print("Independent package consumers: passed (core, model catalog, SQLite store)", flush=True)
 
 
 if __name__ == "__main__":

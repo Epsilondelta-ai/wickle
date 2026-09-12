@@ -134,6 +134,9 @@ immutable catalog implementation are described in
 
 ## Execution and storage data
 
+The [SQLite state store](sqlite-state-store.md) provides a separate persistence
+adapter with process-restart recovery and cross-process lease coordination.
+
 | Contract | Purpose |
 | --- | --- |
 | `RunRequest`, `ResumeCommand` | Caller data with request/command identity and typed input or decisions |
