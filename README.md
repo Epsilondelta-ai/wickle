@@ -12,4 +12,4 @@ Wickle is an agent engine being developed in Rust by EpsilonDelta. It aims to pr
 
 Its design uses Agent Profiles to configure agent behavior and adapters to connect different models and tools.
 
-**Status:** In development. Profile validation and execution data contracts are available; agent execution is not yet implemented. [Data contracts](docs/contracts.md).
+**Status:** In development. Text agents can execute requests with persisted outcomes, event replay, and explicit cancellation. Tool execution and additional runtime extensions are in development. [Run an agent](docs/agents.md) · [Data contracts](docs/contracts.md).

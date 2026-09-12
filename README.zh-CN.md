@@ -12,4 +12,4 @@ Wickle 是 EpsilonDelta 正在使用 Rust 开发的智能体引擎，旨在以�
 
 其设计通过 Agent Profile 配置智能体行为，并通过适配器连接不同的模型和工具。
 
-**当前状态：** 开发中。已提供 Profile 验证和执行数据契约，尚未实现智能体执行功能。[数据契约文档](docs/contracts.md)。
+**开发状态：** 已支持文本智能体执行、结果持久化、事件重放和显式取消。工具执行和其他运行时扩展仍在开发中。[运行智能体](docs/agents.md) · [数据契约](docs/contracts.md)。

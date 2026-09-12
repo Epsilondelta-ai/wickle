@@ -179,6 +179,14 @@ pub const MAX_EVENT_PAGE_SIZE: usize = 1_000;
 pub trait StateStore: Send + Sync {
     /// Describe storage and coordination guarantees.
     fn capabilities(&self) -> StateStoreCapabilities;
+    /// Find the original request before re-resolving current profile or routing metadata.
+    /// Missing scope/request returns None. Atomic admission remains the final deduplication boundary.
+    fn find_request<'a>(
+        &'a self,
+        scope: &'a Scope,
+        session_id: &'a Id,
+        request_id: &'a Id,
+    ) -> PortFuture<'a, Option<StoredRun>>;
     /// Atomically deduplicate a request and reserve its session's active-run slot.
     fn admit<'a>(
         &'a self,
@@ -307,6 +315,25 @@ impl StateStore for MemoryStateStore {
             cross_process_leases: false,
             event_replay: true,
         }
+    }
+
+    fn find_request<'a>(
+        &'a self,
+        scope: &'a Scope,
+        session_id: &'a Id,
+        request_id: &'a Id,
+    ) -> PortFuture<'a, Option<StoredRun>> {
+        Box::pin(async move {
+            let scopes = self.lock()?;
+            let Some(state) = scopes.get(&scope_key(scope)) else {
+                return Ok(None);
+            };
+            state
+                .requests
+                .get(&(session_id.clone(), request_id.clone()))
+                .map(|run_id| stored_run(state, run_id))
+                .transpose()
+        })
     }
 
     fn admit<'a>(

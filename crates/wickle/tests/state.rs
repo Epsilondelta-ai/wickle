@@ -8,6 +8,87 @@ mod support;
 use support::*;
 
 #[tokio::test]
+async fn request_lookup_uses_scope_and_session_and_returns_current_state_after_restore() {
+    let store = MemoryStateStore::new();
+    assert!(
+        store
+            .find_request(&scope(), &id("first"), &id("request"))
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let first = store
+        .admit(
+            &scope(),
+            admission("run-a", "request", "first", "input", "1").await,
+        )
+        .await
+        .unwrap()
+        .state;
+    store
+        .admit(
+            &scope(),
+            admission("run-b", "request", "second", "input", "1").await,
+        )
+        .await
+        .unwrap();
+    let lease = store
+        .acquire_lease(&scope(), &id("run-a"), &id("worker"), 0, 1000)
+        .await
+        .unwrap();
+    let finished = store
+        .commit(&scope(), &id("run-a"), finished(&first.snapshot, lease, 1))
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .find_request(&scope(), &id("first"), &id("request"))
+            .await
+            .unwrap(),
+        Some(finished)
+    );
+    let checkpoint = store.export_checkpoint(&scope()).unwrap();
+    let restored = MemoryStateStore::from_checkpoint(
+        StateStoreCheckpoint::from_json(
+            &serde_json::to_string(&checkpoint).unwrap(),
+            &scope(),
+            &checkpoint.digest(),
+        )
+        .unwrap(),
+    );
+    let first = restored
+        .find_request(&scope(), &id("first"), &id("request"))
+        .await
+        .unwrap()
+        .unwrap();
+    let second = restored
+        .find_request(&scope(), &id("second"), &id("request"))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(first.snapshot.status, RunStatus::Succeeded);
+    assert_eq!(second.snapshot.run_id, id("run-b"));
+    let foreign = Scope {
+        workspace_id: id("foreign"),
+        ..scope()
+    };
+    assert!(
+        restored
+            .find_request(&foreign, &id("first"), &id("request"))
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        restored
+            .find_request(&scope(), &id("missing"), &id("request"))
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
 async fn admitted_model_options_are_fixed_for_replay_and_later_commits() {
     fn with_effort(mut input: AdmissionInput, effort: &str) -> AdmissionInput {
         input.snapshot.request.model_options =

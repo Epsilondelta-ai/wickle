@@ -76,6 +76,14 @@ impl StateStore for ControlledStore {
     fn capabilities(&self) -> StateStoreCapabilities {
         self.inner.capabilities()
     }
+    fn find_request<'a>(
+        &'a self,
+        scope: &'a Scope,
+        session_id: &'a Id,
+        request_id: &'a Id,
+    ) -> PortFuture<'a, Option<StoredRun>> {
+        self.inner.find_request(scope, session_id, request_id)
+    }
     fn admit<'a>(&'a self, s: &'a Scope, input: AdmissionInput) -> PortFuture<'a, AdmissionResult> {
         self.inner.admit(s, input)
     }
