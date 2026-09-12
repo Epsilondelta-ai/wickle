@@ -146,10 +146,15 @@ pub fn run() {
                 write(result, json!({"fence":lease.fencing_token,"revision":committed.snapshot.revision}));
             }
             "commit_exit" => {
+                let retained_connection = rusqlite::Connection::open(database).unwrap();
+                let _: i64 = retained_connection.query_row(
+                    "SELECT count(*) FROM wickle_scope_checkpoints", [], |row| row.get(0)
+                ).unwrap();
                 let retained_store = std::sync::Arc::new(store);
                 let saved = populate_protected_run(retained_store.clone()).await;
                 write(result, saved);
-                // Keep a live store handle and skip its final Rust destructor path.
+                // Keep an initialized WAL connection alive so operation-level closes
+                // cannot perform last-connection cleanup before this abrupt exit.
                 std::process::exit(0);
             }
             _ => panic!("Unknown SQLite subprocess fixture mode"),

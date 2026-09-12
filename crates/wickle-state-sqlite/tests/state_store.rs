@@ -518,6 +518,11 @@ async fn committed_protected_state_recovers_after_process_exit_without_destructo
     let database = Database::new();
     let mut worker = workers::Worker::spawn(&database, "committer", "commit_exit", json!({}));
     let expected = worker.finish();
+    let mut wal_path = database.path().into_os_string();
+    wal_path.push("-wal");
+    let wal = std::fs::metadata(std::path::PathBuf::from(wal_path))
+        .expect("the exited worker must leave its committed WAL for recovery");
+    assert!(wal.len() > 0, "the committed WAL must not be empty");
     let reopened = SqliteStateStore::open(database.path()).unwrap();
     let actual = reopened.load(&scope(), &id("run")).await.unwrap();
     assert_eq!(
