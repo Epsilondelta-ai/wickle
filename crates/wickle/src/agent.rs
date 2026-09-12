@@ -14,10 +14,12 @@ use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
 mod admission;
+mod components;
 mod driver;
 mod hooks;
 mod resume;
 mod tools;
+use components::SegmentBindings;
 
 /// Host tokenizer or conservative estimator. This synchronous callback must not
 /// perform I/O; returned tokens are estimates, not provider-reported usage.
@@ -135,6 +137,9 @@ pub struct AgentBindings {
     pub external_receipt_verifier: Option<Arc<dyn ExternalReceiptVerifier>>,
     /// Optional scope-bound lifecycle runtime; selected definitions are pinned at admission.
     pub hooks: Option<Arc<HookRuntime>>,
+    /// Optional component assembly/runtime. It owns all catalog and exported Tool/Hook selections.
+    /// Direct tools/hooks cannot also be supplied when this is configured.
+    pub components: Option<Arc<dyn ComponentRuntime>>,
     /// Time source and timers.
     pub clock: Arc<dyn Clock>,
     /// New internal run/message/event identities, never business foreign keys.
@@ -161,6 +166,9 @@ struct LocalRun {
     reason: Mutex<Option<Id>>,
     error: Mutex<Option<ContractError>>,
     observer_error: Mutex<Option<ContractError>>,
+    release_report: Mutex<Option<ComponentReleaseReport>>,
+    release_error: Mutex<Option<ContractError>>,
+    pending_observations: Mutex<Vec<(HookTarget, HookInput)>>,
     done: AtomicBool,
     notify: Notify,
 }
@@ -172,6 +180,9 @@ impl LocalRun {
             reason: Mutex::new(None),
             error: Mutex::new(None),
             observer_error: Mutex::new(None),
+            release_report: Mutex::new(None),
+            release_error: Mutex::new(None),
+            pending_observations: Mutex::new(vec![]),
             done: AtomicBool::new(false),
             notify: Notify::new(),
         }
@@ -198,8 +209,9 @@ pub fn create_agent(
         || !matches!(profile.output_contract, OutputContract::Text {})
         || !matches!(profile.completion_policy, CompletionPolicy::TurnEnd {})
         || !profile.skills.is_empty()
-        || !profile.connectors.is_empty()
-        || profile.adapters.as_ref().is_some_and(|v| !v.is_empty())
+        || (bindings.components.is_none()
+            && (!profile.connectors.is_empty()
+                || profile.adapters.as_ref().is_some_and(|v| !v.is_empty())))
         || profile
             .context_sources
             .as_ref()
@@ -209,33 +221,41 @@ pub fn create_agent(
     {
         return Err(fail(ErrorCode::CapabilityUnsupported, "agent.profile"));
     }
-    match &bindings.hooks {
-        Some(hooks) => {
-            if hooks.scope() != &bindings.scope {
-                return Err(fail(ErrorCode::AccessDenied, "agent.hooks_scope"));
-            }
-            hooks.plan(&profile)?;
-        }
-        None if profile
-            .hooks
-            .as_ref()
-            .is_some_and(|hooks| !hooks.is_empty()) =>
-        {
-            return Err(fail(ErrorCode::CapabilityUnsupported, "agent.hooks"));
-        }
-        None => {}
+    if bindings.components.is_some() && (bindings.tools.is_some() || bindings.hooks.is_some()) {
+        return Err(fail(
+            ErrorCode::InvalidConfiguration,
+            "agent.component_authority",
+        ));
     }
-    match &bindings.tools {
-        Some(registry) => {
-            if registry.scope() != &bindings.scope {
-                return Err(fail(ErrorCode::AccessDenied, "agent.tools_scope"));
+    if bindings.components.is_none() {
+        match &bindings.hooks {
+            Some(hooks) => {
+                if hooks.scope() != &bindings.scope {
+                    return Err(fail(ErrorCode::AccessDenied, "agent.hooks_scope"));
+                }
+                hooks.plan(&profile)?;
             }
-            registry.prompt_bindings(&profile)?;
+            None if profile
+                .hooks
+                .as_ref()
+                .is_some_and(|hooks| !hooks.is_empty()) =>
+            {
+                return Err(fail(ErrorCode::CapabilityUnsupported, "agent.hooks"));
+            }
+            None => {}
         }
-        None if !profile.tools.is_empty() => {
-            return Err(fail(ErrorCode::CapabilityUnsupported, "agent.tools"));
+        match &bindings.tools {
+            Some(registry) => {
+                if registry.scope() != &bindings.scope {
+                    return Err(fail(ErrorCode::AccessDenied, "agent.tools_scope"));
+                }
+                registry.prompt_bindings(&profile)?;
+            }
+            None if !profile.tools.is_empty() => {
+                return Err(fail(ErrorCode::CapabilityUnsupported, "agent.tools"));
+            }
+            None => {}
         }
-        None => {}
     }
     Ok(Agent {
         inner: Arc::new(Inner {
@@ -280,6 +300,15 @@ pub struct HookObservationView {
     /// Reports that the StateStore actually accepted.
     pub reports: Vec<HookObservation>,
     /// A local failure to persist an observer report, when this handle knows it.
+    pub local_error: Option<ContractError>,
+}
+
+/// Local component cleanup information. It never replaces a stored RunOutcome.
+#[derive(Debug)]
+pub struct ComponentReleaseView {
+    /// Completed release report for this handle's execution segment, when available.
+    pub report: Option<ComponentReleaseReport>,
+    /// Failure to finish the bounded release protocol, distinct from execution failure.
     pub local_error: Option<ContractError>,
 }
 
@@ -383,6 +412,52 @@ impl Agent {
 }
 
 impl RunHandle {
+    /// Inspect cleanup for this process's segment after current details authorization.
+    pub async fn component_release(
+        &self,
+        context: &ExecutionContext,
+    ) -> Result<Guarded<ComponentReleaseView>, ContractError> {
+        self.agent.check_scope(context)?;
+        let request = PolicyRequest {
+            owner_scope: self.agent.inner.bindings.scope.clone(),
+            resource_id: self.run_id.clone(),
+            action: PolicyAction::ReadRunDetails {},
+        };
+        self.agent
+            .inner
+            .bindings
+            .policy
+            .guard(&request, context, None, None, || async {
+                let local = self.current_local()?;
+                let report = local
+                    .as_ref()
+                    .map(|local| {
+                        local
+                            .release_report
+                            .lock()
+                            .map(|report| report.clone())
+                            .map_err(|_| fail(ErrorCode::InvalidContract, "agent.release_state"))
+                    })
+                    .transpose()?
+                    .flatten();
+                let local_error = local
+                    .as_ref()
+                    .map(|local| {
+                        local
+                            .release_error
+                            .lock()
+                            .map(|error| error.clone())
+                            .map_err(|_| fail(ErrorCode::InvalidContract, "agent.release_state"))
+                    })
+                    .transpose()?
+                    .flatten();
+                Ok(ComponentReleaseView {
+                    report,
+                    local_error,
+                })
+            })
+            .await
+    }
     /// Read committed hook observations under current protected-details permission.
     pub async fn hook_observations(
         &self,

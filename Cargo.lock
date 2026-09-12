@@ -953,6 +953,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "wickle-adapter-runtime"
+version = "0.1.0"
+dependencies = [
+ "futures-util",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+ "wickle",
+ "wickle-model-router",
+ "wickle-state-sqlite",
+]
+
+[[package]]
 name = "wickle-model-router"
 version = "0.1.0"
 dependencies = [

@@ -15,6 +15,7 @@
 mod agent;
 mod budget;
 mod clock;
+mod component_runtime;
 mod context;
 mod context_projection;
 mod error;
@@ -38,11 +39,19 @@ mod tool_schema;
 mod views;
 
 pub use agent::{
-    Agent, AgentBindings, AgentSettings, CancelReceipt, HookObservationView, ModelTokenEstimator,
-    RunHandle, create_agent,
+    Agent, AgentBindings, AgentSettings, CancelReceipt, ComponentReleaseView, HookObservationView,
+    ModelTokenEstimator, RunHandle, create_agent,
 };
 pub use budget::{AttemptReservation, ReservationKind, RunBudget, RunTiming};
 pub use clock::{Clock, ClockReading, IdSource, RandomIdSource, SystemClock};
+pub use component_runtime::{
+    AdapterBindingState, AdapterCloseContext, AdapterDefinition, AdapterExportDefinition,
+    AdapterExportInstance, AdapterFactory, AdapterInitContext, AdapterInstance, BoundCapabilities,
+    ComponentBindContext, ComponentBindPurpose, ComponentRelease, ComponentReleaseContext,
+    ComponentReleaseFailure, ComponentReleaseReport, ComponentResolveContext, ComponentRuntime,
+    ResolvedAdapterBinding, ResolvedAssembly, ResolvedConnection, ResolvedHookBinding,
+    ResolvedToolBinding,
+};
 pub use context_projection::{
     CONTEXT_ASSEMBLER_VERSION, ContextAssembler, ContextItem, ContextLifetime, ContextOrigin,
     ContextPriority, ContextProjection, InstructionAssetContent, PinnedPromptTool, ProjectionInput,

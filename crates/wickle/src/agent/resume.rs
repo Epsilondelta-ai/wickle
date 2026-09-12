@@ -108,7 +108,15 @@ impl Agent {
         command: &ResumeCommand,
         context: &ExecutionContext,
         lease: &RunLease,
-    ) -> Result<(ResumeReceipt, PromptSnapshot, bool, Option<ContractError>), ContractError> {
+    ) -> Result<
+        (
+            ResumeReceipt,
+            PromptSnapshot,
+            bool,
+            Vec<(HookTarget, HookInput)>,
+        ),
+        ContractError,
+    > {
         let bindings = &self.inner.bindings;
         let saved = self
             .resume_read(
@@ -118,7 +126,7 @@ impl Agent {
             .await?;
         let prompt = self.restore_resume_runtime(&saved, context).await?;
         if let Some(receipt) = accepted(&saved.snapshot, command)? {
-            return Ok((receipt.clone(), prompt, false, None));
+            return Ok((receipt.clone(), prompt, false, vec![]));
         }
         validate_wait(&saved.snapshot, command)?;
         self.resume_inputs(&saved.snapshot, context).await?;
@@ -156,7 +164,8 @@ impl Agent {
             {
                 return Err(fail(ErrorCode::AccessDenied, "agent.resume_approval"));
             }
-            let round = self.tool_round(&budget).await?;
+            let segment = self.metadata_segment(&saved, context.clone()).await?;
+            let round = self.tool_round(&budget, &segment).await?;
             match &command.action {
                 ResumeAction::Approve { .. } => None,
                 ResumeAction::Deny { .. } => Some(round.prepare_denial(
@@ -400,23 +409,11 @@ impl Agent {
                 .load(&bindings.scope, &command.run_id)
                 .await?;
             if accepted(&latest.snapshot, command)?.is_some_and(|saved| saved == &receipt) {
-                let observer_error = if let Some((target, input)) = observation {
-                    self.after_tool(&command.run_id, target, input, context)
-                        .await
-                } else {
-                    None
-                };
-                return Ok((receipt, prompt, true, observer_error));
+                return Ok((receipt, prompt, true, observation.into_iter().collect()));
             }
             return Err(error);
         }
-        let observer_error = if let Some((target, input)) = observation {
-            self.after_tool(&command.run_id, target, input, context)
-                .await
-        } else {
-            None
-        };
-        Ok((receipt, prompt, true, observer_error))
+        Ok((receipt, prompt, true, observation.into_iter().collect()))
     }
 
     async fn authorize_resume(
@@ -513,12 +510,10 @@ impl Agent {
             &saved.snapshot.profile,
             &bindings.scope,
         )?;
-        let tools = bindings
+        let metadata = self.metadata_segment(saved, context.clone()).await?;
+        let tools = metadata
             .tools
-            .as_ref()
-            .map(|tools| tools.prompt_bindings(saved.snapshot.profile.profile()))
-            .transpose()?
-            .unwrap_or_default();
+            .prompt_bindings(saved.snapshot.profile.profile())?;
         if tools.len() != prompt.tools().len()
             || tools.iter().zip(prompt.tools()).any(|(tool, pinned)| {
                 tool.selection != pinned.selection
@@ -541,16 +536,31 @@ impl Agent {
                 "agent.pinned_routing",
             ));
         }
-        match (&saved.snapshot.hook_plan_ref, &bindings.hooks) {
-            (Some(reference), Some(hooks))
-                if hooks.plan(saved.snapshot.profile.profile())?.digest() == reference.digest => {}
-            (None, None) => {}
-            (None, Some(hooks))
-                if hooks
-                    .plan(saved.snapshot.profile.profile())?
-                    .definitions()
-                    .is_empty() => {}
-            _ => return Err(fail(ErrorCode::ContextMismatch, "agent.pinned_hooks")),
+        if let Some(assembly) = self.saved_assembly(saved).await? {
+            let plan = HookRegistry::metadata(bindings.scope.clone(), assembly.hooks().to_vec())?
+                .plan(saved.snapshot.profile.profile())?;
+            if saved
+                .snapshot
+                .hook_plan_ref
+                .as_ref()
+                .map(|reference| &reference.digest)
+                != Some(&plan.digest())
+            {
+                return Err(fail(ErrorCode::ContextMismatch, "agent.pinned_hooks"));
+            }
+        } else {
+            match (&saved.snapshot.hook_plan_ref, &bindings.hooks) {
+                (Some(reference), Some(hooks))
+                    if hooks.plan(saved.snapshot.profile.profile())?.digest()
+                        == reference.digest => {}
+                (None, None) => {}
+                (None, Some(hooks))
+                    if hooks
+                        .plan(saved.snapshot.profile.profile())?
+                        .definitions()
+                        .is_empty() => {}
+                _ => return Err(fail(ErrorCode::ContextMismatch, "agent.pinned_hooks")),
+            }
         }
         Ok(prompt)
     }
@@ -580,12 +590,10 @@ impl Agent {
             .ok_or_else(|| fail(ErrorCode::InvalidSnapshot, "agent.wait_call"))?
             .call
             .clone();
-        let registered = self
-            .inner
-            .bindings
+        let metadata = self.metadata_segment(saved, context.clone()).await?;
+        let registered = metadata
             .tools
-            .as_ref()
-            .and_then(|tools| tools.get(&call.tool_name))
+            .get(&call.tool_name)
             .ok_or_else(|| fail(ErrorCode::ComponentUnavailable, "agent.wait_tool"))?;
         let reference = call
             .bound_input_ref
@@ -660,7 +668,7 @@ impl Agent {
             }
         }
     }
-    async fn release_owned(&self, run_id: &Id, lease: &RunLease) {
+    pub(super) async fn release_owned(&self, run_id: &Id, lease: &RunLease) {
         if let Ok(now) = self.inner.bindings.clock.now() {
             let _ = self
                 .inner
@@ -691,12 +699,15 @@ impl Agent {
         prompt: PromptSnapshot,
         context: ExecutionContext,
         lease: RunLease,
-        observer_error: Option<ContractError>,
+        observer_error: Vec<(HookTarget, HookInput)>,
     ) -> Result<RunHandle, ContractError> {
         let segment_start_revision = receipt.accepted_revision;
         let expired = receipt.expired;
         let local = Arc::new(LocalRun::new(segment_start_revision));
-        self.remember_observer_error(&local, observer_error);
+        *local
+            .pending_observations
+            .lock()
+            .map_err(|_| fail(ErrorCode::InvalidContract, "agent.observers"))? = observer_error;
         self.inner
             .runs
             .lock()
@@ -724,11 +735,7 @@ impl Agent {
                 Ok(Err(error)) => Some(fail(error.code, "agent.driver")),
                 Err(_) => Some(fail(ErrorCode::InvalidContract, "agent.driver")),
             };
-            let completed = error.is_none()
-                && driver_local
-                    .observer_error
-                    .lock()
-                    .is_ok_and(|error| error.is_none());
+            let completed = error.is_none() && !agent.keep_local(&driver_local);
             if let Ok(mut slot) = driver_local.error.lock() {
                 *slot = error;
             }
@@ -822,7 +829,8 @@ impl Agent {
                 CancellationToken::new(),
             )
             .await?;
-            let round = self.tool_round(&budget).await?;
+            let segment = self.metadata_segment(&saved, context.clone()).await?;
+            let round = self.tool_round(&budget, &segment).await?;
             let expected_revision = saved.snapshot.revision;
             let mut messages = vec![];
             let mut events = vec![];
@@ -953,19 +961,10 @@ impl Agent {
             }
             let saved = bindings.state.load(&bindings.scope, &run_id).await?;
             let local = Arc::new(LocalRun::new(segment_revision(&saved.snapshot)));
-            for (target, input) in observations {
-                self.remember_observer_error(
-                    &local,
-                    self.after_tool(&run_id, target, input, &context).await,
-                );
-            }
-            self.after_run(&saved, &context, &local).await;
+            self.cleanup_observers(&saved, &context, &local, observations)
+                .await;
             local.done.store(true, Ordering::Release);
-            if local
-                .observer_error
-                .lock()
-                .is_ok_and(|error| error.is_some())
-            {
+            if self.keep_local(&local) {
                 self.inner
                     .runs
                     .lock()

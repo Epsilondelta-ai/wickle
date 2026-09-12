@@ -25,6 +25,8 @@ pub struct ToolPolicyInput {
     execution_args: JsonObject,
     #[serde(skip_serializing_if = "Option::is_none")]
     approval: Option<ToolApproval>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    selection: Option<crate::ToolBindingRef>,
 }
 
 impl ToolPolicyInput {
@@ -43,6 +45,7 @@ impl ToolPolicyInput {
             binding_digest,
             execution_args,
             approval: None,
+            selection: None,
         }
     }
     /// Inspect the full arguments to check actual target existence and ownership.
@@ -53,6 +56,15 @@ impl ToolPolicyInput {
     /// whether the actor may execute; this evidence never overrides a Deny.
     pub fn approval(&self) -> Option<&ToolApproval> {
         self.approval.as_ref()
+    }
+    /// Original selected catalog tool or adapter binding/export. A model alias
+    /// alone never identifies the authorized external connection.
+    pub fn selection(&self) -> Option<&crate::ToolBindingRef> {
+        self.selection.as_ref()
+    }
+    pub(crate) fn with_selection(mut self, selection: crate::ToolBindingRef) -> Self {
+        self.selection = Some(selection);
+        self
     }
     pub(crate) fn with_approval(mut self, receipt: &crate::ResumeReceipt) -> Self {
         self.approval = Some(ToolApproval {
@@ -144,15 +156,39 @@ pub enum PolicyAction {
     InvokeHook {
         /// Exact selected hook version.
         hook: VersionedRef,
+        /// Original adapter binding/export; absent for catalog hooks.
+        selection: Option<crate::HookRef>,
         /// Immutable execution definition.
         definition_digest: JsonDigest,
         /// Exact lifecycle invocation scope within the Run.
         target: crate::HookTarget,
     },
+    /// Resolve approved component metadata before admission, without opening a connection.
+    ResolveComponents {
+        /// Identity of the profile and metadata being assembled.
+        profile_resolution_digest: JsonDigest,
+    },
+    /// Open one adapter for a scoped execution or observer segment.
+    BindAdapter {
+        /// Profile-local binding, independent of exported model aliases.
+        binding_id: Id,
+        /// Exact registered adapter implementation version.
+        adapter: VersionedRef,
+        /// Full pinned definition including export contracts.
+        definition_digest: JsonDigest,
+        /// Named Host account/connection revisions, without credentials.
+        connections: std::collections::BTreeMap<Id, VersionedRef>,
+        /// Fresh scope-bound execution segment identity.
+        binding_set_id: Id,
+        /// Whether business tools or only observers may be activated.
+        purpose: crate::ComponentBindPurpose,
+    },
     /// Read one registered system key before the final target value is known.
     ResolveSystemInput {
         /// Exact tool requesting the lookup.
         tool: VersionedRef,
+        /// Original adapter export selection, absent for catalog tools.
+        selection: Option<crate::ToolBindingRef>,
         /// Logical call whose binding is being prepared.
         call_id: Id,
         /// Pinned tool descriptor identity.

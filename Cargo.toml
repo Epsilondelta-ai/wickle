@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/wickle", "crates/wickle-model-router", "crates/wickle-state-sqlite"]
+members = ["crates/wickle", "crates/wickle-model-router", "crates/wickle-state-sqlite", "crates/wickle-adapter-runtime"]
 default-members = ["crates/wickle"]
 resolver = "3"
 

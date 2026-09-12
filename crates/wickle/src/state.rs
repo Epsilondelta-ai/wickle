@@ -784,10 +784,11 @@ impl StateStore for MemoryStateStore {
             let state = scopes.get_mut(&scope_key(scope)).ok_or_else(not_found)?;
             validate_hook_observation(state, scope, run_id, &report)?;
             let reports = state.hook_observations.entry(run_id.clone()).or_default();
-            if let Some(existing) = reports
-                .iter()
-                .find(|existing| existing.hook == report.hook && existing.target == report.target)
-            {
+            if let Some(existing) = reports.iter().find(|existing| {
+                existing.hook == report.hook
+                    && existing.selection == report.selection
+                    && existing.target == report.target
+            }) {
                 return if existing == &report {
                     Ok(())
                 } else {
@@ -1038,7 +1039,48 @@ fn validate_snapshot_refs(
             validate_model_response(state, additions, invocation, reference)?;
         }
     }
-    references.extend(snapshot.assembly_ref.iter());
+    if let Some(reference) = &snapshot.assembly_ref {
+        let registry = crate::SystemInputRegistry::new(
+            run_inputs
+                .as_ref()
+                .map(|inputs| inputs.definitions().values().cloned().collect())
+                .unwrap_or_default(),
+        )?;
+        let value = record_value(state, additions, reference)?;
+        let assembly = crate::ResolvedAssembly::restore(
+            &serde_json::to_string(value)
+                .map_err(|_| error(ErrorCode::InvalidSnapshot, "assembly"))?,
+            &snapshot.profile,
+            &registry,
+            &reference.digest,
+        )?;
+        if assembly.session_id() != &snapshot.request.session_id {
+            return Err(error(ErrorCode::InvalidSnapshot, "assembly.session"));
+        }
+        if let Some(session) = state.sessions.get(&snapshot.request.session_id) {
+            let value = record_value(state, additions, &session.snapshot.prompt_snapshot)?;
+            let prompt = crate::PromptSnapshot::restore(
+                &serde_json::to_string(value)
+                    .map_err(|_| error(ErrorCode::InvalidSnapshot, "assembly.prompt"))?,
+                &session.snapshot.prompt_snapshot.digest,
+                &snapshot.profile,
+                &snapshot.scope,
+            )?;
+            if prompt.tools().len() != assembly.tools().len()
+                || prompt
+                    .tools()
+                    .iter()
+                    .zip(assembly.tools())
+                    .any(|(pinned, binding)| {
+                        pinned.selection != binding.selection
+                            || &pinned.compiled_digest != binding.compiled.digest()
+                            || pinned.model_tool != binding.compiled.to_model_tool()
+                    })
+            {
+                return Err(error(ErrorCode::InvalidSnapshot, "assembly.prompt_tools"));
+            }
+        }
+    }
     references.extend(&snapshot.context_batches);
     references.extend(snapshot.source_states.iter().map(|s| &s.batch_ref));
     for entry in &snapshot.tool_ledger {
@@ -1876,7 +1918,7 @@ fn validate_transition(previous: &RunSnapshot, next: &RunSnapshot) -> Result<(),
                 .revision
                 .checked_add(1)
                 .ok_or_else(|| error(ErrorCode::RevisionConflict, "revision"))?
-        || (previous.assembly_ref.is_some() && previous.assembly_ref != next.assembly_ref)
+        || previous.assembly_ref != next.assembly_ref
         || (previous.routing_snapshot_ref.is_some()
             && previous.routing_snapshot_ref != next.routing_snapshot_ref)
         || (previous.routing_snapshot_ref.is_none()

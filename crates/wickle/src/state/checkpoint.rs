@@ -397,10 +397,11 @@ fn restore_graph(data: CheckpointData) -> Result<StateStoreCheckpoint, ContractE
             .hook_observations
             .entry(report.run_id.clone())
             .or_default();
-        if reports
-            .iter()
-            .any(|existing| existing.hook == report.hook && existing.target == report.target)
-        {
+        if reports.iter().any(|existing| {
+            existing.hook == report.hook
+                && existing.selection == report.selection
+                && existing.target == report.target
+        }) {
             return Err(invalid("checkpoint.hook_observation_duplicate"));
         }
         reports.push(report);

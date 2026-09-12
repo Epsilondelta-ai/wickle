@@ -11,6 +11,10 @@ mod round;
 /// system inputs remain in the executor's Host-owned binding.
 #[derive(Debug, Clone)]
 pub struct ToolExecutionContext {
+    /// Owning Run, checked independently of the process-local binding set.
+    pub run_id: Id,
+    /// Scoped runtime segment; absent for directly injected catalog executors.
+    pub binding_set_id: Option<Id>,
     /// Logical call whose plan and bound input were already saved.
     pub call_id: Id,
     /// Charged physical attempt, already recorded before execution.
@@ -205,6 +209,7 @@ impl fmt::Debug for ToolRegistration {
 pub struct ToolRegistry {
     scope: Scope,
     entries: BTreeMap<Id, ToolRegistration>,
+    selections: BTreeMap<Id, ToolBindingRef>,
 }
 impl ToolRegistry {
     /// Register without invoking handlers; duplicate names and exact tool identities fail.
@@ -223,10 +228,88 @@ impl ToolRegistry {
                 ));
             }
         }
+        let selections = registered
+            .iter()
+            .map(|(name, entry)| {
+                (
+                    name.clone(),
+                    ToolBindingRef::Catalog(CatalogToolRef {
+                        tool_id: entry.compiled.descriptor().tool.id.clone(),
+                        version: entry.compiled.descriptor().tool.version.clone(),
+                        bindings: None,
+                        config: None,
+                    }),
+                )
+            })
+            .collect();
         Ok(Self {
             scope,
             entries: registered,
+            selections,
         })
+    }
+    /// Construct a fully attested registry without replacing real Export selections
+    /// by catalog aliases. Duplicate visible names or selections are rejected.
+    pub fn from_bindings(
+        scope: Scope,
+        bindings: Vec<(ToolBindingRef, ToolRegistration)>,
+    ) -> Result<Self, ContractError> {
+        let mut entries = BTreeMap::new();
+        let mut selections = BTreeMap::new();
+        for (selection, entry) in bindings {
+            let valid = match &selection {
+                ToolBindingRef::Catalog(reference) => {
+                    reference.tool_id == entry.compiled.descriptor().tool.id
+                        && reference.version == entry.compiled.descriptor().tool.version
+                }
+                ToolBindingRef::Export(reference) => reference
+                    .alias
+                    .as_ref()
+                    .is_none_or(|alias| alias == &entry.compiled.descriptor().name),
+            };
+            if !valid
+                || selections.values().any(|prior| prior == &selection)
+                || entries.contains_key(&entry.compiled.descriptor().name)
+            {
+                return Err(error(
+                    ErrorCode::InvalidToolInputContract,
+                    "tools.selection",
+                ));
+            }
+            selections.insert(entry.compiled.descriptor().name.clone(), selection);
+            entries.insert(entry.compiled.descriptor().name.clone(), entry);
+        }
+        Ok(Self {
+            scope,
+            entries,
+            selections,
+        })
+    }
+    /// Metadata-only view for input validation and cancellation/expiry settlement.
+    /// Its placeholder executors perform no I/O and report NotApplied unavailable.
+    pub fn metadata(
+        scope: Scope,
+        bindings: Vec<ResolvedToolBinding>,
+    ) -> Result<Self, ContractError> {
+        Self::from_bindings(
+            scope,
+            bindings
+                .into_iter()
+                .map(|binding| {
+                    (
+                        binding.selection,
+                        ToolRegistration {
+                            compiled: binding.compiled,
+                            executor: Arc::new(MetadataTool),
+                        },
+                    )
+                })
+                .collect(),
+        )
+    }
+    /// Actual authority selection behind a model-visible name.
+    pub fn selection(&self, name: &Id) -> Option<&ToolBindingRef> {
+        self.selections.get(name)
     }
     /// Exact namespace under which handlers were registered.
     pub fn scope(&self) -> &Scope {
@@ -246,23 +329,41 @@ impl ToolRegistry {
             .tools
             .iter()
             .map(|selection| {
-                let ToolBindingRef::Catalog(reference) = selection else {
-                    return Err(error(ErrorCode::CapabilityUnsupported, "tools.export"));
-                };
                 let entry = self
                     .entries
-                    .values()
-                    .find(|entry| {
-                        entry.compiled.descriptor().tool.id == reference.tool_id
-                            && entry.compiled.descriptor().tool.version == reference.version
+                    .iter()
+                    .find(|(name, entry)| match selection {
+                        ToolBindingRef::Catalog(reference) => {
+                            entry.compiled.descriptor().tool.id == reference.tool_id
+                                && entry.compiled.descriptor().tool.version == reference.version
+                        }
+                        ToolBindingRef::Export(_) => self.selections.get(*name) == Some(selection),
                     })
                     .ok_or_else(|| error(ErrorCode::ComponentUnavailable, "tools.selection"))?;
                 Ok(PromptToolBinding {
                     selection: selection.clone(),
-                    compiled: entry.compiled.clone(),
+                    compiled: entry.1.compiled.clone(),
                 })
             })
             .collect()
+    }
+}
+struct MetadataTool;
+impl ToolExecutor for MetadataTool {
+    fn execute<'a>(
+        &'a self,
+        _: &'a JsonObject,
+        _: &'a ToolExecutionContext,
+    ) -> PortFuture<'a, ToolExecutionResult> {
+        Box::pin(async {
+            Ok(ToolExecutionResult {
+                outcome: ToolExecutionOutcome::Failed {
+                    code: Id::new("component_unavailable")?,
+                },
+                effect: ToolEffect::NotApplied,
+                receipt: None,
+            })
+        })
     }
 }
 
@@ -315,6 +416,7 @@ pub enum ToolRoundOutcome {
 
 /// Serial execution of a previously committed model tool round.
 pub struct SerialToolRound {
+    binding_set_id: Option<Id>,
     registry: Arc<ToolRegistry>,
     binder: Arc<InputBinder>,
     policy: Arc<PolicyGate>,
@@ -332,6 +434,7 @@ impl SerialToolRound {
         ids: Arc<dyn IdSource>,
     ) -> Self {
         Self {
+            binding_set_id: None,
             registry,
             binder,
             policy,
@@ -340,6 +443,11 @@ impl SerialToolRound {
             hooks: None,
             observer_error: std::sync::Mutex::new(None),
         }
+    }
+    /// Pin the Host runtime segment identity forwarded to wrapped exports.
+    pub fn with_binding_set_id(mut self, binding_set_id: Id) -> Self {
+        self.binding_set_id = Some(binding_set_id);
+        self
     }
     /// Require finite nonzero timeout and receipt limits.
     pub fn with_limits(mut self, limits: ToolExecutionLimits) -> Result<Self, ContractError> {

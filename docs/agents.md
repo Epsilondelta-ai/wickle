@@ -37,7 +37,8 @@ SQLite and synthetic ports; they make no provider network calls. Run them with
 `AgentBindings` contains the exact scope, `StateStore`, current `PolicyGate`,
 `ProfileResolver`, pinned `ModelRouter`, configured `ModelExchange`, trusted Host
 instructions, `SystemInputRegistry`, optional `ToolRegistry`,
-`SystemInputResolver`, `ExternalReceiptVerifier`, and `HookRuntime`, clock, ID source, token
+`SystemInputResolver`, `ExternalReceiptVerifier`, `HookRuntime`, optional
+`ComponentRuntime`, clock, ID source, token
 estimator, and `AgentSettings`.
 A single Agent instance owns one scope; use separately configured instances for
 other scopes.
@@ -54,8 +55,8 @@ request/response/context sizes, admission preparation, lease renewal, and observ
 polling. Run-wide model, tool, recovery, and elapsed limits come from the profile.
 
 The driver supports text instructions, text output, the bounded context strategy,
-registered catalog tools and lifecycle Hooks, and `turn_end` completion. Skills, connector and
-adapter execution, automatic context sources, asset loading, and verified
+registered catalog tools and lifecycle Hooks, adapter Tool/Hook exports, and
+`turn_end` completion. Skills, automatic context sources, asset loading, and verified
 completion are not connected to this driver. Profiles requiring these components
 are rejected explicitly.
 
@@ -65,12 +66,20 @@ across retry and resume; observer reports stay separate from execution outcomes.
 See [lifecycle Hooks](hooks.md) for registration, permission, timeout, and failure
 contracts. Hooks do not patch model options or replace completion verification.
 
+Set `AgentBindings.components` to use the [adapter runtime](adapters.md) for all
+selected catalog and adapter-export tools and hooks. In that mode, direct
+`tools` and `hooks` must be `None`. The Agent saves assembly metadata with
+admission and opens scoped instances only after acquiring an execution lease.
+Each segment owns its resources; Waiting closes them and resume opens a new
+binding set using the original assembly. `handle.component_release(&context)`
+reports local cleanup separately from the stored outcome.
+
 ## Register tools and separate their inputs
 
 The Host implements `ToolExecutor` and registers it with a compiled
 `ToolDescriptor`. `AgentProfile.tools` selects the exact catalog tool ID and
 version; only selected tools are offered to the model. The following function adds
-one tool to a profile with no existing tool selections. All other Host bindings,
+one tool to a profile with no existing tool selections and `components: None`. All other Host bindings,
 including the system-input registry and current authorization policy, must already
 be configured.
 
@@ -117,8 +126,9 @@ be overridden by the Run input map. See [tool schemas](tool-inputs.md) and
 [input binding](input-binding.md) for aliases, defaults, and resolver contracts.
 
 `ToolExecutor::execute` receives the arguments and a `ToolExecutionContext`
-containing scope, principal, call/attempt IDs, an idempotency key, cancellation,
-and a deadline. Credentials stay in the Host's executor instance. The executor
+containing scope, Run, principal, call/attempt IDs, an idempotency key, cancellation,
+and a deadline. Adapter exports also receive their current binding-set identity.
+Credentials stay in the Host's executor instance. The executor
 must perform one physical attempt without hidden retries or detached work.
 
 ## Execute a saved tool round
