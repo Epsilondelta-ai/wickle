@@ -39,7 +39,8 @@ def main():
     catalog = next(p for p in workspace["packages"] if p["name"] == "wickle-model-router")
     sqlite = next(p for p in workspace["packages"] if p["name"] == "wickle-state-sqlite")
     adapters = next(p for p in workspace["packages"] if p["name"] == "wickle-adapter-runtime")
-    libraries = [core, catalog, sqlite, adapters]
+    openai = next(p for p in workspace["packages"] if p["name"] == "wickle-model-openai")
+    libraries = [core, catalog, sqlite, adapters, openai]
     versions = {d["name"]: d["req"] for d in core["dependencies"] if d["kind"] is None}
     for dep in core["dependencies"]:
         if dep["kind"] != "dev":
@@ -75,7 +76,7 @@ def main():
             shutil.copyfile(manifest, destination / "Cargo.toml")
             shutil.copytree(manifest.parent / "src", destination / "src")
         package_paths = {core["name"]: base / package_name}
-        for package in [catalog, sqlite, adapters]:
+        for package in [catalog, sqlite, adapters, openai]:
             patches = [argument for name, path in package_paths.items()
                        for argument in ["--config", f'patch.crates-io.{name}.path={json.dumps(str(path))}']]
             subprocess.run(
@@ -100,7 +101,7 @@ def main():
             f'[dependencies]\n{library_dependencies}'
             f'serde_json = "{versions["serde_json"]}"\n'
             f'futures-util = {{ version = "{versions["futures-util"]}", default-features = false, features = ["std", "async-await"] }}\n'
-            f'tokio = {{ version = "{versions["tokio"]}", features = ["rt", "macros"] }}\n'
+            f'tokio = {{ version = "{versions["tokio"]}", features = ["rt", "macros", "net", "io-util"] }}\n'
             f'\n[patch.crates-io]\nwickle = {{ path = "../{package_name}" }}\n',
             encoding="utf-8",
         )
@@ -133,7 +134,7 @@ def main():
         for example in examples:
             subprocess.run(["cargo", "run", "--locked", "--offline", "--bin", example.stem],
                            cwd=consumer, env=env, check=True)
-    print("Independent package consumers: passed (core, model catalog, SQLite store, adapter runtime)", flush=True)
+    print("Independent package consumers: passed (core, model catalog, SQLite store, adapter runtime, OpenAI adapter)", flush=True)
 
 
 if __name__ == "__main__":
