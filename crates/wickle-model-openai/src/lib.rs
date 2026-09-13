@@ -5,12 +5,9 @@
 
 #![forbid(unsafe_code)]
 
-mod codec;
 mod connection;
 mod inspection;
 mod model;
-mod response;
-mod sse;
 
 pub use connection::{OpenAiConnection, OpenAiOptions};
 pub use inspection::{OpenAiInspector, OpenAiSnapshot};

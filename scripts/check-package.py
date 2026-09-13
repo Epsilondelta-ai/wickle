@@ -40,7 +40,9 @@ def main():
     sqlite = next(p for p in workspace["packages"] if p["name"] == "wickle-state-sqlite")
     adapters = next(p for p in workspace["packages"] if p["name"] == "wickle-adapter-runtime")
     openai = next(p for p in workspace["packages"] if p["name"] == "wickle-model-openai")
-    libraries = [core, catalog, sqlite, adapters, openai]
+    responses = next(p for p in workspace["packages"] if p["name"] == "wickle-model-responses")
+    azure = next(p for p in workspace["packages"] if p["name"] == "wickle-model-azure-openai")
+    libraries = [core, catalog, sqlite, adapters, responses, openai, azure]
     versions = {d["name"]: d["req"] for d in core["dependencies"] if d["kind"] is None}
     for dep in core["dependencies"]:
         if dep["kind"] != "dev":
@@ -76,7 +78,7 @@ def main():
             shutil.copyfile(manifest, destination / "Cargo.toml")
             shutil.copytree(manifest.parent / "src", destination / "src")
         package_paths = {core["name"]: base / package_name}
-        for package in [catalog, sqlite, adapters, openai]:
+        for package in [catalog, sqlite, adapters, responses, openai, azure]:
             patches = [argument for name, path in package_paths.items()
                        for argument in ["--config", f'patch.crates-io.{name}.path={json.dumps(str(path))}']]
             subprocess.run(
@@ -102,7 +104,7 @@ def main():
             f'serde_json = "{versions["serde_json"]}"\n'
             f'futures-util = {{ version = "{versions["futures-util"]}", default-features = false, features = ["std", "async-await"] }}\n'
             f'tokio = {{ version = "{versions["tokio"]}", features = ["rt", "macros", "net", "io-util"] }}\n'
-            f'\n[patch.crates-io]\nwickle = {{ path = "../{package_name}" }}\n',
+            f'\n[patch.crates-io]\n{library_dependencies}',
             encoding="utf-8",
         )
         shutil.copyfile(ROOT / "tests/support/consumer.rs", consumer / "src/main.rs")
@@ -113,8 +115,11 @@ def main():
                 shutil.copyfile(example, consumer / "src/bin" / example.name)
         # Keep consumer builds independent of the checkout and its build cache.
         env["CARGO_TARGET_DIR"] = str(base / "target")
-        subprocess.run(["cargo", "generate-lockfile", "--offline"],
-                       cwd=consumer, env=env, check=True)
+        # Preserve the verified transitive versions when adding the consumer.
+        # A fresh lockfile would select newer compatible entries in the local cache.
+        shutil.copyfile(ROOT / "Cargo.lock", consumer / "Cargo.lock")
+        subprocess.run(["cargo", "metadata", "--format-version", "1", "--offline"],
+                       cwd=consumer, env=env, stdout=subprocess.DEVNULL, check=True)
         resolved = metadata(consumer)
         allowed_registry = {(p["name"], p["version"], p["source"])
                             for p in workspace["packages"] if p["source"] is not None}
@@ -134,7 +139,7 @@ def main():
         for example in examples:
             subprocess.run(["cargo", "run", "--locked", "--offline", "--bin", example.stem],
                            cwd=consumer, env=env, check=True)
-    print("Independent package consumers: passed (core, model catalog, SQLite store, adapter runtime, OpenAI adapter)", flush=True)
+    print("Independent package consumers: passed (core, model catalog, SQLite store, adapter runtime, Responses codec, OpenAI and Azure adapters)", flush=True)
 
 
 if __name__ == "__main__":

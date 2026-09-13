@@ -46,4 +46,12 @@ AZURE_OPENAI_API_KEY=
 
 배포명이 채워진 번호가 독립 테스트 대상입니다. 다른 리소스·계정·API 설정은 별도 `.env` 파일로 나눕니다. 기반 모델 metadata 조회에 추가 권한이 필요한 경우에는 그 검증 상태를 별도로 기록하며, 확인하지 못한 정보를 사용자가 추측해서 채우도록 요구하지 않습니다.
 
-이 설정은 live 테스트 전용이며 실제 어댑터와 runner는 구현 중입니다. 코어가 `.env`를 읽지 않습니다. [공통 안내](README.md).
+이 설정은 live 테스트 Host 전용입니다. 라이브러리는 `.env`를 읽지 않으며 [Azure OpenAI 어댑터](../azure-openai.md)에 명시적인 연결과 credential provider를 전달합니다. 현재 구현은 resource-level Responses v1만 지원하므로 `API_MODE=v1`을 사용합니다. dated API 값은 지원되지 않습니다. [공통 안내](README.md).
+
+ARM 배포 metadata를 실제로 검증하려면 다음 account resource ID와 해당 리소스의 deployment 읽기 권한을 가진 management Entra 인증이 추가로 필요합니다. inference API key를 management API에 보내지 않습니다.
+
+```dotenv
+AZURE_OPENAI_RESOURCE_ID=/subscriptions/<subscription>/resourceGroups/<group>/providers/Microsoft.CognitiveServices/accounts/<account>
+```
+
+관리 API 인증은 Host의 별도 credential provider가 `https://management.azure.com/.default` 대상 토큰을 준비합니다. 모델 버전을 사용자가 추측해서 환경변수에 중복 입력하지 않습니다. 실제 인증·배포가 없는 경우 로컬 fixture만 통과한 것으로 기록하며 live 검증 통과로 표시하지 않습니다.

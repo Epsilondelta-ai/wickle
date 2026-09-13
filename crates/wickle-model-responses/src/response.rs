@@ -8,8 +8,10 @@ struct Call {
     name: String,
     arguments: String,
 }
-pub(crate) struct Decoder<'a> {
+/// Stateful Responses event validation for one physical model request.
+pub struct Decoder<'a> {
     request: &'a ModelRequest,
+    /// Provider-reported metadata, including an optional HTTP request identifier.
     pub metadata: ModelResponseMetadata,
     response_id: Option<String>,
     sequence: Option<u64>,
@@ -24,6 +26,7 @@ pub(crate) struct Decoder<'a> {
     done: bool,
 }
 impl<'a> Decoder<'a> {
+    /// Start an attempt without making an HTTP request.
     pub fn new(request: &'a ModelRequest, request_id: Option<Id>) -> Self {
         Self {
             request,
@@ -44,6 +47,7 @@ impl<'a> Decoder<'a> {
             done: false,
         }
     }
+    /// Validate a framed provider event and emit normalized model deltas.
     pub fn event(&mut self, event: sse::Event) -> Result<Vec<ModelEvent>, ContractError> {
         if event.data == "[DONE]" {
             if self.terminal.is_none() || self.done {
@@ -337,6 +341,7 @@ impl<'a> Decoder<'a> {
             .ok_or_else(invalid)?;
         Ok(output)
     }
+    /// Return the validated terminal only after the transport reaches a clean EOF.
     pub fn finish(&mut self) -> Result<ModelEvent, ContractError> {
         self.terminal.take().ok_or_else(invalid)
     }

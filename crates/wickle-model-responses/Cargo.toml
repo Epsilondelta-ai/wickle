@@ -1,0 +1,16 @@
+[package]
+name = "wickle-model-responses"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+description = "Responses request and bounded SSE codecs for Wickle adapters"
+publish = false
+include = ["Cargo.toml", "src/**"]
+
+[dependencies]
+wickle = { path = "../wickle", version = "=0.1.0" }
+serde_json.workspace = true
+
+[lints]
+workspace = true
