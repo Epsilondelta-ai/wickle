@@ -10,6 +10,7 @@ use serde_json::Value;
 
 mod checkpoint;
 mod hook_state;
+mod skill_state;
 mod source_state;
 pub use checkpoint::{STATE_STORE_CHECKPOINT_VERSION, StateStoreCheckpoint};
 use hook_state::{validate_hook_observation, validate_hook_snapshot, validate_hook_transition};
@@ -953,6 +954,7 @@ fn validate_snapshot_refs(
     snapshot: &RunSnapshot,
 ) -> Result<(), ContractError> {
     validate_source_snapshot(state, additions, snapshot)?;
+    skill_state::validate_skill_snapshot(state, additions, snapshot)?;
     validate_hook_snapshot(state, additions, snapshot)?;
     let mut references = Vec::new();
     for receipt in &snapshot.resume_receipts {
@@ -1884,6 +1886,9 @@ fn validate_transition(previous: &RunSnapshot, next: &RunSnapshot) -> Result<(),
     next.validate()?;
     validate_hook_transition(previous, next)?;
     validate_source_transition(previous, next)?;
+    if previous.skill_plan_ref != next.skill_plan_ref {
+        return Err(error(ErrorCode::InvalidTransition, "skills.immutable_plan"));
+    }
     crate::budget::validate_budget_transition(previous, next)?;
     if !next.resume_receipts.starts_with(&previous.resume_receipts)
         || next.resume_receipts.len() > previous.resume_receipts.len() + 1

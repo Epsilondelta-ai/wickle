@@ -66,6 +66,13 @@ impl PolicyPort for Policy {
         _: PolicyContext<'a>,
     ) -> PortFuture<'a, PolicyDecision> {
         Box::pin(async move {
+            if self.mode.load(Ordering::SeqCst) == 4
+                && matches!(request.action, PolicyAction::ReadArtifact { .. })
+            {
+                return Ok(PolicyDecision::Deny {
+                    reason: id("artifact_revoked"),
+                });
+            }
             if let PolicyAction::ExecuteTool { .. } = &request.action {
                 let check = self.tool_checks.fetch_add(1, Ordering::SeqCst) + 1;
                 match self.mode.load(Ordering::SeqCst) {
@@ -262,6 +269,9 @@ impl Fixture {
         }
     }
     fn agent(&self) -> Agent {
+        create_agent(self.profile.clone(), self.bindings()).unwrap()
+    }
+    fn bindings(&self) -> AgentBindings {
         let mut bindings = self.base.bindings();
         let mut router = agent_support::Router::new();
         let mut catalog = router.snapshot.catalog().clone();
@@ -294,7 +304,7 @@ impl Fixture {
             timeout_ms: 30,
             max_receipt_bytes: 4096,
         };
-        create_agent(self.profile.clone(), bindings).unwrap()
+        bindings
     }
     async fn start(&self, agent: &Agent) -> RunHandle {
         let mut context = context();
@@ -304,6 +314,391 @@ impl Fixture {
     }
     async fn outcome(&self, handle: &RunHandle) -> RunOutcome {
         completed(handle.outcome(&context()).await.unwrap())
+    }
+}
+
+struct ArtifactTool {
+    inner: Arc<Tool>,
+    reference: ArtifactRef,
+    evidence: EvidenceRef,
+}
+struct RejectArtifactPut(AtomicUsize);
+impl ArtifactStore for RejectArtifactPut {
+    fn put<'a>(
+        &'a self,
+        _: &'a Id,
+        _: &'a ArtifactInput,
+        _: &'a ArtifactCallContext,
+    ) -> PortFuture<'a, ArtifactMetadata> {
+        Box::pin(async move {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Err(ContractError::new(
+                ErrorCode::PersistenceUnavailable,
+                "fixture.artifact_put",
+            ))
+        })
+    }
+    fn stat<'a>(
+        &'a self,
+        _: &'a ArtifactRef,
+        _: &'a ArtifactCallContext,
+    ) -> PortFuture<'a, ArtifactMetadata> {
+        Box::pin(async {
+            Err(ContractError::new(
+                ErrorCode::StateNotFound,
+                "fixture.artifact",
+            ))
+        })
+    }
+    fn get<'a>(
+        &'a self,
+        _: &'a ArtifactRef,
+        _: u64,
+        _: &'a ArtifactCallContext,
+    ) -> PortFuture<'a, ArtifactData> {
+        Box::pin(async {
+            Err(ContractError::new(
+                ErrorCode::StateNotFound,
+                "fixture.artifact",
+            ))
+        })
+    }
+}
+struct ArtifactWritingTool {
+    inner: Arc<Tool>,
+    artifacts: Arc<ArtifactRuntime>,
+}
+impl ToolExecutor for ArtifactWritingTool {
+    fn execute<'a>(
+        &'a self,
+        args: &'a JsonObject,
+        call: &'a ToolExecutionContext,
+    ) -> PortFuture<'a, ToolExecutionResult> {
+        Box::pin(async move {
+            let mut completion = self.inner.execute(args, call).await?;
+            let context = ExecutionContext::new(
+                ExecutionContextData {
+                    scope: call.scope.clone(),
+                    principal_ref: call.principal_ref.clone(),
+                    capability_grant_ref: call.capability_grant_ref.clone(),
+                    trace_context: None,
+                    system_inputs: None,
+                },
+                call.cancellation.clone(),
+            );
+            if self
+                .artifacts
+                .put(
+                    ArtifactInput {
+                        media_type: id("text/plain"),
+                        bytes: b"generated report".to_vec(),
+                        source: None,
+                    },
+                    &context,
+                    Some(call.deadline),
+                )
+                .await
+                .is_err()
+            {
+                completion.outcome = ToolExecutionOutcome::Failed {
+                    code: id("artifact_store_unavailable"),
+                };
+            }
+            Ok(completion)
+        })
+    }
+}
+#[tokio::test]
+async fn artifact_storage_failure_after_a_business_write_keeps_its_receipt_without_reexecution() {
+    let f = Fixture::new(
+        vec![("write", object(json!({"query":"report"})))],
+        Behavior::Success,
+    );
+    let mut bindings = f.bindings();
+    let store = Arc::new(RejectArtifactPut(AtomicUsize::new(0)));
+    let artifacts = Arc::new(
+        ArtifactRuntime::new(
+            store.clone(),
+            bindings.policy.clone(),
+            bindings.ids.clone(),
+            ArtifactLimits::default(),
+        )
+        .unwrap(),
+    );
+    let mut registrations = vec![];
+    for name in ["read", "write"] {
+        let entry = f.registry.get(&id(name)).unwrap();
+        registrations.push(ToolRegistration {
+            compiled: entry.compiled.clone(),
+            executor: if name == "write" {
+                Arc::new(ArtifactWritingTool {
+                    inner: f.tools[1].clone(),
+                    artifacts: artifacts.clone(),
+                })
+            } else {
+                entry.executor.clone()
+            },
+        });
+    }
+    bindings.tools = Some(Arc::new(ToolRegistry::new(scope(), registrations).unwrap()));
+    bindings.artifacts = Some(artifacts);
+    let agent = create_agent(f.profile.clone(), bindings).unwrap();
+    let handle = f.start(&agent).await;
+    f.outcome(&handle).await;
+    let saved = f.base.store.load(&scope(), handle.run_id()).await.unwrap();
+    let ToolCallState::Settled { result } = &saved.snapshot.tool_ledger[0].state else {
+        panic!("known effect")
+    };
+    assert_eq!(result.status, ToolResultStatus::Failed);
+    assert_eq!(result.effect, ToolEffect::Applied);
+    assert_eq!(
+        result.error.as_ref().unwrap().code,
+        id("artifact_store_unavailable")
+    );
+    let receipt = f
+        .base
+        .store
+        .read_record(&scope(), result.effect_receipt_ref.as_ref().unwrap())
+        .await
+        .unwrap();
+    assert_eq!(receipt.value()["receipt"]["target"], json!(WORKSPACE));
+    let replay = f.start(&agent).await;
+    f.outcome(&replay).await;
+    assert_eq!(f.tools[1].applied.load(Ordering::SeqCst), 1);
+    assert_eq!(store.0.load(Ordering::SeqCst), 1);
+    assert_eq!(f.model.calls.load(Ordering::SeqCst), 2);
+}
+struct RevokeArtifact {
+    policy: Arc<Policy>,
+    inner: Arc<agent_support::Inspector>,
+}
+impl ModelRouteInspector for RevokeArtifact {
+    fn inspect<'a>(
+        &'a self,
+        route: &'a ResolvedModelRoute,
+        context: &'a ModelInspectionContext,
+    ) -> PortFuture<'a, ModelRouteObservation> {
+        Box::pin(async move {
+            let observation = self.inner.inspect(route, context).await?;
+            if self.inner.calls.load(Ordering::SeqCst) == 2 {
+                self.policy.mode.store(4, Ordering::SeqCst);
+            }
+            Ok(observation)
+        })
+    }
+}
+#[tokio::test]
+async fn artifact_access_is_rechecked_after_route_inspection_before_model_dispatch() {
+    let f = Fixture::new(
+        vec![("write", object(json!({"query":"report"})))],
+        Behavior::Success,
+    );
+    let mut bindings = f.bindings();
+    let artifacts = Arc::new(
+        ArtifactRuntime::new(
+            Arc::new(MemoryArtifactStore::default()),
+            bindings.policy.clone(),
+            bindings.ids.clone(),
+            ArtifactLimits::default(),
+        )
+        .unwrap(),
+    );
+    let metadata = artifacts
+        .put(
+            ArtifactInput {
+                media_type: id("text/plain"),
+                bytes: b"Original evidence".to_vec(),
+                source: Some(reference("report")),
+            },
+            &context(),
+            None,
+        )
+        .await
+        .unwrap();
+    let evidence = artifacts
+        .evidence(&metadata.reference, id("line-1"), None, &context(), None)
+        .await
+        .unwrap();
+    let mut registrations = vec![];
+    for name in ["read", "write"] {
+        let entry = f.registry.get(&id(name)).unwrap();
+        registrations.push(ToolRegistration {
+            compiled: entry.compiled.clone(),
+            executor: if name == "write" {
+                Arc::new(ArtifactTool {
+                    inner: f.tools[1].clone(),
+                    reference: metadata.reference.clone(),
+                    evidence: evidence.clone(),
+                })
+            } else {
+                entry.executor.clone()
+            },
+        });
+    }
+    bindings.tools = Some(Arc::new(ToolRegistry::new(scope(), registrations).unwrap()));
+    bindings.artifacts = Some(artifacts.clone());
+    bindings.model_exchange = Arc::new(
+        ModelExchange::new(f.model.clone(), bindings.policy.clone())
+            .with_route_inspector(
+                Arc::new(RevokeArtifact {
+                    policy: f.policy.clone(),
+                    inner: f.base.inspector.clone(),
+                }),
+                Duration::from_secs(1),
+            )
+            .unwrap(),
+    );
+    let agent = create_agent(f.profile.clone(), bindings).unwrap();
+    let handle = f.start(&agent).await;
+    assert_eq!(f.outcome(&handle).await.result.status(), RunStatus::Failed);
+    assert_eq!(f.tools[1].applied.load(Ordering::SeqCst), 1);
+    assert_eq!(f.model.calls.load(Ordering::SeqCst), 1);
+    let saved = f.base.store.load(&scope(), handle.run_id()).await.unwrap();
+    assert!(
+        matches!(&saved.snapshot.tool_ledger[0].state,ToolCallState::Settled {result} if result.status==ToolResultStatus::Succeeded&&result.effect==ToolEffect::Applied&&result.effect_receipt_ref.is_some())
+    );
+    assert_eq!(
+        artifacts
+            .get(&metadata.reference, &context(), None)
+            .await
+            .unwrap_err()
+            .code,
+        ErrorCode::AccessDenied
+    );
+}
+impl ToolExecutor for ArtifactTool {
+    fn execute<'a>(
+        &'a self,
+        args: &'a JsonObject,
+        context: &'a ToolExecutionContext,
+    ) -> PortFuture<'a, ToolExecutionResult> {
+        Box::pin(async move {
+            let mut result = self.inner.execute(args, context).await?;
+            let ToolExecutionOutcome::Succeeded { value } = &result.outcome else {
+                panic!("successful write fixture")
+            };
+            result.outcome = ToolExecutionOutcome::SucceededWithContent {
+                value: value.clone(),
+                content: vec![
+                    InputContent::Artifact {
+                        reference: self.reference.clone(),
+                    },
+                    InputContent::Evidence {
+                        reference: self.evidence.clone(),
+                    },
+                ],
+            };
+            Ok(result)
+        })
+    }
+}
+#[tokio::test]
+async fn artifact_references_bound_large_outputs_and_validation_failure_preserves_applied_receipts()
+{
+    for corrupt in [false, true] {
+        let f = Fixture::new(
+            vec![("write", object(json!({"query":"report"})))],
+            Behavior::Success,
+        );
+        let mut bindings = f.bindings();
+        let artifacts = Arc::new(
+            ArtifactRuntime::new(
+                Arc::new(MemoryArtifactStore::default()),
+                bindings.policy.clone(),
+                bindings.ids.clone(),
+                ArtifactLimits::default(),
+            )
+            .unwrap(),
+        );
+        let original = "Original report evidence. ".repeat(1000);
+        let metadata = artifacts
+            .put(
+                ArtifactInput {
+                    media_type: id("text/plain"),
+                    bytes: original.as_bytes().to_vec(),
+                    source: Some(reference("report-source")),
+                },
+                &context(),
+                None,
+            )
+            .await
+            .unwrap();
+        let evidence = artifacts
+            .evidence(
+                &metadata.reference,
+                id("paragraph-1"),
+                Some("Original report evidence.".into()),
+                &context(),
+                None,
+            )
+            .await
+            .unwrap();
+        let mut selected = metadata.reference.clone();
+        if corrupt {
+            selected.content_hash = id("sha256:wrong");
+        }
+        let mut registrations = vec![];
+        for name in ["read", "write"] {
+            let entry = f.registry.get(&id(name)).unwrap();
+            registrations.push(ToolRegistration {
+                compiled: entry.compiled.clone(),
+                executor: if name == "write" {
+                    Arc::new(ArtifactTool {
+                        inner: f.tools[1].clone(),
+                        reference: selected.clone(),
+                        evidence: evidence.clone(),
+                    })
+                } else {
+                    entry.executor.clone()
+                },
+            });
+        }
+        bindings.tools = Some(Arc::new(ToolRegistry::new(scope(), registrations).unwrap()));
+        bindings.artifacts = Some(artifacts.clone());
+        let agent = create_agent(f.profile.clone(), bindings).unwrap();
+        let handle = f.start(&agent).await;
+        let outcome = f.outcome(&handle).await;
+        assert_eq!(f.tools[1].applied.load(Ordering::SeqCst), 1);
+        let saved = f.base.store.load(&scope(), handle.run_id()).await.unwrap();
+        let ToolCallState::Settled { result } = &saved.snapshot.tool_ledger[0].state else {
+            panic!("known write result")
+        };
+        assert_eq!(result.effect, ToolEffect::Applied);
+        let receipt = f
+            .base
+            .store
+            .read_record(&scope(), result.effect_receipt_ref.as_ref().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(
+            receipt.value()["receipt"]["private_receipt"],
+            json!("only-for-storage")
+        );
+        if corrupt {
+            assert_eq!(result.status, ToolResultStatus::Failed);
+            assert!(result.content.is_empty());
+            assert!(outcome.artifacts.is_empty());
+        } else {
+            assert_eq!(result.status, ToolResultStatus::Succeeded);
+            assert_eq!(outcome.artifacts, vec![metadata.reference.clone()]);
+            assert_eq!(
+                artifacts
+                    .get(&metadata.reference, &context(), None)
+                    .await
+                    .unwrap()
+                    .bytes,
+                original.as_bytes()
+            );
+            assert!(
+                serde_json::to_vec(&f.model.requests.lock().unwrap()[1])
+                    .unwrap()
+                    .len()
+                    < original.len()
+            );
+        }
+        let replay = f.start(&agent).await;
+        assert_eq!(f.outcome(&replay).await, outcome);
+        assert_eq!(f.tools[1].applied.load(Ordering::SeqCst), 1);
     }
 }
 

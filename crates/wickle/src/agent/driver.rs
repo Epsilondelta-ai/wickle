@@ -502,6 +502,17 @@ impl Agent {
         .await?;
         let (source_batch_refs, mut source_items) =
             self.source_context(&step, segment, budget).await?;
+        if saved.snapshot.skill_plan_ref.is_some() {
+            let skills = bindings
+                .skills
+                .as_ref()
+                .ok_or_else(|| fail(ErrorCode::ComponentUnavailable, "agent.skills"))?;
+            source_items.extend(
+                skills
+                    .context_items(&saved.snapshot, context, None, budget.call_deadline()?)
+                    .await?,
+            );
+        }
         source_items.extend(run_context);
         let context_items = self
             .before_model(
@@ -543,6 +554,9 @@ impl Agent {
             state: bindings.state.clone(),
             context_items,
             sources: segment.sources.clone(),
+            skills: bindings.skills.clone(),
+            artifacts: bindings.artifacts.clone(),
+            projected_artifacts: Mutex::new(vec![]),
             source_batch_refs,
         };
         bindings
@@ -681,7 +695,7 @@ impl Agent {
         let outcome = RunOutcome {
             result,
             output: output.clone(),
-            artifacts: vec![],
+            artifacts: artifacts::produced(&snapshot),
             usage: snapshot.usage.clone(),
             checkpoint_revision: snapshot.revision,
             verification: None,
@@ -860,6 +874,9 @@ struct Projector {
     context_items: Vec<ContextItem>,
     sources: Option<Arc<ContextSourceRuntime>>,
     source_batch_refs: Vec<RecordRef>,
+    skills: Option<Arc<SkillRuntime>>,
+    artifacts: Option<Arc<ArtifactRuntime>>,
+    projected_artifacts: Mutex<Vec<ArtifactRef>>,
 }
 impl ModelRequestProjector for Projector {
     fn authorize_use<'a>(
@@ -869,27 +886,55 @@ impl ModelRequestProjector for Projector {
         context: &'a ModelProjectionContext,
     ) -> PortFuture<'a, ()> {
         Box::pin(async move {
+            let deadline = context.deadline;
+            let current = ExecutionContext::new(
+                ExecutionContextData {
+                    scope: context.scope.clone(),
+                    principal_ref: context.principal_ref.clone(),
+                    capability_grant_ref: context.capability_grant_ref.clone(),
+                    trace_context: None,
+                    system_inputs: None,
+                },
+                context.cancellation.clone(),
+            );
             if let Some(sources) = &self.sources {
-                let deadline = context.deadline;
-                let context = ExecutionContext::new(
-                    ExecutionContextData {
-                        scope: context.scope.clone(),
-                        principal_ref: context.principal_ref.clone(),
-                        capability_grant_ref: context.capability_grant_ref.clone(),
-                        trace_context: None,
-                        system_inputs: None,
-                    },
-                    context.cancellation.clone(),
-                );
                 sources
                     .authorize_use(
                         &self.saved.snapshot.run_id,
                         &self.source_batch_refs,
                         Some(&selection.route),
-                        &context,
+                        &current,
                         deadline,
                     )
                     .await?;
+            }
+            if self.saved.snapshot.skill_plan_ref.is_some() {
+                let skills = self
+                    .skills
+                    .as_ref()
+                    .ok_or_else(|| fail(ErrorCode::ComponentUnavailable, "agent.skills"))?;
+                skills
+                    .context_items(
+                        &self.saved.snapshot,
+                        &current,
+                        Some(&selection.route),
+                        deadline,
+                    )
+                    .await?;
+            }
+            let references = self
+                .projected_artifacts
+                .lock()
+                .map_err(|_| fail(ErrorCode::InvalidContract, "agent.artifacts"))?
+                .clone();
+            if !references.is_empty() {
+                let artifacts = self
+                    .artifacts
+                    .as_ref()
+                    .ok_or_else(|| fail(ErrorCode::ComponentUnavailable, "agent.artifact_store"))?;
+                for reference in &references {
+                    artifacts.stat(reference, &current, Some(deadline)).await?;
+                }
             }
             Ok(())
         })
@@ -904,6 +949,10 @@ impl ModelRequestProjector for Projector {
             if context.cancellation.is_cancelled() {
                 return Err(fail(ErrorCode::Cancelled, "agent.projection"));
             }
+            self.projected_artifacts
+                .lock()
+                .map_err(|_| fail(ErrorCode::InvalidContract, "agent.artifacts"))?
+                .clear();
             self.authorize_use(selection, input, context).await?;
             let request_message = self
                 .saved
@@ -995,6 +1044,11 @@ impl ModelRequestProjector for Projector {
                 },
             )?;
             let input_tokens = self.estimator.estimate(&projection.request)?;
+            *self
+                .projected_artifacts
+                .lock()
+                .map_err(|_| fail(ErrorCode::InvalidContract, "agent.artifacts"))? =
+                artifacts::selected(&projection.request, &self.saved)?;
             Ok(ProjectedModelRequest {
                 request: projection.request,
                 input_tokens,
@@ -1002,7 +1056,7 @@ impl ModelRequestProjector for Projector {
         })
     }
 }
-fn enum_name(value: &impl serde::Serialize) -> String {
+pub(super) fn enum_name(value: &impl serde::Serialize) -> String {
     serde_json::to_value(value)
         .ok()
         .and_then(|value| value.as_str().map(str::to_owned))

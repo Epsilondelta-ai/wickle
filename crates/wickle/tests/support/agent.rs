@@ -663,6 +663,8 @@ impl Fixture {
             components: None,
             context_sources: None,
             context_token_estimator: None,
+            skills: None,
+            artifacts: None,
             hooks: None,
             token_estimator: self.estimator.clone(),
             settings: AgentSettings {

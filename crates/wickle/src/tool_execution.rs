@@ -50,10 +50,22 @@ pub enum ToolEffect {
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ToolExecutionOutcome {
+    /// Complete instructions from the explicitly configured Skill loader only.
+    LoadedSkill {
+        /// Validated again by the core before the body and Tool result are committed together.
+        loaded: Box<LoadedSkill>,
+    },
     /// Returned value to check against the pinned output schema.
     Succeeded {
         /// Raw returned JSON; only a validated, bounded value becomes model content.
         value: Value,
+    },
+    /// A schema-validated value plus explicit bounded observations or stored references.
+    SucceededWithContent {
+        /// Value validated against the Tool's output schema.
+        value: Value,
+        /// Typed observations; artifacts and evidence require current store validation.
+        content: Vec<InputContent>,
     },
     /// Classified handler failure, independent of whether a write happened.
     Failed {
@@ -83,7 +95,11 @@ pub struct ToolExecutionResult {
 impl fmt::Debug for ToolExecutionOutcome {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
+            Self::LoadedSkill { .. } => "ToolExecutionOutcome::LoadedSkill(<protected>)",
             Self::Succeeded { .. } => "ToolExecutionOutcome::Succeeded(<protected>)",
+            Self::SucceededWithContent { .. } => {
+                "ToolExecutionOutcome::SucceededWithContent(<protected>)"
+            }
             Self::Failed { .. } => "ToolExecutionOutcome::Failed(<classified>)",
             Self::InputRequired { .. } => "ToolExecutionOutcome::InputRequired(<protected>)",
         })
@@ -183,6 +199,7 @@ impl fmt::Debug for PreparedToolResolution {
 
 struct AttemptIdentity<'a> {
     scope: &'a Scope,
+    run_id: &'a Id,
     attempt_id: &'a Id,
     idempotency_key: &'a Id,
 }
@@ -423,6 +440,8 @@ pub struct SerialToolRound {
     ids: Arc<dyn IdSource>,
     limits: ToolExecutionLimits,
     hooks: Option<Arc<HookRuntime>>,
+    skill_plan: Option<SkillPlan>,
+    artifacts: Option<Arc<ArtifactRuntime>>,
     observer_error: std::sync::Mutex<Option<ContractError>>,
 }
 impl SerialToolRound {
@@ -441,6 +460,8 @@ impl SerialToolRound {
             ids,
             limits: ToolExecutionLimits::default(),
             hooks: None,
+            skill_plan: None,
+            artifacts: None,
             observer_error: std::sync::Mutex::new(None),
         }
     }
@@ -462,6 +483,63 @@ impl SerialToolRound {
     pub fn with_hooks(mut self, hooks: Arc<HookRuntime>) -> Self {
         self.hooks = Some(hooks);
         self
+    }
+    /// Connect the already validated, immutable Skill loader plan for this Run.
+    pub fn with_skill_plan(mut self, plan: SkillPlan) -> Self {
+        self.skill_plan = Some(plan);
+        self
+    }
+    /// Validate typed artifact/evidence observations through a scoped Host store.
+    pub fn with_artifacts(mut self, artifacts: Arc<ArtifactRuntime>) -> Self {
+        self.artifacts = Some(artifacts);
+        self
+    }
+    pub(crate) async fn validate_artifact_result(
+        &self,
+        result: &mut ToolResult,
+        context: &ExecutionContext,
+        deadline: tokio::time::Instant,
+    ) {
+        if result.status != ToolResultStatus::Succeeded
+            || !result.content.iter().any(|item| {
+                matches!(
+                    item,
+                    InputContent::Artifact { .. } | InputContent::Evidence { .. }
+                )
+            })
+        {
+            return;
+        }
+        let checked = match &self.artifacts {
+            Some(artifacts) => {
+                artifacts
+                    .validate_content(&result.content, context, Some(deadline))
+                    .await
+            }
+            None => Err(error(
+                ErrorCode::ComponentUnavailable,
+                "tool.artifact_store",
+            )),
+        };
+        if let Err(error) = checked {
+            result.status = if error.code == ErrorCode::Cancelled {
+                ToolResultStatus::Cancelled
+            } else {
+                ToolResultStatus::Failed
+            };
+            result.content.clear();
+            result.skill_ref = None;
+            result.error = Some(Failure {
+                code: Id::new(
+                    serde_json::to_value(error.code)
+                        .ok()
+                        .and_then(|v| v.as_str().map(str::to_owned))
+                        .unwrap_or_else(|| "invalid_artifact".into()),
+                )
+                .expect("error code"),
+                diagnostic_ref: None,
+            });
+        }
     }
     /// A local observer-report persistence error, separate from Tool execution.
     pub fn observer_error(&self) -> Option<ContractError> {

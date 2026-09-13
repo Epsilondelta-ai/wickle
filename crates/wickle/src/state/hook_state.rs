@@ -55,6 +55,7 @@ pub(super) fn validate_hook_snapshot(
         .source_plan_ref
         .iter()
         .chain(&snapshot.context_batches)
+        .chain(crate::skills::records::references(snapshot))
     {
         let value = record_value(state, additions, reference)?;
         records.push(ProtectedRecord::new(

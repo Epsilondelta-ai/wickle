@@ -112,7 +112,7 @@ fn admission(
         timing: RunTiming::new(started_at_ms, 10000).unwrap(),
         reservations: vec![],
         resume_receipts: vec![],
-        hook_plan_ref: None, source_plan_ref: None,
+        hook_plan_ref: None, source_plan_ref: None, skill_plan_ref: None,
         hook_applications: vec![],
         model_ledger: vec![],
         tool_ledger: vec![],

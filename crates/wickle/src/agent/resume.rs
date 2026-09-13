@@ -258,7 +258,7 @@ impl Agent {
                         cancellation,
                         deadline: tokio::time::Instant::now() + timeout,
                     };
-                    let verified = caller_read(context, Some(timeout), async {
+                    let mut verified = caller_read(context, Some(timeout), async {
                         AssertUnwindSafe(verifier.verify(&request, &verification))
                             .catch_unwind()
                             .await
@@ -270,6 +270,41 @@ impl Agent {
                     .await?;
                     verification.cancellation.cancel();
                     self.authorize_receipt(receipt_ref, context).await?;
+                    if let ToolExecutionOutcome::SucceededWithContent { content, .. } =
+                        &verified.outcome
+                    {
+                        let checked = match &bindings.artifacts {
+                            Some(artifacts) => caller_read(
+                                context,
+                                Some(timeout),
+                                artifacts.validate_content(
+                                    content,
+                                    context,
+                                    Some(verification.deadline),
+                                ),
+                            )
+                            .await
+                            .map(|_| ()),
+                            None if content.iter().any(|item| {
+                                matches!(
+                                    item,
+                                    InputContent::Artifact { .. } | InputContent::Evidence { .. }
+                                )
+                            }) =>
+                            {
+                                Err(fail(
+                                    ErrorCode::ComponentUnavailable,
+                                    "agent.artifact_store",
+                                ))
+                            }
+                            None => Ok(()),
+                        };
+                        if let Err(error) = checked {
+                            verified.outcome = ToolExecutionOutcome::Failed {
+                                code: Id::new(super::driver::enum_name(&error.code))?,
+                            };
+                        }
+                    }
                     Some(round.prepare_external(
                         &saved,
                         &request.call.call_id,
@@ -597,6 +632,16 @@ impl Agent {
             != expected_sources.as_ref()
         {
             return Err(fail(ErrorCode::ContextMismatch, "agent.pinned_sources"));
+        }
+        match (&saved.snapshot.skill_plan_ref, &bindings.skills) {
+            (Some(_), Some(skills)) => {
+                let plan = skills.saved_plan(&saved.snapshot).await?;
+                if plan.listings() != prompt.skills() {
+                    return Err(fail(ErrorCode::ContextMismatch, "agent.pinned_skills"));
+                }
+            }
+            (None, _) if saved.snapshot.profile.profile().skills.is_empty() => {}
+            _ => return Err(fail(ErrorCode::ContextMismatch, "agent.pinned_skills")),
         }
         Ok(prompt)
     }

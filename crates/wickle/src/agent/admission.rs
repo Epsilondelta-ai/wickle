@@ -249,6 +249,33 @@ impl Agent {
                 .transpose()?
                 .unwrap_or_default()
         };
+        let skill_plan = if profile.profile().skills.is_empty() {
+            None
+        } else {
+            Some(
+                bindings
+                    .skills
+                    .as_ref()
+                    .ok_or_else(|| fail(ErrorCode::ComponentUnavailable, "agent.skills"))?
+                    .plan(&profile, &tool_bindings, bindings.profile_resolver.as_ref())
+                    .await?,
+            )
+        };
+        let skill_listings = skill_plan
+            .as_ref()
+            .map(SkillPlan::listings)
+            .unwrap_or_default();
+        let skill_record = skill_plan
+            .as_ref()
+            .map(|plan| {
+                Ok::<_, ContractError>(ProtectedRecord::new(
+                    bindings.ids.next_id()?,
+                    1,
+                    serde_json::to_value(plan)
+                        .map_err(|_| fail(ErrorCode::InvalidJson, "agent.skill_plan"))?,
+                ))
+            })
+            .transpose()?;
         let session = match bindings
             .state
             .load_session(&bindings.scope, &request.session_id)
@@ -283,7 +310,7 @@ impl Agent {
                 bindings.host_instructions.clone(),
                 None,
                 tool_bindings.clone(),
-                vec![],
+                skill_listings.clone(),
             )?;
             let record = ProtectedRecord::new(
                 bindings.ids.next_id()?,
@@ -293,7 +320,8 @@ impl Agent {
             );
             (prompt, record, 1)
         };
-        if prompt.tools().len() != tool_bindings.len()
+        if prompt.skills() != skill_listings
+            || prompt.tools().len() != tool_bindings.len()
             || prompt
                 .tools()
                 .iter()
@@ -423,6 +451,9 @@ impl Agent {
             source_plan_ref: source_record
                 .as_ref()
                 .map(|record| record.reference().clone()),
+            skill_plan_ref: skill_record
+                .as_ref()
+                .map(|record| record.reference().clone()),
             revision: 0,
             resume_receipts: vec![],
             hook_plan_ref: hook_record
@@ -471,6 +502,7 @@ impl Agent {
                     hook_record.into_iter().collect(),
                     assembly_record.into_iter().collect(),
                     source_record.into_iter().collect(),
+                    skill_record.into_iter().collect(),
                 ]
                 .concat(),
             },

@@ -661,6 +661,13 @@ pub struct RunSnapshot {
         skip_serializing_if = "Option::is_none"
     )]
     pub source_plan_ref: Option<RecordRef>,
+    /// Exact selected Skill manifests, configuration, and loader contract pinned at admission.
+    #[serde(
+        default,
+        deserialize_with = "optional",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub skill_plan_ref: Option<RecordRef>,
     /// Physical model attempt records.
     pub model_ledger: Vec<ModelInvocationRecord>,
     /// Saved tool plans and states.

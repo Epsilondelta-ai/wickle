@@ -146,6 +146,15 @@ pub enum PolicyAction {
     ReadArtifact {},
     /// Write an artifact in the owning scope.
     WriteArtifact {},
+    /// Load or use an exact Skill manifest under current access and model destination policy.
+    ReadSkill {
+        /// Native Skill identity and version.
+        skill: VersionedRef,
+        /// Complete immutable manifest identity.
+        manifest_digest: JsonDigest,
+        /// None for local loading/preparation, otherwise the model destination.
+        route: Option<Box<crate::ResolvedModelRoute>>,
+    },
     /// Read minimal event metadata.
     ReadEvents {},
     /// Read a protected record referenced by an event or checkpoint.

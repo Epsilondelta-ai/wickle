@@ -28,6 +28,10 @@ schemas and runtime system values are not prompt components. Skill listings
 contain names, descriptions, versions, and manifest identities; creating the
 snapshot does not load Skill bodies or fetch instruction assets.
 
+The Agent's [Skill runtime](skills.md) loads bodies explicitly through its selected
+loader Tool, then projects committed instructions with `Skill` origin and Run
+lifetime. The protected body reference is not a model-visible Tool observation.
+
 The caller must authorize supplied assets and attest that they match registered
 implementations. Snapshot creation freezes that trusted assembly; it does not
 query the registry or prove that arbitrary executable code matches its metadata.

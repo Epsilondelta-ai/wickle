@@ -15,3 +15,5 @@ Its design uses Agent Profiles to configure agent behavior and adapters to conne
 **Status:** In development. Agents support serial model/tool loops, separate system inputs, persisted outcomes, event replay, cancellation, and resuming saved approval, input, or external-effect waits. Resume commands are deduplicated; external effects require Host verification. Lifecycle hooks support bounded context and argument transformations plus observations after commit. Adapter Tool/Hook/ContextSource exports support pinned assemblies and scoped instances that close when each execution segment ends. [Adapter runtime](docs/adapters.md). General interruption recovery and candidate verification remain unsupported. [Run an agent](docs/agents.md) · [Data contracts](docs/contracts.md).
 
 Read-only [context sources](docs/context-sources.md) support Run and model-step collection, saved batches, and current access checks on reuse.
+
+[Skills](docs/skills.md) load complete, versioned instructions through a registered Tool. [Artifacts](docs/artifacts.md) preserve scoped originals, bounded previews, and source evidence.

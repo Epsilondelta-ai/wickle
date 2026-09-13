@@ -161,6 +161,13 @@ pub struct ToolResult {
         skip_serializing_if = "Option::is_none"
     )]
     pub effect_receipt_ref: Option<RecordRef>,
+    /// Protected complete Skill body from the registered loader; excluded from model observations.
+    #[serde(
+        default,
+        deserialize_with = "optional",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub skill_ref: Option<RecordRef>,
     /// Classified failure, when applicable.
     #[serde(
         default,
