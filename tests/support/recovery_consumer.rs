@@ -3,6 +3,29 @@
 mod host {
     include!("agent_consumer.rs");
 
+    // Crash-boundary verification advances lease time explicitly. A slow disk or
+    // a descheduled process must not expire the lease before the intended exit.
+    struct RecoveryClock(i64);
+    impl Clock for RecoveryClock {
+        fn now(&self) -> Result<ClockReading, ContractError> {
+            Ok(ClockReading { utc_ms: self.0, monotonic_ms: 1000 })
+        }
+        fn sleep_until<'a>(&'a self, _: u64) -> PortFuture<'a, ()> {
+            Box::pin(std::future::pending())
+        }
+    }
+    fn worker(directory: &std::path::Path, mode: &str) -> Result<std::process::ExitStatus, Box<dyn std::error::Error>> {
+        let mut child = std::process::Command::new(std::env::current_exe()?).arg(directory).arg(mode).spawn()?;
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            if let Some(status) = child.try_wait()? { return Ok(status); }
+            if std::time::Instant::now() >= deadline {
+                let _ = child.kill(); let _ = child.wait();
+                return Err("recovery worker exceeded its wall-time watchdog".into());
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
     struct ProcessModel {
         inner: ExampleModel,
         directory: std::path::PathBuf,
@@ -27,10 +50,9 @@ mod host {
         }
         let directory = TemporaryDatabase(std::env::temp_dir().join(format!("wickle-recovery-{}", RandomIdSource.next_id()?)));
         std::fs::create_dir(&directory.0)?;
-        let first = std::process::Command::new(std::env::current_exe()?).arg(&directory.0).arg("interrupt").status()?;
+        let first = worker(&directory.0, "interrupt")?;
         assert_eq!(first.code(), Some(73));
-        tokio::time::sleep(Duration::from_millis(1100)).await;
-        let second = std::process::Command::new(std::env::current_exe()?).arg(&directory.0).arg("recover").status()?;
+        let second = worker(&directory.0, "recover")?;
         assert!(second.success());
         let calls = std::fs::read_to_string(directory.0.join("calls"))?;
         let attempts: Vec<_> = calls.lines().collect();
@@ -58,7 +80,7 @@ mod host {
             scope: scope.clone(), state: store.clone(), policy: policy.clone(), profile_resolver: Arc::new(Catalog),
             model_exchange: Arc::new(ModelExchange::new(model, policy).with_route_inspector(Arc::new(ExampleInspector), Duration::from_secs(1))?),
             router: Arc::new(PolicyModelRouter::new(routing)?), host_instructions: vec!["Preserve the requested output.".into()],
-            system_inputs: SystemInputRegistry::new(vec![])?, clock: Arc::new(SystemClock::new()), ids: Arc::new(RandomIdSource),
+            system_inputs: SystemInputRegistry::new(vec![])?, clock: Arc::new(RecoveryClock(if interrupt { 1000 } else { 3000 })), ids: Arc::new(RandomIdSource),
             tools: None, system_input_resolver: None, external_receipt_verifier: None, components: None,
             context_sources: None, context_token_estimator: None, context_runtime: None, verification: None, skills: None, artifacts: None, hooks: None,
             token_estimator: Arc::new(Estimate), settings,
@@ -67,10 +89,13 @@ mod host {
         if interrupt {
             let request = RunRequest { request_id: id("request"), session_id: id("session"), input: vec![InputContent::Text { text: "Retrieve the available result".into() }], trigger: RunTrigger::User {}, model_options: JsonObject::from([("reasoning_effort".into(), json!("high"))]), output_contract: None };
             let handle = completed(agent.start(request, context.clone()).await?)?;
-            let _ = handle.outcome(&context).await;
-            return Err("interruption did not occur".into());
+            // Regression: wall-time delay exceeds the fixture's short lease.
+            std::thread::sleep(Duration::from_millis(1200));
+            let outcome = handle.outcome(&context).await;
+            return Err(format!("interruption did not occur: {outcome:?}").into());
         }
         let run_id = id(&std::fs::read_to_string(directory.join("run"))?);
+        assert_eq!(store.acquire_lease(&scope, &run_id, &id("too-early"), 1000, 1000).await.unwrap_err().code, ErrorCode::LeaseBusy);
         let before = completed(agent.get_run_details(&run_id, &context).await?)?;
         let source = before.recovery_record(RandomIdSource.next_id()?)?;
         let command = ResumeCommand { run_id: run_id.clone(), expected_revision: before.revision, command_id: RandomIdSource.next_id()?, action: ResumeAction::Recover { recovery_ref: source.reference().clone() } };
