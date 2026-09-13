@@ -23,3 +23,5 @@ Agent Profile でエージェントの振る舞いを設定し、アダプター
 [出力検証](docs/verification.md)は JSON Schema、バージョンを固定した評価基準、上限付きの修正、固定された候補の承認に対応します。モデルによる検証も同じ Run 予算を使います。
 
 [モデルプロバイダーガイド](docs/model-providers.md)では、OpenAI、Azure OpenAI、Anthropic、AWS Bedrock、Gemini API、Vertex AI、xAI アダプターの共通接続方法を説明しています。認証、API バージョン、各プロバイダーの動作の違いは個別に扱います。
+
+[MCP ツール接続](docs/mcp.md)では、確認済みのツールを stdio で接続する方法を説明します。

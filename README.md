@@ -23,3 +23,5 @@ Read-only [context sources](docs/context-sources.md) support Run and model-step 
 [Output verification](docs/verification.md) supports JSON schemas, versioned criteria, bounded repair, and approval of a fixed candidate. Model-based reviews share the Run budget.
 
 The [model provider guide](docs/model-providers.md) covers OpenAI, Azure OpenAI, Anthropic, AWS Bedrock, Gemini API, Vertex AI and xAI adapters. They use the same core contracts while retaining explicit credentials, API versions and provider-specific behavior.
+
+See [MCP tools](docs/mcp.md) for connecting reviewed tools over stdio.
