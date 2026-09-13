@@ -23,3 +23,5 @@ La [sélection et compression du contexte](docs/context-compaction.md) conserve 
 La [vérification des résultats](docs/verification.md) prend en charge les schémas JSON, les critères versionnés, les révisions limitées et l’approbation d’un candidat figé. Les vérifications par modèle partagent le budget du Run.
 
 Le [guide des fournisseurs de modèles](docs/model-providers.md) présente les adaptateurs OpenAI, Azure OpenAI, Anthropic, AWS Bedrock, Gemini API, Vertex AI et xAI. Ils partagent les contrats du cœur tout en conservant leurs identifiants, versions d’API et comportements spécifiques.
+
+Le guide des [outils MCP](docs/mcp.md) explique comment connecter des outils approuvés via stdio.

@@ -47,7 +47,8 @@ def main():
     gemini = next(p for p in workspace["packages"] if p["name"] == "wickle-model-gemini")
     vertex = next(p for p in workspace["packages"] if p["name"] == "wickle-model-vertex")
     xai = next(p for p in workspace["packages"] if p["name"] == "wickle-model-xai")
-    libraries = [core, catalog, sqlite, adapters, responses, openai, azure, anthropic, bedrock, gemini, vertex, xai]
+    mcp = next(p for p in workspace["packages"] if p["name"] == "wickle-mcp")
+    libraries = [core, catalog, sqlite, adapters, responses, openai, azure, anthropic, bedrock, gemini, vertex, xai, mcp]
     versions = {d["name"]: d["req"] for d in core["dependencies"] if d["kind"] is None}
     for dep in core["dependencies"]:
         if dep["kind"] != "dev":
@@ -113,6 +114,7 @@ def main():
             encoding="utf-8",
         )
         shutil.copyfile(ROOT / "tests/support/consumer.rs", consumer / "src/main.rs")
+        shutil.copyfile(ROOT / "tests/support/mcp_fixture.rs", consumer / "src/mcp_fixture.rs")
         examples = sorted((ROOT / "tests/support").glob("*_consumer.rs"))
         if examples:
             (consumer / "src/bin").mkdir()
@@ -146,7 +148,7 @@ def main():
         for example in examples:
             subprocess.run(["cargo", "run", "--locked", "--offline", "--bin", example.stem],
                            cwd=consumer, env=env, check=True)
-    print("Independent package consumers: passed (core, model catalog, SQLite store, adapter runtime, Responses codec, OpenAI, Azure, Anthropic, Bedrock, Gemini, Vertex and xAI adapters)", flush=True)
+    print("Independent package consumers: passed (core, model catalog, SQLite store, adapter runtime, Responses codec, OpenAI, Azure, Anthropic, Bedrock, Gemini, Vertex, xAI and MCP adapters)", flush=True)
 
 
 if __name__ == "__main__":

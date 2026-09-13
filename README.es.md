@@ -23,3 +23,5 @@ La [selección y compresión de contexto](docs/context-compaction.md) conserva l
 La [verificación de resultados](docs/verification.md) admite esquemas JSON, criterios con versión fija, revisiones limitadas y aprobación de un candidato fijo. Las revisiones mediante modelos comparten el presupuesto del Run.
 
 La [guía de proveedores de modelos](docs/model-providers.md) explica cómo conectar OpenAI, Azure OpenAI, Anthropic, AWS Bedrock, Gemini API, Vertex AI y xAI. Los adaptadores comparten los contratos del núcleo y conservan sus credenciales, versiones de API y diferencias de comportamiento.
+
+La guía de [herramientas MCP](docs/mcp.md) explica cómo conectar herramientas revisadas mediante stdio.
