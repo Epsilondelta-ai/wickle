@@ -25,3 +25,5 @@ Read-only [context sources](docs/context-sources.md) support Run and model-step 
 The [OpenAI Responses adapter](docs/openai.md) provides bounded HTTP/SSE generation, function calling, structured output, and explicit model-version inspection with application-supplied credentials.
 
 For resource-scoped Azure deployments and Host-managed API-key/Entra authentication, see the [Azure OpenAI adapter guide](docs/azure-openai.md).
+
+For Claude Messages, signed thinking replay and workspace-scoped credentials, see the [Anthropic adapter guide](docs/anthropic.md).

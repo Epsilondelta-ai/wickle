@@ -25,3 +25,5 @@ Agent Profile でエージェントの振る舞いを設定し、アダプター
 [OpenAI Responses アダプター](docs/openai.md)は、アプリケーションが渡す認証情報を使い、制限付き HTTP/SSE 生成、関数呼び出し、構造化出力、モデルバージョンの確認に対応します。
 
 Azure リソースのデプロイと Host が管理する API キー・Entra 認証については、[Azure OpenAI アダプターガイド](docs/azure-openai.md)を参照してください。
+
+Claude Messages、thinking の署名保持、workspace ごとの認証については、[Anthropic アダプターガイド](docs/anthropic.md)を参照してください。

@@ -25,3 +25,5 @@ Die [Ausgabeprüfung](docs/verification.md) unterstützt JSON-Schemas, versionie
 Der [OpenAI-Responses-Adapter](docs/openai.md) unterstützt begrenzte HTTP/SSE-Generierung, Funktionsaufrufe, strukturierte Ausgaben und Modellversionsprüfungen mit von der Anwendung bereitgestellten Zugangsdaten.
 
 Informationen zu Azure-Bereitstellungen und vom Host verwalteten API-Schlüsseln oder Entra-Token stehen im [Leitfaden zum Azure-OpenAI-Adapter](docs/azure-openai.md).
+
+Claude Messages, die Erhaltung von Thinking-Signaturen und Zugangsdaten pro Workspace beschreibt der [Anthropic-Adapter-Leitfaden](docs/anthropic.md).

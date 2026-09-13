@@ -25,3 +25,5 @@ Wickle — движок агентов, который EpsilonDelta разраб
 [Адаптер OpenAI Responses](docs/openai.md) поддерживает HTTP/SSE-генерацию с ограничениями, вызовы функций, структурированный вывод и проверку версий моделей с учётными данными приложения.
 
 Развёртывания Azure и аутентификация через ключ API или Entra, управляемая Host, описаны в [руководстве по адаптеру Azure OpenAI](docs/azure-openai.md).
+
+Claude Messages, сохранение подписей thinking и учётные данные workspace описаны в [руководстве по адаптеру Anthropic](docs/anthropic.md).

@@ -34,3 +34,7 @@ Responses API의 실제 effort 필드는 `reasoning.effort`입니다. Wickle의 
 ID가 채워진 슬롯마다 독립 테스트를 실행하도록 준비합니다. 같은 ID와 서로 다른 effort를 넣어 비교할 수도 있습니다. 다른 계정·endpoint는 별도 `.env` 파일을 사용합니다.
 
 .env 설정은 별도의 live 테스트 Host용입니다. 공개 어댑터의 설정·인증 주입 방식은 [OpenAI Responses 사용 안내](../openai.md)를 참고하세요. `.env` 저장만으로 호출이 실행되지 않고 코어 라이브러리는 파일을 읽지 않습니다. [공통 안내](README.md).
+
+## 확인한 현재 모델 계약
+
+`gpt-6-astra`는 Responses의 `reasoning.effort`를 사용하며 `low`, `medium`, `high`, `xhigh`, `max`를 지원합니다. `none`/`minimal`, `temperature`, `top_p`는 이 모델에 사용하지 않습니다. Tool 호출은 Responses를 사용합니다. 이 제한을 다른 모델 전체에 적용하지 않고 모델별 옵션 계약으로 검사합니다. [현재 모델 가이드](https://developers.openai.com/api/docs/guides/latest-model).
