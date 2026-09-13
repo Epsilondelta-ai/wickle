@@ -2,7 +2,7 @@
 
 [환경변수 안내](README.md) · [전체 예제](../../.env.example)
 
-Google Cloud 프로젝트와 Application Default Credentials(ADC)를 준비합니다. 모델 테스트 Host는 기본적으로 `global` endpoint를 사용하므로 위치 환경변수는 필요하지 않습니다. 여기서는 ADC 경로를 설정합니다. Wickle의 Vertex 어댑터와 실제 연결 검사 runner는 아직 완성되지 않았으며, 코어가 아래 `.env`를 자동으로 읽지는 않습니다.
+Google Cloud 프로젝트와 Application Default Credentials(ADC)를 준비합니다. 모델 테스트 Host는 기본적으로 `global` endpoint를 사용하므로 위치 환경변수는 필요하지 않습니다. 여기서는 ADC 경로를 설정합니다. [Vertex 어댑터](../vertex.md)에 Host가 인증·프로젝트 설정을 명시적으로 전달합니다. 실제 연결 검사 runner와 계정 검증은 별도로 진행하며, 코어는 아래 `.env`를 읽지 않습니다.
 
 ```dotenv
 GOOGLE_CLOUD_PROJECT=
@@ -47,7 +47,7 @@ gcloud auth application-default set-quota-project '<quota 프로젝트 ID>'
 
 `VERTEX_MODEL_1_THINKING_LEVEL`은 논리 옵션 `thinking_level`입니다. 구형 모델의 토큰 예산 방식에는 `THINKING_BUDGET_TOKENS`를 사용해 `thinking_budget_tokens`를 전달합니다. 어댑터가 선택된 Vertex API의 `thinkingConfig`에 매핑하며, 지원 level·예산 범위·동시 설정 제약은 모델과 API별로 검사합니다. [Vertex Gemini thinking](https://docs.cloud.google.com/vertex-ai/generative-ai/docs/thinking).
 
-빈 옵션은 전송하지 않습니다. 모든 모델에 공통 enum을 가정하거나 지원하지 않는 설정을 조용히 버리지 않고 명시적으로 거부합니다. 실제 SDK 매핑은 Vertex 어댑터의 책임이며 아직 구현 전입니다.
+빈 옵션은 전송하지 않습니다. 모든 모델에 공통 enum을 가정하거나 지원하지 않는 설정을 조용히 버리지 않고 명시적으로 거부합니다. Vertex 어댑터가 선택한 v1 wire 계약으로 변환합니다. ADC에서 토큰을 얻고 갱신하는 책임은 Host에 있습니다.
 
 `MAX_OUTPUT_TOKENS=4096`은 응답 한 번의 출력 예산 예시입니다. 모델별 호출 요건과 thinking·도구 호출에 필요한 공간에 맞춰 조정합니다. 긴 tool loop에 충분한 전체 예산을 뜻하지 않습니다.
 

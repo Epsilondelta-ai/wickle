@@ -18,6 +18,7 @@ pub struct Decoder<'a> {
     finish: Option<ModelFinish>,
     bytes: usize,
     started: bool,
+    vertex: bool,
 }
 impl<'a> Decoder<'a> {
     /// Start one physical attempt without network access.
@@ -31,6 +32,14 @@ impl<'a> Decoder<'a> {
             finish: None,
             bytes: 0,
             started: false,
+            vertex: false,
+        }
+    }
+    /// Use Vertex's complete function-call metadata while rejecting partial arguments.
+    pub fn for_vertex(request: &'a ModelRequest) -> Self {
+        Self {
+            vertex: true,
+            ..Self::new(request)
         }
     }
     /// Consume a complete SSE JSON record. It is never a Tool execution permit.
@@ -139,7 +148,7 @@ impl<'a> Decoder<'a> {
                     .checked_add(part.to_string().len())
                     .filter(|n| *n <= self.request.limits.max_response_bytes)
                     .ok_or_else(invalid)?;
-                let decoded = inspect_part(part)?;
+                let decoded = inspect_part(part, self.vertex)?;
                 for text in chunks(&decoded.text, self.request.limits.max_delta_bytes)? {
                     output.push(ModelEvent::TextDelta { text });
                 }
