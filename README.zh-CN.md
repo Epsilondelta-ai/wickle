@@ -22,16 +22,4 @@ Wickle 是 EpsilonDelta 正在使用 Rust 开发的智能体引擎，旨在以�
 
 [输出验证](docs/verification.md)支持 JSON Schema、固定版本的验证标准、限定次数的修正和固定候选结果的审批。模型验证也使用同一 Run 预算。
 
-[OpenAI Responses 适配器](docs/openai.md)使用应用程序提供的凭据，支持有界 HTTP/SSE 生成、函数调用、结构化输出和明确的模型版本检查。
-
-Azure 资源部署及由 Host 管理的 API 密钥和 Entra 身份验证，请参阅 [Azure OpenAI 适配器指南](docs/azure-openai.md)。
-
-Claude Messages、thinking 签名保留及 workspace 身份验证请参阅 [Anthropic 适配器指南](docs/anthropic.md)。
-
-AWS 签名、推理配置文件和 Bedrock 流协议请参阅 [Bedrock 适配器指南](docs/bedrock.md)。
-
-Gemini API 版本、函数模式和思考签名重放请参阅 [Gemini 适配器指南](docs/gemini.md)。
-
-Google Cloud 身份验证及全球和区域连接请参阅 [Vertex AI 适配器指南](docs/vertex.md)。
-
-Grok Responses、加密状态重放和用量格式请参阅 [xAI 适配器指南](docs/xai.md)。
+[模型提供商指南](docs/model-providers.md)介绍 OpenAI、Azure OpenAI、Anthropic、AWS Bedrock、Gemini API、Vertex AI 和 xAI 适配器的通用连接方式。各提供商的身份验证、API 版本和行为差异分别处理。

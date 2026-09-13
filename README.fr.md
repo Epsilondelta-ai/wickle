@@ -22,16 +22,4 @@ La [sélection et compression du contexte](docs/context-compaction.md) conserve 
 
 La [vérification des résultats](docs/verification.md) prend en charge les schémas JSON, les critères versionnés, les révisions limitées et l’approbation d’un candidat figé. Les vérifications par modèle partagent le budget du Run.
 
-L’[adaptateur OpenAI Responses](docs/openai.md) propose la génération HTTP/SSE avec limites, les appels de fonctions, les sorties structurées et la vérification des versions, avec les identifiants fournis par l’application.
-
-Pour les déploiements Azure et l’authentification par clé API ou Entra gérée par le Host, consultez le [guide de l’adaptateur Azure OpenAI](docs/azure-openai.md).
-
-Consultez le [guide de l’adaptateur Anthropic](docs/anthropic.md) pour Claude Messages, la conservation des signatures thinking et les identifiants par workspace.
-
-Consultez le [guide de l’adaptateur Bedrock](docs/bedrock.md) pour la signature AWS, les profils d’inférence et les protocoles de streaming.
-
-Consultez le [guide de l’adaptateur Gemini](docs/gemini.md) pour les versions d’API, les schémas de fonctions et la conservation des signatures de raisonnement.
-
-Consultez le [guide de l’adaptateur Vertex AI](docs/vertex.md) pour OAuth Google Cloud et les connexions globales ou régionales.
-
-Consultez le [guide de l’adaptateur xAI](docs/xai.md) pour Grok Responses, l’état chiffré et les formats d’utilisation.
+Le [guide des fournisseurs de modèles](docs/model-providers.md) présente les adaptateurs OpenAI, Azure OpenAI, Anthropic, AWS Bedrock, Gemini API, Vertex AI et xAI. Ils partagent les contrats du cœur tout en conservant leurs identifiants, versions d’API et comportements spécifiques.

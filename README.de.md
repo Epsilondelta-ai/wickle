@@ -22,16 +22,4 @@ Die [Kontextauswahl und -komprimierung](docs/context-compaction.md) bewahrt den 
 
 Die [Ausgabeprüfung](docs/verification.md) unterstützt JSON-Schemas, versionierte Kriterien, begrenzte Überarbeitungen und die Genehmigung eines festgelegten Kandidaten. Modellbasierte Prüfungen nutzen dasselbe Run-Budget.
 
-Der [OpenAI-Responses-Adapter](docs/openai.md) unterstützt begrenzte HTTP/SSE-Generierung, Funktionsaufrufe, strukturierte Ausgaben und Modellversionsprüfungen mit von der Anwendung bereitgestellten Zugangsdaten.
-
-Informationen zu Azure-Bereitstellungen und vom Host verwalteten API-Schlüsseln oder Entra-Token stehen im [Leitfaden zum Azure-OpenAI-Adapter](docs/azure-openai.md).
-
-Claude Messages, die Erhaltung von Thinking-Signaturen und Zugangsdaten pro Workspace beschreibt der [Anthropic-Adapter-Leitfaden](docs/anthropic.md).
-
-AWS-Signaturen, Inferenzprofile und Streaming-Protokolle beschreibt der [Bedrock-Adapter-Leitfaden](docs/bedrock.md).
-
-API-Versionen, Funktionsschemas und die Erhaltung von Gedankensignaturen beschreibt der [Gemini-Adapter-Leitfaden](docs/gemini.md).
-
-Google-Cloud-OAuth und globale oder regionale Ziele beschreibt der [Vertex-AI-Adapter-Leitfaden](docs/vertex.md).
-
-Grok Responses, verschlüsselte Zustände und Nutzungsformate beschreibt der [xAI-Adapter-Leitfaden](docs/xai.md).
+Der [Leitfaden für Modellanbieter](docs/model-providers.md) beschreibt die Anbindung von OpenAI, Azure OpenAI, Anthropic, AWS Bedrock, Gemini API, Vertex AI und xAI. Die Adapter nutzen gemeinsame Kernverträge und behalten eigene Zugangsdaten, API-Versionen und Verhaltensweisen.

@@ -22,16 +22,4 @@ Agent Profile로 에이전트의 동작을 구성하고, 어댑터를 통해 다
 
 [출력 검증](docs/verification.md)은 JSON 스키마, 버전이 고정된 검증 기준, 한도 내 보완과 고정된 후보의 승인을 지원합니다. 모델 기반 검증도 같은 Run 예산을 사용합니다.
 
-[OpenAI Responses 어댑터](docs/openai.md)는 애플리케이션이 제공한 인증 정보로 제한된 HTTP/SSE 생성, 함수 호출, 구조화 출력, 모델 버전 확인을 지원합니다.
-
-Azure 리소스별 배포와 Host가 관리하는 API key·Entra 인증은 [Azure OpenAI 어댑터 가이드](docs/azure-openai.md)를 참고하세요.
-
-Claude Messages, thinking 서명 보존, workspace별 인증은 [Anthropic 어댑터 가이드](docs/anthropic.md)를 참고하세요.
-
-AWS 서명, inference profile과 Bedrock 스트림은 [Bedrock 어댑터 가이드](docs/bedrock.md)를 참고하세요.
-
-Gemini API 버전, 함수 스키마와 thinking 서명 재전달은 [Gemini 어댑터 가이드](docs/gemini.md)를 참고하세요.
-
-Google Cloud 인증과 global·리전별 연결은 [Vertex AI 어댑터 가이드](docs/vertex.md)를 참고하세요.
-
-Grok Responses, 암호화된 상태 재전달과 usage 형식은 [xAI 어댑터 가이드](docs/xai.md)를 참고하세요.
+[모델 제공자 가이드](docs/model-providers.md)에서 OpenAI, Azure OpenAI, Anthropic, AWS Bedrock, Gemini API, Vertex AI, xAI 어댑터와 공통 연결 방법을 확인할 수 있습니다. 각 제공자의 인증, API 버전과 동작 차이는 별도로 처리합니다.
