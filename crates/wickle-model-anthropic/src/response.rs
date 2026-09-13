@@ -11,8 +11,10 @@ struct Block {
     arguments: String,
     closed: bool,
 }
-pub(crate) struct Decoder<'a> {
+/// Validates one Messages stream independently of its HTTP or AWS framing.
+pub struct Decoder<'a> {
     request: &'a ModelRequest,
+    /// Provider-reported metadata, with an optional transport request identifier.
     pub metadata: ModelResponseMetadata,
     message_id: Option<String>,
     blocks: Vec<Block>,
@@ -23,6 +25,7 @@ pub(crate) struct Decoder<'a> {
     tools: usize,
 }
 impl<'a> Decoder<'a> {
+    /// Begin one physical attempt without making a network request.
     pub fn new(request: &'a ModelRequest, request_id: Option<Id>) -> Self {
         Self {
             request,
@@ -39,6 +42,7 @@ impl<'a> Decoder<'a> {
             tools: 0,
         }
     }
+    /// Consume one complete JSON Messages event and produce normalized deltas.
     pub fn event(&mut self, event: SseEvent) -> Result<Vec<ModelEvent>, ContractError> {
         if self.terminal.is_some() {
             return Err(invalid());
@@ -285,6 +289,7 @@ impl<'a> Decoder<'a> {
             .ok_or_else(invalid)?;
         Ok(output)
     }
+    /// Return a validated terminal only after clean transport EOF.
     pub fn finish(&mut self) -> Result<ModelEvent, ContractError> {
         self.terminal.take().ok_or_else(invalid)
     }

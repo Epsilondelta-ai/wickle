@@ -27,3 +27,5 @@ Agent Profile でエージェントの振る舞いを設定し、アダプター
 Azure リソースのデプロイと Host が管理する API キー・Entra 認証については、[Azure OpenAI アダプターガイド](docs/azure-openai.md)を参照してください。
 
 Claude Messages、thinking の署名保持、workspace ごとの認証については、[Anthropic アダプターガイド](docs/anthropic.md)を参照してください。
+
+AWS 署名、推論プロファイル、Bedrock ストリームについては、[Bedrock アダプターガイド](docs/bedrock.md)を参照してください。
