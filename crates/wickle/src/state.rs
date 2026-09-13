@@ -9,6 +9,7 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 
 mod checkpoint;
+mod context_state;
 mod hook_state;
 mod skill_state;
 mod source_state;
@@ -450,6 +451,13 @@ impl StateStore for MemoryStateStore {
                 &input.messages,
             )?;
             let previous_sequence = previous_session.map_or(0, |s| s.snapshot.transcript_revision);
+            if input.snapshot.context_revision_ref.as_ref()
+                != previous_session
+                    .and_then(|session| session.snapshot.context_revision_ref.as_ref())
+                || !input.snapshot.context_decisions.is_empty()
+            {
+                return Err(error(ErrorCode::InvalidSnapshot, "context.admission"));
+            }
             let transcript_revision = validate_messages(
                 state,
                 &additions,
@@ -466,6 +474,7 @@ impl StateStore for MemoryStateStore {
                 profile_digest: input.snapshot.profile.profile_digest().clone(),
                 prompt_snapshot: input.prompt_snapshot,
                 transcript_revision,
+                context_revision_ref: input.snapshot.context_revision_ref.clone(),
                 active_run_id: Some(input.snapshot.run_id.clone()),
             };
             let result = StoredRun {
@@ -668,6 +677,7 @@ impl StateStore for MemoryStateStore {
             }
             let additions = validate_records(state, &input.records)?;
             validate_snapshot_refs(state, &additions, &input.snapshot)?;
+            context_state::validate_update(&run.snapshot, &input.snapshot, &input.events)?;
             validate_events(
                 state,
                 &additions,
@@ -696,6 +706,7 @@ impl StateStore for MemoryStateStore {
             let transcript: Vec<_> = session.messages.iter().chain(&input.messages).collect();
             validate_resume_history(state, &additions, &input.snapshot, &history, &transcript)?;
             session_snapshot.transcript_revision = transcript_revision;
+            session_snapshot.context_revision_ref = input.snapshot.context_revision_ref.clone();
             if input.snapshot.status.is_terminal() {
                 session_snapshot.active_run_id = None;
             }
@@ -955,6 +966,7 @@ fn validate_snapshot_refs(
 ) -> Result<(), ContractError> {
     validate_source_snapshot(state, additions, snapshot)?;
     skill_state::validate_skill_snapshot(state, additions, snapshot)?;
+    context_state::validate_snapshot(state, additions, snapshot)?;
     validate_hook_snapshot(state, additions, snapshot)?;
     let mut references = Vec::new();
     for receipt in &snapshot.resume_receipts {
@@ -1359,6 +1371,16 @@ fn validate_events(
             return Err(error(ErrorCode::InvalidEvent, "events"));
         }
         let reference = match &event.payload {
+            RunEventPayload::ContextRewritten { revision_ref } => {
+                let revision = context_state::revision(state, additions, revision_ref, snapshot)?;
+                if snapshot.context_revision_ref.as_ref() != Some(revision_ref)
+                    || revision.run_id != snapshot.run_id
+                    || Some(&revision.model_step_id) != snapshot.model_step_id.as_ref()
+                {
+                    return Err(error(ErrorCode::InvalidEvent, "events.context"));
+                }
+                revision_ref
+            }
             RunEventPayload::RunStarted {
                 request_ref,
                 profile_digest,

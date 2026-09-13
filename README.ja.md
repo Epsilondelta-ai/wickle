@@ -17,3 +17,5 @@ Agent Profile でエージェントの振る舞いを設定し、アダプター
 読み取り専用の [ContextSource](docs/context-sources.md) は、Run・モデルステップごとの取得、データの保存、再利用時の現在のアクセス権確認に対応しています。
 
 [Skills](docs/skills.md) は登録済みツールから固定バージョンの指示全文を読み込みます。[Artifacts](docs/artifacts.md) はスコープ付きの原文、サイズ制限付きプレビュー、出典情報を保持します。
+
+[コンテキストの選択・圧縮](docs/context-compaction.md) は元の会話を保持し、制限付きプレビューと検証済みの要約を適用します。モデルによる圧縮も同じ Run の予算を使用します。

@@ -739,6 +739,9 @@ async fn checkpoint() -> RunSnapshot {
         hook_plan_ref: None,
         source_plan_ref: None,
         skill_plan_ref: None,
+        context_plan_ref: None,
+        context_revision_ref: None,
+        context_decisions: vec![],
         hook_applications: vec![],
         reservations: vec![AttemptReservation {
             attempt_id: id("first-model-attempt"),

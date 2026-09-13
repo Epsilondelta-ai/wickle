@@ -212,6 +212,7 @@ impl Agent {
         if routing.scope() != &bindings.scope {
             return Err(fail(ErrorCode::AccessDenied, "agent.router_scope"));
         }
+        self.inner.context.validate_router(&routing)?;
         let profile = ProfileValidator::new(bindings.profile_resolver.as_ref())
             .validate(&self.inner.profile, &bindings.scope)
             .await?;
@@ -285,6 +286,31 @@ impl Agent {
             Err(error) if error.code == ErrorCode::StateNotFound => None,
             Err(error) => return Err(error),
         };
+        let context_plan = self
+            .inner
+            .context
+            .plan(profile.profile(), &bindings.scope)?;
+        let context_revision_ref = session
+            .as_ref()
+            .and_then(|session| session.context_revision_ref.clone());
+        if let Some(reference) = &context_revision_ref {
+            self.inner
+                .context
+                .validate_session_plan(
+                    reference,
+                    &request.session_id,
+                    &profile,
+                    &context_plan,
+                    bindings.state.as_ref(),
+                )
+                .await?;
+        }
+        let context_record = ProtectedRecord::new(
+            bindings.ids.next_id()?,
+            1,
+            serde_json::to_value(&context_plan)
+                .map_err(|_| fail(ErrorCode::InvalidJson, "agent.context_plan"))?,
+        );
         let (prompt, prompt_record, sequence) = if let Some(session) = session {
             let record = bindings
                 .state
@@ -454,6 +480,9 @@ impl Agent {
             skill_plan_ref: skill_record
                 .as_ref()
                 .map(|record| record.reference().clone()),
+            context_plan_ref: Some(context_record.reference().clone()),
+            context_revision_ref,
+            context_decisions: vec![],
             revision: 0,
             resume_receipts: vec![],
             hook_plan_ref: hook_record
@@ -503,6 +532,7 @@ impl Agent {
                     assembly_record.into_iter().collect(),
                     source_record.into_iter().collect(),
                     skill_record.into_iter().collect(),
+                    vec![context_record],
                 ]
                 .concat(),
             },

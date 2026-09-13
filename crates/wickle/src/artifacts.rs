@@ -262,6 +262,17 @@ impl ArtifactRuntime {
     ) -> Result<ArtifactMetadata, ContractError> {
         validate_input(&input, self.limits.max_bytes)?;
         let id = self.ids.next_id()?;
+        self.put_named(id, input, context, deadline).await
+    }
+    /// Core-generated immutable identity for idempotent context-preview publication.
+    pub(crate) async fn put_named(
+        &self,
+        id: Id,
+        input: ArtifactInput,
+        context: &ExecutionContext,
+        deadline: Option<Instant>,
+    ) -> Result<ArtifactMetadata, ContractError> {
+        validate_input(&input, self.limits.max_bytes)?;
         let controls = self.controls(context, deadline);
         let _cancel = controls.cancellation.clone().drop_guard();
         self.authorize(&id, true, context, &controls).await?;

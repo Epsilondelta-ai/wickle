@@ -13,6 +13,12 @@ pub enum ErrorCode {
     ArtifactApprovalRequired,
     /// A Skill manifest, body, dependency or loader result violates its pinned contract.
     InvalidSkill,
+    /// Context selection would split a complete group or remove protected data.
+    InvalidContextSelection,
+    /// A compressor did not produce a smaller usable context projection.
+    ContextCompactionNoReduction,
+    /// A model compressor failed or returned an unsupported completion.
+    ContextCompactionFailed,
     /// Current Skill policy requires explicit Host approval before loading or use.
     SkillApprovalRequired,
     /// The trusted policy failed or panicked; no permission was granted.

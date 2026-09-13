@@ -48,7 +48,8 @@ impl ProfileResolver for Catalog {
                 required_capabilities: BTreeSet::new(),
                 required_connections: BTreeSet::new(),
                 model_name: (reference.kind == ComponentKind::Tool).then(|| reference.id.clone()),
-                hook_position: None,
+                hook_position: (reference.kind == ComponentKind::Hook)
+                    .then_some(HookPosition::BeforeModel),
                 exports: vec![],
             })
         })
@@ -71,6 +72,13 @@ impl PolicyPort for Policy {
             {
                 return Ok(PolicyDecision::Deny {
                     reason: id("artifact_revoked"),
+                });
+            }
+            if self.mode.load(Ordering::SeqCst) == 5
+                && matches!(request.action, PolicyAction::RewriteContext { .. })
+            {
+                return Ok(PolicyDecision::Deny {
+                    reason: id("context_denied"),
                 });
             }
             if let PolicyAction::ExecuteTool { .. } = &request.action {
@@ -103,6 +111,8 @@ struct Model {
     plans: Vec<(&'static str, JsonObject)>,
     calls: AtomicUsize,
     requests: Mutex<Vec<ModelRequest>>,
+    rounds: AtomicUsize,
+    compactions: AtomicUsize,
 }
 impl ModelPort for Model {
     fn binding(&self) -> ModelPortBinding {
@@ -119,7 +129,13 @@ impl ModelPort for Model {
     ) -> PortStream<'a, ModelEvent> {
         let attempt = self.calls.fetch_add(1, Ordering::SeqCst);
         self.requests.lock().unwrap().push(request.clone());
-        let events = if attempt == 0 {
+        if request.purpose == ModelPurpose::Compaction {
+            self.compactions.fetch_add(1, Ordering::SeqCst);
+            return Box::pin(stream::iter(vec![Ok(ModelEvent::TextDelta {text:"Earlier records were read successfully; their detailed observations remain in storage.".into()}),Ok(ModelEvent::ResponseCompleted {finish:ModelFinish::Stop,metadata:Default::default(),continuation:vec![]})]));
+        }
+        let events = if attempt - self.compactions.load(Ordering::SeqCst)
+            < self.rounds.load(Ordering::SeqCst)
+        {
             let mut events: Vec<_> = self
                 .plans
                 .iter()
@@ -259,6 +275,8 @@ impl Fixture {
                 plans,
                 calls: AtomicUsize::new(0),
                 requests: Mutex::new(vec![]),
+                rounds: AtomicUsize::new(1),
+                compactions: AtomicUsize::new(0),
             }),
             policy: Arc::new(Policy::default()),
             tools,
@@ -321,6 +339,864 @@ struct ArtifactTool {
     inner: Arc<Tool>,
     reference: ArtifactRef,
     evidence: EvidenceRef,
+}
+struct LongRead {
+    text: String,
+    calls: AtomicUsize,
+    content: Vec<InputContent>,
+}
+impl ToolExecutor for LongRead {
+    fn execute<'a>(
+        &'a self,
+        _: &'a JsonObject,
+        _: &'a ToolExecutionContext,
+    ) -> PortFuture<'a, ToolExecutionResult> {
+        Box::pin(async move {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(ToolExecutionResult {
+                outcome: if self.content.is_empty() {
+                    ToolExecutionOutcome::Succeeded {
+                        value: json!(self.text),
+                    }
+                } else {
+                    ToolExecutionOutcome::SucceededWithContent {
+                        value: json!(self.text),
+                        content: self.content.clone(),
+                    }
+                },
+                effect: ToolEffect::NotApplied,
+                receipt: None,
+            })
+        })
+    }
+}
+struct Summary {
+    calls: AtomicUsize,
+    requests: Mutex<Vec<CompactionRequest>>,
+    bad: bool,
+}
+struct ContextAudit(AtomicUsize);
+#[tokio::test]
+async fn a_missing_compaction_route_is_rejected_before_agent_execution() {
+    let f = Fixture::new(
+        vec![("read", object(json!({"query":"small"})))],
+        Behavior::Success,
+    );
+    let (mut bindings, _) = long_bindings(&f, 32);
+    bindings.context_runtime = Some(Arc::new(
+        ContextRuntime::new(
+            scope(),
+            Arc::new(BoundedContextStrategy),
+            Some(ContextCompactor::Model(ModelCompactorConfig {
+                model_binding: id("primary"),
+                options: None,
+                max_output_tokens: 128.try_into().unwrap(),
+            })),
+            ContextRewriteLimits::default(),
+        )
+        .unwrap(),
+    ));
+    let agent = create_agent(f.profile.clone(), bindings).unwrap();
+    assert_eq!(
+        agent
+            .start(request("missing-route"), context())
+            .await
+            .unwrap_err()
+            .code,
+        ErrorCode::ModelRouteDenied
+    );
+    assert_eq!(f.model.calls.load(Ordering::SeqCst), 0);
+}
+#[tokio::test]
+async fn compaction_preserves_typed_artifact_and_evidence_anchors_from_removed_rounds() {
+    let f = Fixture::new(
+        vec![("read", object(json!({"query":"chunk"})))],
+        Behavior::Success,
+    );
+    f.model.rounds.store(3, Ordering::SeqCst);
+    let (mut bindings, _) = long_bindings(&f, 3500);
+    let artifacts = Arc::new(
+        ArtifactRuntime::new(
+            Arc::new(MemoryArtifactStore::default()),
+            bindings.policy.clone(),
+            bindings.ids.clone(),
+            ArtifactLimits::default(),
+        )
+        .unwrap(),
+    );
+    let metadata = artifacts
+        .put(
+            ArtifactInput {
+                media_type: id("text/plain"),
+                bytes: b"original evidence".to_vec(),
+                source: Some(reference("report")),
+            },
+            &context(),
+            None,
+        )
+        .await
+        .unwrap();
+    let evidence = artifacts
+        .evidence(
+            &metadata.reference,
+            id("line-1"),
+            Some("evidence".into()),
+            &context(),
+            None,
+        )
+        .await
+        .unwrap();
+    let content = vec![
+        InputContent::Artifact {
+            reference: metadata.reference.clone(),
+        },
+        InputContent::Evidence {
+            reference: evidence.clone(),
+        },
+    ];
+    let reader = Arc::new(LongRead {
+        text: "x".repeat(3500),
+        calls: AtomicUsize::new(0),
+        content: content.clone(),
+    });
+    let registered = bindings.tools.as_ref().unwrap();
+    bindings.tools = Some(Arc::new(
+        ToolRegistry::new(
+            scope(),
+            vec![
+                ToolRegistration {
+                    compiled: registered.get(&id("read")).unwrap().compiled.clone(),
+                    executor: reader,
+                },
+                registered.get(&id("write")).unwrap().clone(),
+            ],
+        )
+        .unwrap(),
+    ));
+    bindings.artifacts = Some(artifacts);
+    bindings.context_runtime = Some(Arc::new(
+        ContextRuntime::new(
+            scope(),
+            Arc::new(BoundedContextStrategy),
+            Some(ContextCompactor::Host {
+                definition: reference("summary"),
+                compressor: Arc::new(Summary {
+                    calls: AtomicUsize::new(0),
+                    requests: Mutex::new(vec![]),
+                    bad: false,
+                }),
+            }),
+            ContextRewriteLimits::default(),
+        )
+        .unwrap(),
+    ));
+    let handle = f
+        .start(&create_agent(f.profile.clone(), bindings).unwrap())
+        .await;
+    assert_eq!(
+        f.outcome(&handle).await.result.status(),
+        RunStatus::Succeeded
+    );
+    let saved = f.base.store.load(&scope(), handle.run_id()).await.unwrap();
+    let record = f
+        .base
+        .store
+        .read_record(
+            &scope(),
+            saved.snapshot.context_revision_ref.as_ref().unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        record.value()["anchors"],
+        serde_json::to_value(content).unwrap()
+    );
+    assert!(f.model.requests.lock().unwrap().last().unwrap().messages.iter().flat_map(|message|&message.content).any(|item|matches!(item,ModelContent::Json {value} if value["origin"]=="compaction"&&value["content"].as_array().is_some_and(|items|items.iter().any(|item|item["type"]=="evidence"&&item["content_hash"]==json!(evidence.content_hash))))));
+}
+struct PausedSummary {
+    entered: Notify,
+    release: tokio::sync::Semaphore,
+    calls: AtomicUsize,
+}
+impl HostContextCompactor for PausedSummary {
+    fn compact<'a>(
+        &'a self,
+        _: &'a CompactionRequest,
+        _: &'a ContextStrategyContext,
+    ) -> PortFuture<'a, String> {
+        Box::pin(async move {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.entered.notify_one();
+            self.release.acquire().await.unwrap().forget();
+            Ok("late summary".into())
+        })
+    }
+}
+#[tokio::test]
+async fn cancelled_and_timed_out_compactors_cannot_adopt_late_results() {
+    for cancel in [true, false] {
+        let f = Fixture::new(
+            vec![("read", object(json!({"query":"chunk"})))],
+            Behavior::Success,
+        );
+        f.model.rounds.store(2, Ordering::SeqCst);
+        let (mut bindings, _) = long_bindings(&f, 3500);
+        let summary = Arc::new(PausedSummary {
+            entered: Notify::new(),
+            release: tokio::sync::Semaphore::new(0),
+            calls: AtomicUsize::new(0),
+        });
+        bindings.context_runtime = Some(Arc::new(
+            ContextRuntime::new(
+                scope(),
+                Arc::new(BoundedContextStrategy),
+                Some(ContextCompactor::Host {
+                    definition: reference("paused-summary"),
+                    compressor: summary.clone(),
+                }),
+                ContextRewriteLimits {
+                    timeout_ms: if cancel { 1000 } else { 100 },
+                    ..Default::default()
+                },
+            )
+            .unwrap(),
+        ));
+        let handle = f
+            .start(&create_agent(f.profile.clone(), bindings).unwrap())
+            .await;
+        tokio::time::timeout(Duration::from_secs(3), summary.entered.notified())
+            .await
+            .unwrap();
+        if cancel {
+            handle.cancel(id("stop"), &context()).await.unwrap();
+        }
+        let outcome = f.outcome(&handle).await;
+        assert_eq!(
+            outcome.result.status(),
+            if cancel {
+                RunStatus::Cancelled
+            } else {
+                RunStatus::Failed
+            }
+        );
+        let before = f.base.store.load(&scope(), handle.run_id()).await.unwrap();
+        assert!(before.snapshot.context_revision_ref.is_none());
+        assert_eq!(f.model.calls.load(Ordering::SeqCst), 2);
+        summary.release.add_permits(1);
+        tokio::task::yield_now().await;
+        assert_eq!(
+            f.base.store.load(&scope(), handle.run_id()).await.unwrap(),
+            before
+        );
+        assert_eq!(summary.calls.load(Ordering::SeqCst), 1);
+    }
+}
+#[tokio::test]
+async fn context_commit_failure_does_not_publish_a_candidate_and_ack_loss_does_not_recompress() {
+    for acknowledge_lost in [false, true] {
+        let f = Fixture::new(
+            vec![("read", object(json!({"query":"chunk"})))],
+            Behavior::Success,
+        );
+        f.model.rounds.store(2, Ordering::SeqCst);
+        let (mut bindings, _) = long_bindings(&f, 3500);
+        let summary = Arc::new(Summary {
+            calls: AtomicUsize::new(0),
+            requests: Mutex::new(vec![]),
+            bad: false,
+        });
+        let store = Arc::new(agent_support::FinalCommitStore::new(
+            f.base.store.clone(),
+            if acknowledge_lost {
+                agent_support::FinalCommitMode::LoseContextAcknowledgement
+            } else {
+                agent_support::FinalCommitMode::RejectContext
+            },
+        ));
+        bindings.state = store.clone();
+        bindings.context_runtime = Some(Arc::new(
+            ContextRuntime::new(
+                scope(),
+                Arc::new(BoundedContextStrategy),
+                Some(ContextCompactor::Host {
+                    definition: reference("summary"),
+                    compressor: summary.clone(),
+                }),
+                ContextRewriteLimits::default(),
+            )
+            .unwrap(),
+        ));
+        let handle = f
+            .start(&create_agent(f.profile.clone(), bindings).unwrap())
+            .await;
+        let result = handle.outcome(&context()).await;
+        let saved = f.base.store.load(&scope(), handle.run_id()).await.unwrap();
+        assert_eq!(summary.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(store.context_attempts.load(Ordering::SeqCst), 1);
+        if acknowledge_lost {
+            assert_eq!(
+                completed(result.unwrap()).result.status(),
+                RunStatus::Succeeded
+            );
+            assert!(saved.snapshot.context_revision_ref.is_some());
+            assert_eq!(f.model.calls.load(Ordering::SeqCst), 3);
+        } else {
+            assert_eq!(result.unwrap_err().code, ErrorCode::PersistenceUnavailable);
+            assert!(saved.snapshot.context_revision_ref.is_none());
+            assert!(saved.snapshot.context_decisions.is_empty());
+            assert_eq!(f.model.calls.load(Ordering::SeqCst), 2);
+        }
+    }
+}
+struct PartialSelection;
+impl ContextStrategy for PartialSelection {
+    fn definition(&self) -> ContextStrategyDefinition {
+        BoundedContextStrategy.definition()
+    }
+    fn select<'a>(
+        &'a self,
+        input: &'a ContextSelectionInput,
+        _: &'a ContextStrategyContext,
+    ) -> PortFuture<'a, Vec<Id>> {
+        Box::pin(async move { Ok(vec![input.segments[0].message_ids[0].clone()]) })
+    }
+}
+#[tokio::test]
+async fn context_permission_and_partial_group_selection_fail_before_the_compressor() {
+    for denied in [true, false] {
+        let f = Fixture::new(
+            vec![("read", object(json!({"query":"chunk"})))],
+            Behavior::Success,
+        );
+        f.model.rounds.store(3, Ordering::SeqCst);
+        if denied {
+            f.policy.mode.store(5, Ordering::SeqCst);
+        }
+        let (mut bindings, _) = long_bindings(&f, 3500);
+        let summary = Arc::new(Summary {
+            calls: AtomicUsize::new(0),
+            requests: Mutex::new(vec![]),
+            bad: false,
+        });
+        bindings.context_runtime = Some(Arc::new(
+            ContextRuntime::new(
+                scope(),
+                if denied {
+                    Arc::new(BoundedContextStrategy)
+                } else {
+                    Arc::new(PartialSelection)
+                },
+                Some(ContextCompactor::Host {
+                    definition: reference("summary"),
+                    compressor: summary.clone(),
+                }),
+                ContextRewriteLimits::default(),
+            )
+            .unwrap(),
+        ));
+        let handle = f
+            .start(&create_agent(f.profile.clone(), bindings).unwrap())
+            .await;
+        assert_eq!(f.outcome(&handle).await.result.status(), RunStatus::Failed);
+        assert_eq!(summary.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(f.model.calls.load(Ordering::SeqCst), 2);
+        assert!(
+            f.base
+                .store
+                .load(&scope(), handle.run_id())
+                .await
+                .unwrap()
+                .snapshot
+                .context_revision_ref
+                .is_none()
+        );
+    }
+}
+impl HookHandler for ContextAudit {
+    fn call<'a>(&'a self, _: &'a HookInput, _: &'a HookContext) -> PortFuture<'a, HookOutput> {
+        Box::pin(async move {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(HookOutput::Context { additions: vec![] })
+        })
+    }
+}
+fn compaction_router(bindings: &mut AgentBindings) {
+    let snapshot = bindings.router.snapshot();
+    let mut policy = snapshot.policy().clone();
+    let mut rule = policy.rules[0].clone();
+    rule.purpose = ModelPurpose::Compaction;
+    policy.rules.push(rule);
+    let mut router = agent_support::Router::new();
+    router.snapshot = RoutingSnapshot::new(snapshot.catalog().clone(), policy).unwrap();
+    bindings.router = Arc::new(router);
+}
+#[tokio::test]
+async fn model_compaction_uses_the_run_budget_without_replacing_the_agent_step_or_running_agent_hooks()
+ {
+    let mut f = Fixture::new(
+        vec![("read", object(json!({"query":"chunk"})))],
+        Behavior::Success,
+    );
+    f.model.rounds.store(3, Ordering::SeqCst);
+    f.profile.limits.max_model_calls = 8.try_into().unwrap();
+    f.profile.hooks = Some(vec![HookRef::Catalog(CatalogHookRef {
+        hook_id: id("audit"),
+        version: id("1"),
+        position: HookPosition::BeforeModel,
+    })]);
+    let (mut bindings, reader) = long_bindings(&f, 3500);
+    compaction_router(&mut bindings);
+    bindings.context_runtime = Some(Arc::new(
+        ContextRuntime::new(
+            scope(),
+            Arc::new(BoundedContextStrategy),
+            Some(ContextCompactor::Model(ModelCompactorConfig {
+                model_binding: id("primary"),
+                options: None,
+                max_output_tokens: 128.try_into().unwrap(),
+            })),
+            ContextRewriteLimits::default(),
+        )
+        .unwrap(),
+    ));
+    let audit = Arc::new(ContextAudit(AtomicUsize::new(0)));
+    bindings.hooks = Some(Arc::new(HookRuntime::new(
+        bindings.state.clone(),
+        bindings.policy.clone(),
+        bindings.clock.clone(),
+        bindings.ids.clone(),
+        Arc::new(
+            HookRegistry::new(
+                scope(),
+                vec![HookRegistration {
+                    definition: HookDefinition {
+                        hook: reference("audit"),
+                        position: HookPosition::BeforeModel,
+                        priority: 0,
+                        required: true,
+                        timeout_ms: 1000,
+                        max_output_bytes: 4096,
+                    },
+                    handler: audit.clone(),
+                }],
+            )
+            .unwrap(),
+        ),
+    )));
+    let agent = create_agent(f.profile.clone(), bindings).unwrap();
+    let handle = f.start(&agent).await;
+    assert_eq!(
+        f.outcome(&handle).await.result.status(),
+        RunStatus::Succeeded
+    );
+    assert_eq!(reader.calls.load(Ordering::SeqCst), 3);
+    assert_eq!(audit.0.load(Ordering::SeqCst), 4);
+    assert_eq!(f.model.compactions.load(Ordering::SeqCst), 2);
+    let saved = f.base.store.load(&scope(), handle.run_id()).await.unwrap();
+    assert_eq!(saved.snapshot.usage.model_calls, 6);
+    let last = saved
+        .snapshot
+        .model_ledger
+        .iter()
+        .rev()
+        .find(|invocation| invocation.purpose == ModelPurpose::Agent)
+        .unwrap();
+    assert_eq!(
+        saved.snapshot.model_step_id.as_ref(),
+        Some(&last.model_step_id)
+    );
+    assert_eq!(
+        saved
+            .snapshot
+            .model_ledger
+            .iter()
+            .filter(|invocation| invocation.purpose == ModelPurpose::Compaction)
+            .count(),
+        2
+    );
+    let checkpoint = f.base.store.export_checkpoint(&scope()).unwrap();
+    StateStoreCheckpoint::from_json(
+        &serde_json::to_string(&checkpoint).unwrap(),
+        &scope(),
+        &checkpoint.digest(),
+    )
+    .unwrap();
+}
+#[tokio::test]
+async fn context_that_fits_does_not_invoke_the_configured_compressor() {
+    let f = Fixture::new(
+        vec![("read", object(json!({"query":"small"})))],
+        Behavior::Success,
+    );
+    let (mut bindings, _) = long_bindings(&f, 32);
+    let summary = Arc::new(Summary {
+        calls: AtomicUsize::new(0),
+        requests: Mutex::new(vec![]),
+        bad: false,
+    });
+    bindings.context_runtime = Some(Arc::new(
+        ContextRuntime::new(
+            scope(),
+            Arc::new(BoundedContextStrategy),
+            Some(ContextCompactor::Host {
+                definition: reference("summary"),
+                compressor: summary.clone(),
+            }),
+            ContextRewriteLimits::default(),
+        )
+        .unwrap(),
+    ));
+    let handle = f
+        .start(&create_agent(f.profile.clone(), bindings).unwrap())
+        .await;
+    assert_eq!(
+        f.outcome(&handle).await.result.status(),
+        RunStatus::Succeeded
+    );
+    assert_eq!(summary.calls.load(Ordering::SeqCst), 0);
+    assert!(
+        f.base
+            .store
+            .load(&scope(), handle.run_id())
+            .await
+            .unwrap()
+            .snapshot
+            .context_revision_ref
+            .is_none()
+    );
+}
+#[tokio::test]
+async fn exhausted_model_capacity_does_not_start_an_auxiliary_compaction() {
+    let mut f = Fixture::new(
+        vec![("read", object(json!({"query":"chunk"})))],
+        Behavior::Success,
+    );
+    f.model.rounds.store(3, Ordering::SeqCst);
+    f.profile.limits.max_model_calls = 2.try_into().unwrap();
+    let (mut bindings, _) = long_bindings(&f, 3500);
+    compaction_router(&mut bindings);
+    bindings.context_runtime = Some(Arc::new(
+        ContextRuntime::new(
+            scope(),
+            Arc::new(BoundedContextStrategy),
+            Some(ContextCompactor::Model(ModelCompactorConfig {
+                model_binding: id("primary"),
+                options: None,
+                max_output_tokens: 128.try_into().unwrap(),
+            })),
+            ContextRewriteLimits::default(),
+        )
+        .unwrap(),
+    ));
+    let handle = f
+        .start(&create_agent(f.profile.clone(), bindings).unwrap())
+        .await;
+    assert_ne!(
+        f.outcome(&handle).await.result.status(),
+        RunStatus::Succeeded
+    );
+    assert_eq!(f.model.calls.load(Ordering::SeqCst), 2);
+    assert_eq!(f.model.compactions.load(Ordering::SeqCst), 0);
+}
+impl HostContextCompactor for Summary {
+    fn compact<'a>(
+        &'a self,
+        request: &'a CompactionRequest,
+        _: &'a ContextStrategyContext,
+    ) -> PortFuture<'a, String> {
+        Box::pin(async move {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.requests.lock().unwrap().push(request.clone());
+            Ok(if self.bad {
+                "not smaller ".repeat(1000)
+            } else {
+                format!(
+                    "{} older complete groups were read; their original observations remain available.",
+                    request.segments.len()
+                )
+            })
+        })
+    }
+}
+fn long_bindings(f: &Fixture, bytes: usize) -> (AgentBindings, Arc<LongRead>) {
+    let mut bindings = f.bindings();
+    let reader = Arc::new(LongRead {
+        text: "x".repeat(bytes),
+        calls: AtomicUsize::new(0),
+        content: vec![],
+    });
+    let mut descriptor = f
+        .registry
+        .get(&id("read"))
+        .unwrap()
+        .compiled
+        .descriptor()
+        .clone();
+    descriptor.max_output_bytes = 65536.try_into().unwrap();
+    let read = ToolRegistration {
+        compiled: SchemaCompiler::new()
+            .compile(descriptor, &f.inputs)
+            .unwrap(),
+        executor: reader.clone(),
+    };
+    let write = f.registry.get(&id("write")).unwrap().clone();
+    bindings.tools = Some(Arc::new(
+        ToolRegistry::new(scope(), vec![read, write]).unwrap(),
+    ));
+    bindings.settings.projection_limits.max_bytes = 8000;
+    bindings.settings.lease_ttl_ms = 30_000;
+    bindings.settings.heartbeat_interval_ms = 5000;
+    (bindings, reader)
+}
+#[tokio::test]
+async fn bounded_context_compaction_preserves_requests_latest_round_and_original_history() {
+    let f = Fixture::new(
+        vec![("read", object(json!({"query":"chunk"})))],
+        Behavior::Success,
+    );
+    f.model.rounds.store(3, Ordering::SeqCst);
+    let (mut bindings, reader) = long_bindings(&f, 3500);
+    let summary = Arc::new(Summary {
+        calls: AtomicUsize::new(0),
+        requests: Mutex::new(vec![]),
+        bad: false,
+    });
+    bindings.context_runtime = Some(Arc::new(
+        ContextRuntime::new(
+            scope(),
+            Arc::new(BoundedContextStrategy),
+            Some(ContextCompactor::Host {
+                definition: reference("summary"),
+                compressor: summary.clone(),
+            }),
+            ContextRewriteLimits::default(),
+        )
+        .unwrap(),
+    ));
+    let agent = create_agent(f.profile.clone(), bindings).unwrap();
+    let handle = f.start(&agent).await;
+    assert_eq!(
+        f.outcome(&handle).await.result.status(),
+        RunStatus::Succeeded
+    );
+    assert_eq!(reader.calls.load(Ordering::SeqCst), 3);
+    assert_eq!(f.model.calls.load(Ordering::SeqCst), 4);
+    assert!(summary.calls.load(Ordering::SeqCst) > 0);
+    let saved = f.base.store.load(&scope(), handle.run_id()).await.unwrap();
+    assert_eq!(saved.messages.len(), 8);
+    let reference = saved.snapshot.context_revision_ref.as_ref().unwrap();
+    assert_eq!(saved.session.context_revision_ref.as_ref(), Some(reference));
+    let plan_record = f
+        .base
+        .store
+        .read_record(&scope(), saved.snapshot.context_plan_ref.as_ref().unwrap())
+        .await
+        .unwrap();
+    let plan = ContextPlan::restore(&plan_record, &saved.snapshot.profile).unwrap();
+    let record = f.base.store.read_record(&scope(), reference).await.unwrap();
+    let revision =
+        ContextRevision::restore(&record, &plan, &scope(), &id("session"), &saved.messages)
+            .unwrap();
+    assert!(revision.covered_message_ids().iter().all(|id| {
+        saved
+            .messages
+            .iter()
+            .any(|message| &message.message_id == id && message.role != MessageRole::User)
+    }));
+    {
+        let requests = f.model.requests.lock().unwrap();
+        let latest = requests.last().unwrap();
+        assert_eq!(observations(latest).len(), 1);
+        let summary_position=latest.messages.iter().position(|message|message.content.iter().any(|content|matches!(content,ModelContent::Json {value} if value["origin"]=="compaction"))).unwrap();
+        let user_position = latest
+            .messages
+            .iter()
+            .position(|message| {
+                message.role == ModelRole::User
+                    && message
+                        .content
+                        .iter()
+                        .any(|content| matches!(content, ModelContent::Text { .. }))
+            })
+            .unwrap();
+        let result_position = latest
+            .messages
+            .iter()
+            .rposition(|message| message.role == ModelRole::Tool)
+            .unwrap();
+        assert!(summary_position < user_position && user_position < result_position);
+        assert!(latest.messages.iter().flat_map(|message|&message.content).any(|content|matches!(content,ModelContent::Json{value} if value["origin"]=="compaction")));
+    }
+
+    let checkpoint = f.base.store.export_checkpoint(&scope()).unwrap();
+    StateStoreCheckpoint::from_json(
+        &serde_json::to_string(&checkpoint).unwrap(),
+        &scope(),
+        &checkpoint.digest(),
+    )
+    .unwrap();
+    let calls = summary.calls.load(Ordering::SeqCst);
+    let replay = f.start(&agent).await;
+    f.outcome(&replay).await;
+    assert_eq!(summary.calls.load(Ordering::SeqCst), calls);
+    let mut next = context();
+    next.data.system_inputs = Some(SystemInputs::new(object(json!({"workspace_id":WORKSPACE}))));
+    let next = completed(agent.start(request("next-run"), next).await.unwrap());
+    f.outcome(&next).await;
+    assert_eq!(
+        f.base
+            .store
+            .load(&scope(), next.run_id())
+            .await
+            .unwrap()
+            .snapshot
+            .context_revision_ref
+            .as_ref(),
+        Some(reference)
+    );
+    assert_eq!(summary.calls.load(Ordering::SeqCst), calls);
+    let mut corrupted =
+        serde_json::to_value(f.base.store.export_checkpoint(&scope()).unwrap()).unwrap();
+    let parent = record.value()["parent"].clone();
+    corrupted["sessions"][0]["snapshot"]["context_revision_ref"] = parent.clone();
+    for run in corrupted["runs"].as_array_mut().unwrap() {
+        run["snapshot"]["context_revision_ref"] = parent.clone();
+    }
+    if parent.is_null() {
+        corrupted["sessions"][0]["snapshot"]
+            .as_object_mut()
+            .unwrap()
+            .remove("context_revision_ref");
+        for run in corrupted["runs"].as_array_mut().unwrap() {
+            run["snapshot"]
+                .as_object_mut()
+                .unwrap()
+                .remove("context_revision_ref");
+        }
+    }
+    assert!(
+        StateStoreCheckpoint::from_json(
+            &corrupted.to_string(),
+            &scope(),
+            &canonical_digest(&corrupted)
+        )
+        .is_err()
+    );
+    let mut changed = record.value().clone();
+    changed["covered_message_ids"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!(saved.messages[0].message_id));
+    let changed = ProtectedRecord::new(reference.record_id.clone(), reference.revision, changed);
+    assert_eq!(
+        ContextRevision::restore(&changed, &plan, &scope(), &id("session"), &saved.messages)
+            .unwrap_err()
+            .code,
+        ErrorCode::InvalidContextSelection
+    );
+}
+#[tokio::test]
+async fn context_rejection_keeps_original_history_and_does_not_repeat_the_compressor() {
+    let f = Fixture::new(
+        vec![("read", object(json!({"query":"chunk"})))],
+        Behavior::Success,
+    );
+    f.model.rounds.store(3, Ordering::SeqCst);
+    let (mut bindings, reader) = long_bindings(&f, 3500);
+    let summary = Arc::new(Summary {
+        calls: AtomicUsize::new(0),
+        requests: Mutex::new(vec![]),
+        bad: true,
+    });
+    bindings.context_runtime = Some(Arc::new(
+        ContextRuntime::new(
+            scope(),
+            Arc::new(BoundedContextStrategy),
+            Some(ContextCompactor::Host {
+                definition: reference("summary"),
+                compressor: summary.clone(),
+            }),
+            ContextRewriteLimits::default(),
+        )
+        .unwrap(),
+    ));
+    let agent = create_agent(f.profile.clone(), bindings).unwrap();
+    let handle = f.start(&agent).await;
+    let outcome = f.outcome(&handle).await;
+    assert_eq!(outcome.result.status(), RunStatus::Failed);
+    assert!(outcome.output.is_empty());
+    assert_eq!(summary.calls.load(Ordering::SeqCst), 1);
+    let saved = f.base.store.load(&scope(), handle.run_id()).await.unwrap();
+    assert!(saved.snapshot.context_revision_ref.is_none());
+    assert_eq!(saved.snapshot.context_decisions.len(), 1);
+    assert_eq!(reader.calls.load(Ordering::SeqCst), 2);
+    let replay = f.start(&agent).await;
+    assert_eq!(f.outcome(&replay).await, outcome);
+    assert_eq!(summary.calls.load(Ordering::SeqCst), 1);
+}
+#[tokio::test]
+async fn context_preview_keeps_the_original_latest_tool_result_without_a_model_compression_call() {
+    let f = Fixture::new(
+        vec![("read", object(json!({"query":"chunk"})))],
+        Behavior::Success,
+    );
+    let (mut bindings, reader) = long_bindings(&f, 20000);
+    let artifacts = Arc::new(
+        ArtifactRuntime::new(
+            Arc::new(MemoryArtifactStore::default()),
+            bindings.policy.clone(),
+            bindings.ids.clone(),
+            ArtifactLimits::default(),
+        )
+        .unwrap(),
+    );
+    bindings.artifacts = Some(artifacts.clone());
+    let agent = create_agent(f.profile.clone(), bindings).unwrap();
+    let handle = f.start(&agent).await;
+    assert_eq!(
+        f.outcome(&handle).await.result.status(),
+        RunStatus::Succeeded
+    );
+    let saved = f.base.store.load(&scope(), handle.run_id()).await.unwrap();
+    let reference = saved.snapshot.context_revision_ref.as_ref().unwrap();
+    let plan = ContextPlan::restore(
+        &f.base
+            .store
+            .read_record(&scope(), saved.snapshot.context_plan_ref.as_ref().unwrap())
+            .await
+            .unwrap(),
+        &saved.snapshot.profile,
+    )
+    .unwrap();
+    let revision = ContextRevision::restore(
+        &f.base.store.read_record(&scope(), reference).await.unwrap(),
+        &plan,
+        &scope(),
+        &id("session"),
+        &saved.messages,
+    )
+    .unwrap();
+    assert!(revision.summary().is_none());
+    assert_eq!(revision.previews().len(), 1);
+    assert_eq!(f.model.calls.load(Ordering::SeqCst), 2);
+    assert_eq!(reader.calls.load(Ordering::SeqCst), 1);
+    let data = artifacts
+        .get(&revision.previews()[0].preview.reference, &context(), None)
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::from_slice::<Value>(&data.bytes).unwrap(),
+        json!(reader.text)
+    );
+    let ToolCallState::Settled { result } = &saved.snapshot.tool_ledger[0].state else {
+        panic!("settled read")
+    };
+    assert_eq!(
+        result.content,
+        vec![InputContent::Json {
+            value: json!(reader.text)
+        }]
+    );
 }
 struct RejectArtifactPut(AtomicUsize);
 impl ArtifactStore for RejectArtifactPut {

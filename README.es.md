@@ -17,3 +17,5 @@ Su diseño utiliza perfiles de agente (Agent Profiles) para configurar el compor
 Las [fuentes de contexto](docs/context-sources.md) de solo lectura permiten consultar por Run o paso del modelo, guardar lotes y comprobar los permisos actuales al reutilizarlos.
 
 [Skills](docs/skills.md) carga instrucciones completas de una versión fija mediante una herramienta registrada. [Artifacts](docs/artifacts.md) conserva originales por ámbito, vistas previas limitadas y referencias de origen.
+
+La [selección y compresión de contexto](docs/context-compaction.md) conserva la conversación original y aplica vistas previas limitadas y resúmenes validados. La compresión con modelos utiliza el mismo presupuesto del Run.

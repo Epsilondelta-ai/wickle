@@ -17,3 +17,5 @@ Wickle 是 EpsilonDelta 正在使用 Rust 开发的智能体引擎，旨在以�
 只读 [ContextSource](docs/context-sources.md) 支持按 Run 或模型步骤查询、保存数据批次，并在复用时重新检查当前访问权限。
 
 [Skills](docs/skills.md) 通过已注册工具加载固定版本的完整指令。[Artifacts](docs/artifacts.md) 保存按 scope 隔离的原文、有大小限制的预览及来源依据。
+
+[上下文选择与压缩](docs/context-compaction.md) 保留原始对话，并应用有大小限制的预览和经过验证的摘要。模型压缩也使用同一 Run 的预算。

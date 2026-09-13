@@ -414,8 +414,10 @@ impl ModelExchange {
             .last_event_seq
             .checked_add(1)
             .ok_or_else(revision_error)?;
-        snapshot.phase = RunPhase::Model;
-        snapshot.model_step_id = Some(invocation.model_step_id.clone());
+        if invocation.purpose == crate::ModelPurpose::Agent {
+            snapshot.phase = RunPhase::Model;
+            snapshot.model_step_id = Some(invocation.model_step_id.clone());
+        }
         snapshot.usage.elapsed_ms = elapsed;
         snapshot.timing.last_observed_at_ms = now;
         let record = ProtectedRecord::new(

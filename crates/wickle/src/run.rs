@@ -575,6 +575,13 @@ pub struct SessionSnapshot {
     pub prompt_snapshot: RecordRef,
     /// Current transcript revision.
     pub transcript_revision: u64,
+    /// Latest validated cumulative context view; the original transcript is retained.
+    #[serde(
+        default,
+        deserialize_with = "optional",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub context_revision_ref: Option<RecordRef>,
     /// One active running/waiting run, or omission when none exists.
     #[serde(
         default,
@@ -668,6 +675,23 @@ pub struct RunSnapshot {
         skip_serializing_if = "Option::is_none"
     )]
     pub skill_plan_ref: Option<RecordRef>,
+    /// Context strategy, compressor and bounds pinned for this Run.
+    #[serde(
+        default,
+        deserialize_with = "optional",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub context_plan_ref: Option<RecordRef>,
+    /// Latest cumulative view inherited from or committed to the owning session.
+    #[serde(
+        default,
+        deserialize_with = "optional",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub context_revision_ref: Option<RecordRef>,
+    /// Completed compression decisions, including rejected inputs that must not repeat.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub context_decisions: Vec<RecordRef>,
     /// Physical model attempt records.
     pub model_ledger: Vec<ModelInvocationRecord>,
     /// Saved tool plans and states.
@@ -895,6 +919,11 @@ impl RunSnapshot {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", deny_unknown_fields)]
 pub enum RunEventPayload {
+    /// A separately stored context view was adopted; original messages were not changed.
+    ContextRewritten {
+        /// Exact protected cumulative revision.
+        revision_ref: RecordRef,
+    },
     /// Admission committed.
     #[serde(rename = "run.started")]
     RunStarted {

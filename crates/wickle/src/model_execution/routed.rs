@@ -316,19 +316,19 @@ impl ModelExchange {
             } else {
                 VersionPolicy::AllowMutable
             };
-            let result = self
-                .generate_inner(
-                    &prepared.request,
-                    context,
-                    budget,
-                    Some((&selection, version_policy)),
-                    Some(ContextUseGate {
-                        projector,
-                        selection: &selection,
-                        input,
-                    }),
-                )
-                .await;
+            // Keep nested auxiliary exchanges within the default executor stack budget.
+            let result = Box::pin(self.generate_inner(
+                &prepared.request,
+                context,
+                budget,
+                Some((&selection, version_policy)),
+                Some(ContextUseGate {
+                    projector,
+                    selection: &selection,
+                    input,
+                }),
+            ))
+            .await;
             let cause = match result {
                 Ok(Guarded::Completed(ModelExchangeOutcome::Failed { failure: ref error })) => {
                     error.kind

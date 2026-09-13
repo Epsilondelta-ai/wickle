@@ -328,6 +328,7 @@ fn restore_graph(data: CheckpointData) -> Result<StateStoreCheckpoint, ContractE
     let empty = BTreeMap::new();
     let mut message_ids = BTreeSet::new();
     for session in state.sessions.values() {
+        super::context_state::validate_session(&state, session)?;
         record_value(&state, &empty, &session.snapshot.prompt_snapshot)?;
         let active: Vec<_> = state
             .runs
@@ -419,6 +420,7 @@ fn validate_history(
     run: &RunState,
     event_ids: &mut BTreeSet<Id>,
 ) -> Result<(), ContractError> {
+    super::context_state::validate_history(state, &run.snapshot, &run.events)?;
     let empty = BTreeMap::new();
     let mut sequence = 0_u64;
     let mut started = 0;
@@ -438,6 +440,13 @@ fn validate_history(
             return Err(invalid("checkpoint.event_identity"));
         }
         match &event.payload {
+            RunEventPayload::ContextRewritten { revision_ref } => {
+                let revision =
+                    super::context_state::revision(state, &empty, revision_ref, &run.snapshot)?;
+                if revision.run_id != run.snapshot.run_id {
+                    return Err(invalid("checkpoint.context_event"));
+                }
+            }
             RunEventPayload::RunStarted {
                 request_ref,
                 profile_digest,

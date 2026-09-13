@@ -158,6 +158,15 @@ impl<'de> Deserialize<'de> for StrictJson {
 /// `1.0`, and `0` and `-0.0`, remain distinct. Use [`canonical_digest_json`] when
 /// reading text so duplicate keys and nonfinite numbers are rejected first.
 pub fn canonical_digest(value: &Value) -> JsonDigest {
+    let bytes = canonical_json_bytes(value);
+    let hex: String = Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    JsonDigest(format!("sorted-json-v1:sha256:{hex}"))
+}
+
+pub(crate) fn canonical_json_bytes(value: &Value) -> Vec<u8> {
     fn ordered(value: &Value) -> Value {
         match value {
             Value::Object(map) => {
@@ -172,13 +181,7 @@ pub fn canonical_digest(value: &Value) -> JsonDigest {
             other => other.clone(),
         }
     }
-    let bytes =
-        serde_json::to_vec(&ordered(value)).expect("JSON values serialize into a byte vector");
-    let hex: String = Sha256::digest(bytes)
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect();
-    JsonDigest(format!("sorted-json-v1:sha256:{hex}"))
+    serde_json::to_vec(&ordered(value)).expect("JSON values serialize into a byte vector")
 }
 
 /// Parse strict JSON and compute its versioned digest.

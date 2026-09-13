@@ -78,7 +78,10 @@ pub(super) fn validate_hook_snapshot(
             .filter(|application| &application.target == target)
             .count()
     };
-    if snapshot.usage.model_calls > 0
+    if snapshot
+        .model_ledger
+        .iter()
+        .any(|invocation| invocation.purpose == crate::ModelPurpose::Agent)
         && applied(&HookTarget::BeforeRun) != expected(HookPosition::BeforeRun)
     {
         return Err(error(
@@ -86,7 +89,11 @@ pub(super) fn validate_hook_snapshot(
             "hooks.before_run_incomplete",
         ));
     }
-    for invocation in &snapshot.model_ledger {
+    for invocation in snapshot
+        .model_ledger
+        .iter()
+        .filter(|invocation| invocation.purpose == crate::ModelPurpose::Agent)
+    {
         if applied(&HookTarget::BeforeModel {
             model_step_id: invocation.model_step_id.clone(),
         }) != expected(HookPosition::BeforeModel)

@@ -613,7 +613,7 @@ fn agent(
                 hooks: None,
                 components: Some(runtime),
                 context_sources: None,
-                context_token_estimator: None, skills: None, artifacts: None,
+                context_token_estimator: None, context_runtime: None, skills: None, artifacts: None,
                 system_input_resolver: Some(resolver),
                 external_receipt_verifier: None,
                 clock,

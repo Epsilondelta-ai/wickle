@@ -444,6 +444,8 @@ pub enum FinalCommitMode {
     LoseAcknowledgement,
     Pause,
     PauseEmptyEventPage,
+    RejectContext,
+    LoseContextAcknowledgement,
 }
 pub struct FinalCommitStore {
     pub inner: Arc<MemoryStateStore>,
@@ -451,6 +453,7 @@ pub struct FinalCommitStore {
     pub final_entered: Notify,
     pub release: Semaphore,
     pub final_attempts: AtomicUsize,
+    pub context_attempts: AtomicUsize,
     pub empty_page_entered: Notify,
     pub empty_page_release: Semaphore,
     paused_empty_page: AtomicBool,
@@ -465,6 +468,7 @@ impl FinalCommitStore {
             final_entered: Notify::new(),
             release: Semaphore::new(0),
             final_attempts: AtomicUsize::new(0),
+            context_attempts: AtomicUsize::new(0),
             empty_page_entered: Notify::new(),
             empty_page_release: Semaphore::new(0),
             paused_empty_page: AtomicBool::new(false),
@@ -593,6 +597,21 @@ impl StateStore for FinalCommitStore {
         input: CommitInput,
     ) -> PortFuture<'a, StoredRun> {
         Box::pin(async move {
+            if matches!(
+                self.mode,
+                FinalCommitMode::RejectContext | FinalCommitMode::LoseContextAcknowledgement
+            ) && self.inner.load(s, r).await?.snapshot.context_revision_ref
+                != input.snapshot.context_revision_ref
+            {
+                self.context_attempts.fetch_add(1, Ordering::SeqCst);
+                if matches!(self.mode, FinalCommitMode::LoseContextAcknowledgement) {
+                    self.inner.commit(s, r, input).await?;
+                }
+                return Err(ContractError::new(
+                    ErrorCode::PersistenceUnavailable,
+                    "context.commit",
+                ));
+            }
             if !input.snapshot.status.is_terminal() {
                 return self.inner.commit(s, r, input).await;
             }
@@ -614,7 +633,10 @@ impl StateStore for FinalCommitStore {
                     self.release.acquire().await.unwrap().forget();
                     self.inner.commit(s, r, input).await
                 }
-                FinalCommitMode::PauseEmptyEventPage | FinalCommitMode::PassThrough => {
+                FinalCommitMode::PauseEmptyEventPage
+                | FinalCommitMode::PassThrough
+                | FinalCommitMode::RejectContext
+                | FinalCommitMode::LoseContextAcknowledgement => {
                     self.inner.commit(s, r, input).await
                 }
             }
@@ -663,6 +685,7 @@ impl Fixture {
             components: None,
             context_sources: None,
             context_token_estimator: None,
+            context_runtime: None,
             skills: None,
             artifacts: None,
             hooks: None,
