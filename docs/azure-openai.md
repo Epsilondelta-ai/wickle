@@ -79,8 +79,11 @@ counts are recorded as returned; an unreported separate version remains absent.
 The OpenAI and Azure adapters share `wickle-model-responses` for text/JSON,
 function calls/results, strict-schema output, bounded SSE parsing, and route-bound
 opaque replay. Azure retains its own resource validation, credentials, transport,
-and metadata inspection. The shared codec does not imply identical model features;
-model and binding option schemas must describe each deployment's supported options.
+and metadata inspection. The [xAI adapter](xai.md) also uses this codec, with
+separate reasoning-item validation, replay identity, and usage decoding. OpenAI
+and Azure retain their original validation mode. The shared codec does not imply
+identical model features; model and binding option schemas must describe each
+deployment's supported options.
 The adapter explicitly maps `reasoning_effort`, `temperature`, `top_p` and
 `verbosity`, and rejects arbitrary option/body overrides. Native provider tools,
 stored conversation state, automatic truncation and incomplete executable Tool
