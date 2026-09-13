@@ -643,6 +643,22 @@ impl Agent {
             (None, _) if saved.snapshot.profile.profile().skills.is_empty() => {}
             _ => return Err(fail(ErrorCode::ContextMismatch, "agent.pinned_skills")),
         }
+        if let Some(reference) = &saved.snapshot.context_plan_ref {
+            let record = bindings
+                .state
+                .read_record(&bindings.scope, reference)
+                .await?;
+            let plan = ContextPlan::restore(&record, &saved.snapshot.profile)?;
+            if plan.digest()
+                != self
+                    .inner
+                    .context
+                    .plan(saved.snapshot.profile.profile(), &bindings.scope)?
+                    .digest()
+            {
+                return Err(fail(ErrorCode::ContextMismatch, "agent.pinned_context"));
+            }
+        }
         Ok(prompt)
     }
     async fn resume_bound(

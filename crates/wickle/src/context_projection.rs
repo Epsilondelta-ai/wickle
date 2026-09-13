@@ -373,6 +373,8 @@ fn non_model_components(profile: &ResolvedProfile) -> Vec<ResolvedComponent> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ContextOrigin {
+    /// Validated summary of stored conversation, never a System instruction.
+    Compaction,
     /// Additional user-provided context, distinct from the preserved original request.
     User,
     /// Data associated with a selected pinned skill; no loader runs here.
@@ -523,6 +525,7 @@ pub struct ProjectionLimits {
 
 /// Read-only projection inputs. Transcript must come from a trusted, scoped session
 /// store; Message alone cannot authenticate its owner or prove history completeness.
+#[derive(Clone)]
 pub struct ProjectionInput<'a> {
     /// Original resolved profile of this run; never re-resolve it during resume.
     pub profile: &'a ResolvedProfile,
@@ -701,6 +704,12 @@ impl ContextAssembler {
         let make_request = |selected_groups: &BTreeSet<usize>,
                             selected_context: &BTreeSet<usize>| {
             let mut messages = snapshot.prefix();
+            // Historical summaries precede the retained conversation and current request.
+            for index in selected_context {
+                if input.context_items[*index].origin == ContextOrigin::Compaction {
+                    messages.push(context[*index].as_ref().expect("active summary").clone());
+                }
+            }
             for index in selected_groups {
                 messages.extend(
                     groups[*index]
@@ -710,7 +719,9 @@ impl ContextAssembler {
                 );
             }
             for index in selected_context {
-                messages.push(context[*index].as_ref().expect("active context").clone());
+                if input.context_items[*index].origin != ContextOrigin::Compaction {
+                    messages.push(context[*index].as_ref().expect("active context").clone());
+                }
             }
             ModelRequest {
                 request_id: input.request_id.clone(),
@@ -1075,7 +1086,7 @@ fn safe_content(content: &InputContent, scope: &Scope) -> Result<ModelContent, C
     }
 }
 
-fn safe_value(content: &InputContent, scope: &Scope) -> Result<Value, ContractError> {
+pub(crate) fn safe_value(content: &InputContent, scope: &Scope) -> Result<Value, ContractError> {
     Ok(match content {
         InputContent::Text { text } => json!({"type":"text","text":text}),
         InputContent::Json { value } => json!({"type":"json","value":value}),

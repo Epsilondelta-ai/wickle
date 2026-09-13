@@ -161,6 +161,13 @@ pub enum PolicyAction {
     ReadRecord {},
     /// Use scoped data in model context.
     UseContext {},
+    /// Rewrite only an authorized conversation projection, never the original transcript.
+    RewriteContext {
+        /// Exact read-only strategy identity.
+        strategy: VersionedRef,
+        /// Model destination for the resulting context.
+        route: Box<crate::ResolvedModelRoute>,
+    },
     /// Read one explicitly selected automatic context source.
     ProvideContext {
         /// Catalog or adapter export selection.

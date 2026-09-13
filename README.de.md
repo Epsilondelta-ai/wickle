@@ -17,3 +17,5 @@ Der Entwurf verwendet Agentenprofile (Agent Profiles) zur Konfiguration des Agen
 Schreibgeschützte [Kontextquellen](docs/context-sources.md) unterstützen Abrufe pro Run oder Modellschritt, gespeicherte Datenpakete und die Prüfung aktueller Zugriffsrechte bei erneuter Nutzung.
 
 [Skills](docs/skills.md) lädt vollständige Anweisungen einer festgelegten Version über registrierte Tools. [Artifacts](docs/artifacts.md) bewahrt Originale innerhalb ihres Geltungsbereichs, begrenzte Vorschauen und Quellenbelege auf.
+
+Die [Kontextauswahl und -komprimierung](docs/context-compaction.md) bewahrt den ursprünglichen Gesprächsverlauf und verwendet begrenzte Vorschauen sowie geprüfte Zusammenfassungen. Modellbasierte Komprimierung nutzt dasselbe Run-Budget.

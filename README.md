@@ -17,3 +17,5 @@ Its design uses Agent Profiles to configure agent behavior and adapters to conne
 Read-only [context sources](docs/context-sources.md) support Run and model-step collection, saved batches, and current access checks on reuse.
 
 [Skills](docs/skills.md) load complete, versioned instructions through a registered Tool. [Artifacts](docs/artifacts.md) preserve scoped originals, bounded previews, and source evidence.
+
+[Context rewriting](docs/context-compaction.md) preserves the original conversation while applying bounded previews and validated summaries. Model-based compression shares the Run budget.

@@ -135,6 +135,7 @@ impl PolicyGate {
         self.guard(&request, context, deadline, None, || async {
             let event_type = match &event.payload {
                 RunEventPayload::RunStarted { .. } => "run.started",
+                RunEventPayload::ContextRewritten { .. } => "context.rewritten",
                 RunEventPayload::ToolPlanned { .. } => "tool.planned",
                 RunEventPayload::ToolSettled { .. } => "tool.settled",
                 RunEventPayload::ToolUnresolved { .. } => "tool.unresolved",

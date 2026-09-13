@@ -17,3 +17,5 @@ Agent Profile로 에이전트의 동작을 구성하고, 어댑터를 통해 다
 읽기 전용 [ContextSource](docs/context-sources.md)는 Run·모델 단계별 조회, 자료 묶음 저장, 재사용 시 현재 접근 권한 검사를 지원합니다.
 
 [Skills](docs/skills.md)는 등록된 도구를 통해 고정 버전의 지침 전체를 로드합니다. [Artifacts](docs/artifacts.md)는 scope가 적용된 원문, 제한된 preview와 원천 근거를 보존합니다.
+
+[문맥 선택·압축](docs/context-compaction.md)은 원본 대화를 보존하면서 제한된 preview와 검증된 요약을 적용합니다. 모델 기반 압축도 같은 Run 예산을 사용합니다.

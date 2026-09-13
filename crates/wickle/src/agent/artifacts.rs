@@ -19,6 +19,7 @@ pub(super) fn produced(snapshot: &RunSnapshot) -> Vec<ArtifactRef> {
 pub(super) fn selected(
     request: &ModelRequest,
     saved: &StoredRun,
+    extra: &[ArtifactRef],
 ) -> Result<Vec<ArtifactRef>, ContractError> {
     let mut known = vec![];
     for message in &saved.messages {
@@ -35,6 +36,7 @@ pub(super) fn selected(
             }
         }
     }
+    known.extend(extra.iter());
     let mut selected: Vec<ArtifactRef> = vec![];
     for message in &request.messages {
         for content in &message.content {

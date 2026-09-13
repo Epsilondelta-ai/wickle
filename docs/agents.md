@@ -40,6 +40,7 @@ instructions, `SystemInputRegistry`, optional `ToolRegistry`,
 `SystemInputResolver`, `ExternalReceiptVerifier`, `HookRuntime`, optional
 `ComponentRuntime`, optional `ContextSourceRuntime` and context token estimator,
 optional `SkillRuntime` and `ArtifactRuntime`,
+optional `ContextRuntime` for context selection and compression,
 clock, ID source, model token
 estimator, and `AgentSettings`.
 A single Agent instance owns one scope; use separately configured instances for
@@ -58,7 +59,8 @@ polling. Run-wide model, tool, recovery, and elapsed limits come from the profil
 
 The driver supports text instructions, text output, the bounded context strategy,
 registered catalog tools, lifecycle Hooks and context sources, adapter
-Tool/Hook/ContextSource exports, versioned Skill loading, artifact references, and
+Tool/Hook/ContextSource exports, versioned Skill loading, artifact references,
+bounded context previews and compression, and
 `turn_end` completion. Profile instruction-asset loading and verified
 completion are not connected to this driver. Profiles requiring these components
 are rejected explicitly.
@@ -83,6 +85,11 @@ is checked before local Hooks receive the data and before each physical model
 attempt. Set `context_token_estimator` when component mode selects sources.
 
 ## Register tools and separate their inputs
+
+[Context rewriting](context-compaction.md) preserves original messages and stores a
+separate session revision. A configured compressor is used only when bounded
+selection and available previews cannot fit the input. Model-based compression
+uses the same Run budget and an explicit Compaction routing rule.
 
 Use [Skills](skills.md) to advertise fixed instruction listings and load complete
 bodies through a registered Tool. [Artifacts](artifacts.md) hold original bytes

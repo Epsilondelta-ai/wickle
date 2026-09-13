@@ -150,6 +150,8 @@ pub struct AgentBindings {
     pub skills: Option<Arc<SkillRuntime>>,
     /// Scoped artifact access for Tool results and model-visible references.
     pub artifacts: Option<Arc<ArtifactRuntime>>,
+    /// Optional bounded selector/compressor; omission uses bounded selection and previews only.
+    pub context_runtime: Option<Arc<ContextRuntime>>,
     /// Time source and timers.
     pub clock: Arc<dyn Clock>,
     /// New internal run/message/event identities, never business foreign keys.
@@ -168,6 +170,7 @@ pub struct Agent {
 struct Inner {
     profile: AgentProfile,
     bindings: AgentBindings,
+    context: Arc<ContextRuntime>,
     runs: Mutex<BTreeMap<Id, Arc<LocalRun>>>,
 }
 struct LocalRun {
@@ -223,10 +226,14 @@ pub fn create_agent(
             && (!profile.connectors.is_empty()
                 || profile.adapters.as_ref().is_some_and(|v| !v.is_empty())))
         || profile.extensions.as_ref().is_some_and(|v| !v.is_empty())
-        || profile.context_policy.strategy.as_str() != "bounded"
     {
         return Err(fail(ErrorCode::CapabilityUnsupported, "agent.profile"));
     }
+    let context = match &bindings.context_runtime {
+        Some(context) => context.clone(),
+        None => Arc::new(ContextRuntime::bounded(bindings.scope.clone())?),
+    };
+    context.plan(&profile, &bindings.scope)?;
     if bindings
         .skills
         .as_ref()
@@ -306,6 +313,7 @@ pub fn create_agent(
         inner: Arc::new(Inner {
             profile,
             bindings,
+            context,
             runs: Mutex::new(BTreeMap::new()),
         }),
     })

@@ -20,6 +20,7 @@ mod component_runtime;
 mod context;
 mod context_projection;
 mod context_source;
+mod context_strategy;
 mod error;
 mod hooks;
 mod input_binding;
@@ -69,6 +70,12 @@ pub use context_source::{
     ContextSourceDefinition, ContextSourcePlan, ContextSourceRegistration, ContextSourceRegistry,
     ContextSourceRuntime, ContextSourceUsage, ContextTokenEstimator, ContextUseRequest,
     PlannedContextSource, ResolvedSourceBinding,
+};
+pub use context_strategy::{
+    BoundedContextStrategy, CompactionRequest, ContextCompactor, ContextDecision, ContextPlan,
+    ContextPreview, ContextRevision, ContextRewriteLimits, ContextRuntime, ContextSegment,
+    ContextSelectionInput, ContextStrategy, ContextStrategyContext, ContextStrategyDefinition,
+    HostContextCompactor, ModelCompactorConfig,
 };
 pub use hooks::{
     HookApplication, HookApplicationRecord, HookContext, HookContextAddition, HookDefinition,

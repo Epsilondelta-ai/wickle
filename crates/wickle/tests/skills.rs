@@ -383,6 +383,64 @@ async fn revoked_skill_access_stops_before_the_next_model_even_with_a_saved_body
 }
 
 struct Audit(Mutex<Vec<Vec<ContextOrigin>>>);
+struct CompactHistory(AtomicUsize);
+impl HostContextCompactor for CompactHistory {
+    fn compact<'a>(
+        &'a self,
+        _: &'a CompactionRequest,
+        _: &'a ContextStrategyContext,
+    ) -> PortFuture<'a, String> {
+        Box::pin(async move {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(
+                "The calculation Skill was loaded. Continue using its registered instructions."
+                    .into(),
+            )
+        })
+    }
+}
+#[tokio::test]
+async fn compaction_keeps_loaded_skill_instructions_after_loader_rounds_are_summarized() {
+    let mut f = Fixture::new(false);
+    f.model.loads_before_final.store(6, Ordering::SeqCst);
+    f.profile.limits.max_model_calls = 8.try_into().unwrap();
+    f.profile.limits.max_tool_attempts = 6;
+    let mut bindings = f.bindings();
+    bindings.settings.projection_limits.max_bytes = 4000;
+    let summary = Arc::new(CompactHistory(AtomicUsize::new(0)));
+    bindings.context_runtime = Some(Arc::new(
+        ContextRuntime::new(
+            scope(),
+            Arc::new(BoundedContextStrategy),
+            Some(ContextCompactor::Host {
+                definition: reference("summary"),
+                compressor: summary.clone(),
+            }),
+            ContextRewriteLimits::default(),
+        )
+        .unwrap(),
+    ));
+    let agent = create_agent(f.profile.clone(), bindings).unwrap();
+    let handle = completed(agent.start(request("first"), context()).await.unwrap());
+    assert_eq!(
+        f.outcome(&handle).await.output,
+        vec![InputContent::Text { text: "42".into() }]
+    );
+    assert_eq!(f.resolver.loads.load(Ordering::SeqCst), 1);
+    assert!(summary.0.load(Ordering::SeqCst) > 0);
+    let saved = f.base.store.load(&scope(), handle.run_id()).await.unwrap();
+    assert!(saved.snapshot.context_revision_ref.is_some());
+    assert!(saved.snapshot.tool_ledger.iter().all(
+        |entry| matches!(&entry.state,ToolCallState::Settled {result} if result.skill_ref.is_some())
+    ));
+    let checkpoint = f.base.store.export_checkpoint(&scope()).unwrap();
+    StateStoreCheckpoint::from_json(
+        &serde_json::to_string(&checkpoint).unwrap(),
+        &scope(),
+        &checkpoint.digest(),
+    )
+    .unwrap();
+}
 #[tokio::test]
 async fn a_large_skill_configuration_cannot_bypass_the_loader_output_bound() {
     let mut f = Fixture::new(false);

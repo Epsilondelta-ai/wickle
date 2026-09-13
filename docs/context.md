@@ -108,3 +108,9 @@ Tool result. An expired or inapplicable context item is reported as dropped.
 The [context consumer](../tests/support/context_consumer.rs) exercises two Runs in
 one MemoryStateStore session, protected prompt restoration, rejection of a changed
 prompt, and exclusion of internal execution data.
+
+The Agent can add [validated context revisions](context-compaction.md) before
+this projection. These can preview large Tool observations or replace complete
+older conversation groups with historical summaries. Original store messages
+remain unchanged. Summary data appears before the retained conversation so it
+does not present an older state as a new instruction after the latest Tool result.

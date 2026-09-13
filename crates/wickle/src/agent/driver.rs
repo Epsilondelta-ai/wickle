@@ -550,8 +550,9 @@ impl Agent {
             saved,
             prompt,
             settings: bindings.settings.clone(),
-            estimator: bindings.token_estimator.clone(),
-            state: bindings.state.clone(),
+            bindings,
+            budget,
+            context_runtime: self.inner.context.clone(),
             context_items,
             sources: segment.sources.clone(),
             skills: bindings.skills.clone(),
@@ -820,7 +821,8 @@ impl Agent {
             return Ok(vec![]);
         };
         let Some(invocation) = snapshot.model_ledger.iter().rev().find(|invocation| {
-            &invocation.model_step_id == step
+            invocation.purpose == ModelPurpose::Agent
+                && &invocation.model_step_id == step
                 && invocation.run_id == snapshot.run_id
                 && invocation.response_ref.is_some()
         }) else {
@@ -865,12 +867,13 @@ struct PreparedOutcome {
     unresolved_effects: Vec<RecordRef>,
 }
 
-struct Projector {
+struct Projector<'a> {
     saved: StoredRun,
     prompt: PromptSnapshot,
     settings: AgentSettings,
-    estimator: Arc<dyn ModelTokenEstimator>,
-    state: Arc<dyn StateStore>,
+    bindings: &'a AgentBindings,
+    budget: &'a RunBudget,
+    context_runtime: Arc<ContextRuntime>,
     context_items: Vec<ContextItem>,
     sources: Option<Arc<ContextSourceRuntime>>,
     source_batch_refs: Vec<RecordRef>,
@@ -878,7 +881,7 @@ struct Projector {
     artifacts: Option<Arc<ArtifactRuntime>>,
     projected_artifacts: Mutex<Vec<ArtifactRef>>,
 }
-impl ModelRequestProjector for Projector {
+impl ModelRequestProjector for Projector<'_> {
     fn authorize_use<'a>(
         &'a self,
         selection: &'a RouteSelection,
@@ -963,95 +966,63 @@ impl ModelRequestProjector for Projector {
                         && message.role == MessageRole::User
                 })
                 .ok_or_else(|| fail(ErrorCode::InvalidSnapshot, "agent.request_message"))?;
-            let mut opaque_records: Vec<ScopedOpaque> = vec![];
-            for message in &self.saved.messages {
-                if !matches!(
-                    message.visibility,
-                    Visibility::Model | Visibility::UserAndModel
-                ) {
-                    continue;
-                }
-                for content in &message.content {
-                    if let ContentBlock::ProviderOpaque {
-                        provider,
-                        route_digest,
-                        data_ref,
-                    } = content
-                    {
-                        if provider != &selection.route.provider
-                            || route_digest != &selection.route.digest()
-                        {
-                            return Err(fail(
-                                ErrorCode::ModelContextIncompatible,
-                                "agent.opaque_route",
-                            ));
-                        }
-                        if opaque_records
-                            .iter()
-                            .any(|record| &record.reference == data_ref)
-                        {
-                            continue;
-                        }
-                        let record = self.state.read_record(&context.scope, data_ref).await?;
-                        if record.reference() != data_ref {
-                            return Err(fail(
-                                ErrorCode::ModelContextIncompatible,
-                                "agent.opaque_record",
-                            ));
-                        }
-                        let continuation: OpaqueContinuation =
-                            serde_json::from_value(record.value().clone()).map_err(|_| {
-                                fail(ErrorCode::ModelContextIncompatible, "agent.opaque_record")
-                            })?;
-                        if continuation.route_digest() != route_digest
-                            || canonical_digest(record.value()) != data_ref.digest
-                        {
-                            return Err(fail(
-                                ErrorCode::ModelContextIncompatible,
-                                "agent.opaque_record",
-                            ));
-                        }
-                        opaque_records.push(ScopedOpaque {
-                            scope: context.scope.clone(),
-                            reference: data_ref.clone(),
-                            provider: provider.clone(),
-                            continuation,
-                        });
-                    }
+            let seed = ProjectionInput {
+                profile: &self.saved.snapshot.profile,
+                scope: &context.scope,
+                run_id: &self.saved.snapshot.run_id,
+                model_step_id: &input.model_step_id,
+                current_request: &self.saved.snapshot.request,
+                current_request_message_id: &request_message.message_id,
+                transcript: &self.saved.messages,
+                context_items: &self.context_items,
+                opaque_records: &[],
+                expected_prompt_digest: &self.saved.session.prompt_snapshot.digest,
+                request_id: input.model_step_id.clone(),
+                purpose: input.routing.purpose,
+                route: selection.route.clone(),
+                output: ModelOutput::Text {},
+                max_output_tokens: self.settings.max_output_tokens,
+                options: input.routing.options.clone(),
+                response_limits: self.settings.response_limits.clone(),
+                limits: self.settings.projection_limits,
+            };
+            let current = ExecutionContext::new(
+                ExecutionContextData {
+                    scope: context.scope.clone(),
+                    principal_ref: context.principal_ref.clone(),
+                    capability_grant_ref: context.capability_grant_ref.clone(),
+                    trace_context: None,
+                    system_inputs: None,
+                },
+                context.cancellation.clone(),
+            );
+            let prepared = Box::pin(self.context_runtime.prepare(
+                &self.prompt,
+                seed,
+                crate::context_strategy::ContextServices {
+                    bindings: self.bindings,
+                    budget: self.budget,
+                    context: &current,
+                },
+            ))
+            .await?;
+            let mut references = artifacts::selected(
+                &prepared.projection.request,
+                &self.saved,
+                &prepared.artifacts,
+            )?;
+            for reference in prepared.artifacts {
+                if !references.contains(&reference) {
+                    references.push(reference);
                 }
             }
-            let projection = ContextAssembler::new().project(
-                &self.prompt,
-                ProjectionInput {
-                    profile: &self.saved.snapshot.profile,
-                    scope: &context.scope,
-                    run_id: &self.saved.snapshot.run_id,
-                    model_step_id: &input.model_step_id,
-                    current_request: &self.saved.snapshot.request,
-                    current_request_message_id: &request_message.message_id,
-                    transcript: &self.saved.messages,
-                    context_items: &self.context_items,
-                    opaque_records: &opaque_records,
-                    expected_prompt_digest: &self.saved.session.prompt_snapshot.digest,
-                    request_id: input.model_step_id.clone(),
-                    purpose: input.routing.purpose,
-                    route: selection.route.clone(),
-                    output: ModelOutput::Text {},
-                    max_output_tokens: self.settings.max_output_tokens,
-                    options: input.routing.options.clone(),
-                    response_limits: self.settings.response_limits.clone(),
-                    limits: self.settings.projection_limits,
-                },
-            )?;
-            let input_tokens = self.estimator.estimate(&projection.request)?;
             *self
                 .projected_artifacts
                 .lock()
-                .map_err(|_| fail(ErrorCode::InvalidContract, "agent.artifacts"))? =
-                artifacts::selected(&projection.request, &self.saved)?;
+                .map_err(|_| fail(ErrorCode::InvalidContract, "agent.artifacts"))? = references;
             Ok(ProjectedModelRequest {
-                request: projection.request,
-                input_tokens,
+                request: prepared.projection.request,
+                input_tokens: prepared.input_tokens,
             })
         })
     }
