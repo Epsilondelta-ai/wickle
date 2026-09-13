@@ -89,7 +89,7 @@ Bedrock Claude의 adaptive thinking과 effort는 선택한 model ID와 operation
 
 ## 최신 Messages 경로와 기존 Runtime 경로
 
-최신 Claude에는 `https://bedrock-mantle.{region}.api.aws/anthropic/v1/messages` 경로도 있습니다. 이 경로는 표준 SSE와 Messages 형식을 사용하며 모델 ID는 `anthropic.claude-opus-5`처럼 provider prefix를 포함합니다. 기존 InvokeModel의 AWS event-stream이나 ARN 버전 문자열을 이 경로의 형식으로 가정하지 않습니다. Native Messages에서는 직접 Anthropic의 Models API, 구조화 출력, 서버 측 fallback 등이 지원되지 않으므로 제공 경로별 capability를 별도로 등록해야 합니다.
+최신 Claude에는 `https://bedrock-mantle.{region}.api.aws/anthropic/v1/messages` 경로도 있습니다. 이 경로는 표준 SSE와 Messages 형식을 사용하며 모델 ID는 `anthropic.claude-opus-5`처럼 provider prefix를 포함합니다. 기존 InvokeModel의 AWS event-stream이나 ARN 버전 문자열을 이 경로의 형식으로 가정하지 않습니다. Native Messages의 기능을 직접 Anthropic API와 동일하게 취급하지 않고 제공 경로별 capability를 별도로 등록해야 합니다. AWS의 세부 문서상 구조화 출력은 일부 모델의 Runtime Converse/InvokeModel 경로에서 지원되지만 Mantle의 `/anthropic/v1/messages`에서는 `output_config.format`을 거부합니다. 같은 Claude라도 모델·operation·endpoint를 함께 확인해야 합니다. [AWS의 구조화 출력 지원 범위](https://docs.aws.amazon.com/bedrock/latest/userguide/claude-messages-structured-outputs.html).
 
 위의 `anthropic_version: bedrock-2023-05-31` 설명은 **InvokeModel body**에 해당하며 native Messages 요청에 일괄 주입하지 않습니다. 사용하려는 operation과 model/profile을 먼저 선택하고 그 계약에 맞게 Host를 구성합니다. Bedrock bearer token을 쓰는 Host에서만 `AWS_BEARER_TOKEN_BEDROCK`을 선택 입력으로 받을 수 있습니다. 실제 모델 접근 승인이 없으면 연결 검증을 대기 상태로 기록합니다.
 
