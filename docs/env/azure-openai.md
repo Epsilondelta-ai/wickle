@@ -55,3 +55,7 @@ AZURE_OPENAI_RESOURCE_ID=/subscriptions/<subscription>/resourceGroups/<group>/pr
 ```
 
 관리 API 인증은 Host의 별도 credential provider가 `https://management.azure.com/.default` 대상 토큰을 준비합니다. 모델 버전을 사용자가 추측해서 환경변수에 중복 입력하지 않습니다. 실제 인증·배포가 없는 경우 로컬 fixture만 통과한 것으로 기록하며 live 검증 통과로 표시하지 않습니다.
+
+## 확인한 현재 모델 계약
+
+Azure의 `gpt-6-astra` 배포도 `none`, `temperature`, `top_p`를 지원하지 않습니다. Azure는 현재 mid-conversation `configuration_update` 및 `response.steer`를 지원하지 않으므로 OpenAI 직접 API와 기능을 동일하게 취급하지 않습니다. [Azure reasoning 모델 문서](https://learn.microsoft.com/en-us/azure/foundry/openai/how-to/reasoning).

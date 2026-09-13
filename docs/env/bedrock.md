@@ -2,7 +2,7 @@
 
 [환경변수 안내](README.md) · [전체 예제](../../.env.example)
 
-AWS 계정의 인증 정보, 호출을 시작할 리전, 해당 리전에서 사용할 Claude 모델을 준비합니다. 이 경로는 AWS SDK의 credential provider chain을 사용합니다. 아래는 설정 준비용이며 Wickle의 Bedrock 어댑터와 실제 연결 검사 runner는 아직 완성되지 않았습니다.
+AWS 계정의 인증 정보, 호출을 시작할 리전, 해당 리전에서 사용할 Claude 모델을 준비합니다. Host가 AWS credential provider chain 또는 Bedrock bearer token을 준비하고 어댑터에 명시적으로 전달합니다. 라이브러리가 환경변수나 profile을 암묵적으로 읽는다는 뜻은 아닙니다. 아래는 설정 준비용이며 Wickle의 Bedrock 어댑터와 실제 연결 검사 runner는 아직 완성되지 않았습니다.
 
 ```dotenv
 AWS_REGION=
@@ -82,3 +82,15 @@ BEDROCK_MODEL_2_MAX_OUTPUT_TOKENS=4096
 ```
 
 번호는 양의 정수이며 ID를 채운 각 번호가 독립된 모델·옵션 검사 대상입니다. 같은 모델의 effort를 비교할 때는 두 슬롯에 같은 실제 호출 ID와 서로 다른 허용 effort 값을 넣습니다. 계정·role/profile·출발 리전·endpoint가 다르면 별도의 `.env` 파일을 사용합니다. 이 설정에는 직접 Anthropic API의 키나 `ANTHROPIC_API_VERSION`을 넣지 않습니다.
+
+## 확인한 현재 모델 계약
+
+Bedrock Claude의 adaptive thinking과 effort는 선택한 model ID와 operation의 계약으로 검사합니다. Messages InvokeModel은 직접 Anthropic 헤더 대신 body의 `anthropic_version: bedrock-2023-05-31`을 사용합니다. Opus 5는 thinking 기본 활성화이며 구형 수동 token-budget 설정을 일괄 적용하지 않습니다. [AWS adaptive thinking](https://docs.aws.amazon.com/bedrock/latest/userguide/claude-messages-adaptive-thinking.html).
+
+## 최신 Messages 경로와 기존 Runtime 경로
+
+최신 Claude에는 `https://bedrock-mantle.{region}.api.aws/anthropic/v1/messages` 경로도 있습니다. 이 경로는 표준 SSE와 Messages 형식을 사용하며 모델 ID는 `anthropic.claude-opus-5`처럼 provider prefix를 포함합니다. 기존 InvokeModel의 AWS event-stream이나 ARN 버전 문자열을 이 경로의 형식으로 가정하지 않습니다. Native Messages에서는 직접 Anthropic의 Models API, 구조화 출력, 서버 측 fallback 등이 지원되지 않으므로 제공 경로별 capability를 별도로 등록해야 합니다.
+
+위의 `anthropic_version: bedrock-2023-05-31` 설명은 **InvokeModel body**에 해당하며 native Messages 요청에 일괄 주입하지 않습니다. 사용하려는 operation과 model/profile을 먼저 선택하고 그 계약에 맞게 Host를 구성합니다. Bedrock bearer token을 쓰는 Host에서만 `AWS_BEARER_TOKEN_BEDROCK`을 선택 입력으로 받을 수 있습니다. 실제 모델 접근 승인이 없으면 연결 검증을 대기 상태로 기록합니다.
+
+[최신 Messages 경로](https://platform.claude.com/docs/en/build-with-claude/claude-in-amazon-bedrock), [기존 Runtime 경로](https://platform.claude.com/docs/en/build-with-claude/claude-on-amazon-bedrock-legacy).

@@ -25,3 +25,5 @@ La [verificación de resultados](docs/verification.md) admite esquemas JSON, cri
 El [adaptador OpenAI Responses](docs/openai.md) ofrece generación HTTP/SSE con límites, llamadas a funciones, salida estructurada y comprobación de versiones, con credenciales proporcionadas por la aplicación.
 
 Para despliegues de Azure y autenticación con claves API o Entra gestionada por el Host, consulta la [guía del adaptador Azure OpenAI](docs/azure-openai.md).
+
+Consulta la [guía del adaptador Anthropic](docs/anthropic.md) para Claude Messages, conservación de firmas de thinking y credenciales por workspace.

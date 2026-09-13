@@ -50,3 +50,7 @@ GEMINI_MODEL_2_MAX_OUTPUT_TOKENS=4096
 번호는 양의 정수이며 ID를 채운 각 번호가 독립된 모델·옵션 검사 대상입니다. 같은 모델을 비교할 때는 ID를 동일하게 넣고 thinking 설정에 각각 다른 허용값을 입력합니다. 프로젝트·키·endpoint 또는 필요한 API 버전이 다르면 별도의 `.env` 파일을 사용합니다.
 
 `GEMINI_API_VERSION=v1`은 안정 API 경로를 뜻합니다. 선택한 기능이 `v1beta`를 요구한다면 그 기능을 지원하는 어댑터와 함께 설정해야 합니다. 모델 release와 API 버전은 별개입니다. [API 버전](https://ai.google.dev/gemini-api/docs/api-versions). 이 경로의 인증은 AI Studio 키이며, ADC로 준비하는 [Vertex AI 경로](vertex-ai.md)는 별도 설정입니다.
+
+## 확인한 현재 모델 계약
+
+`gemini-3.8-flash`의 thinking level은 `low`, `medium`, `high`이고 기본값은 `medium`입니다. `minimal`은 지원하지 않습니다. 모델 리소스 이름 `models/gemini-3.8-flash`도 입력할 수 있으며 어댑터가 `models/`를 중복해 붙이지 않아야 합니다. `v1`의 공식 discovery schema에도 `ThinkingConfig.thinkingLevel`이 있으므로 beta 예제가 있다는 이유만으로 설정을 `v1beta`로 바꾸지 않습니다. generateContent와 Interactions는 서로 다른 wire 계약입니다. [모델](https://ai.google.dev/gemini-api/docs/models/gemini-3.8-flash), [현재 모델 사용법](https://ai.google.dev/gemini-api/docs/latest-model).

@@ -49,3 +49,7 @@ XAI_MODEL_2_MAX_OUTPUT_TOKENS=4096
 ID가 채워진 슬롯마다 독립적인 모델·옵션 테스트 대상이 됩니다. 사용하지 않는 슬롯은 ID를 비워둡니다. 별도 계정이나 endpoint를 사용할 때는 별도 `.env` 파일로 준비합니다.
 
 이 문서는 모델별 실제 연결 테스트용 설정 규약입니다. `.env` 저장만으로 호출이 실행되지 않으며 코어 라이브러리가 파일을 직접 읽지 않습니다. 준비 및 실행 범위는 [공통 설정 안내](README.md)를 따릅니다.
+
+## 확인한 현재 모델 계약
+
+`grok-4.6`은 Responses의 `reasoning.effort`에 `low`, `medium`, `high`, `xhigh`를 지원하며 기본은 `high`입니다. Thinking 비활성화는 지원하지 않습니다. `xhigh`를 지원하지 않는 구형 모델에 동일 옵션을 보내 조용히 강등시키지 않습니다. [Grok 4.6](https://docs.x.ai/developers/models/grok-4.6), [reasoning](https://docs.x.ai/developers/model-capabilities/text/reasoning).
