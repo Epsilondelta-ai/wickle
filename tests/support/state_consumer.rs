@@ -73,7 +73,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         timing: RunTiming::new(1000, profile.profile().limits.max_elapsed_ms.get()).unwrap(),
         reservations: vec![],
         resume_receipts: vec![],
-        hook_plan_ref: None, source_plan_ref: None, skill_plan_ref: None, context_plan_ref: None, context_revision_ref: None, context_decisions: vec![],
+        hook_plan_ref: None, source_plan_ref: None, skill_plan_ref: None, context_plan_ref: None, context_revision_ref: None, context_decisions: vec![], verification_plan_ref: None, candidate_ref: None, verification_records: vec![],
         hook_applications: vec![],
         limits: profile.profile().limits.clone(),
         profile,

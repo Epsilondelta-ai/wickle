@@ -439,6 +439,9 @@ pub struct Fixture {
 
 #[derive(Clone, Copy)]
 pub enum FinalCommitMode {
+    OmitVerificationEvent,
+    RejectVerification,
+    LoseVerificationAcknowledgement,
     PassThrough,
     Reject,
     LoseAcknowledgement,
@@ -597,6 +600,14 @@ impl StateStore for FinalCommitStore {
         input: CommitInput,
     ) -> PortFuture<'a, StoredRun> {
         Box::pin(async move {
+            let mut input = input;
+            if matches!(self.mode, FinalCommitMode::OmitVerificationEvent) {
+                let before = input.events.len();
+                input.events.retain(|event| {
+                    !matches!(event.payload, RunEventPayload::VerificationCompleted { .. })
+                });
+                input.snapshot.last_event_seq -= (before - input.events.len()) as u64;
+            }
             if matches!(
                 self.mode,
                 FinalCommitMode::RejectContext | FinalCommitMode::LoseContextAcknowledgement
@@ -610,6 +621,21 @@ impl StateStore for FinalCommitStore {
                 return Err(ContractError::new(
                     ErrorCode::PersistenceUnavailable,
                     "context.commit",
+                ));
+            }
+            if matches!(
+                self.mode,
+                FinalCommitMode::RejectVerification
+                    | FinalCommitMode::LoseVerificationAcknowledgement
+            ) && self.inner.load(s, r).await?.snapshot.verification_records
+                != input.snapshot.verification_records
+            {
+                if matches!(self.mode, FinalCommitMode::LoseVerificationAcknowledgement) {
+                    self.inner.commit(s, r, input).await?;
+                }
+                return Err(ContractError::new(
+                    ErrorCode::PersistenceUnavailable,
+                    "verification.commit",
                 ));
             }
             if !input.snapshot.status.is_terminal() {
@@ -634,6 +660,9 @@ impl StateStore for FinalCommitStore {
                     self.inner.commit(s, r, input).await
                 }
                 FinalCommitMode::PauseEmptyEventPage
+                | FinalCommitMode::OmitVerificationEvent
+                | FinalCommitMode::RejectVerification
+                | FinalCommitMode::LoseVerificationAcknowledgement
                 | FinalCommitMode::PassThrough
                 | FinalCommitMode::RejectContext
                 | FinalCommitMode::LoseContextAcknowledgement => {
@@ -686,6 +715,7 @@ impl Fixture {
             context_sources: None,
             context_token_estimator: None,
             context_runtime: None,
+            verification: None,
             skills: None,
             artifacts: None,
             hooks: None,

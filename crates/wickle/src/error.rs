@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum ErrorCode {
+    /// The verifier could not complete its check; this is not a quality rejection.
+    VerificationUnavailable,
     /// Current policy or exact owner scope denies access.
     AccessDenied,
     /// Artifact identity, content, metadata, or size violates its immutable contract.

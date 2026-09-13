@@ -21,6 +21,7 @@ mod hooks;
 mod resume;
 mod sources;
 mod tools;
+mod verification;
 use components::SegmentBindings;
 
 /// Host tokenizer or conservative estimator. This synchronous callback must not
@@ -152,6 +153,8 @@ pub struct AgentBindings {
     pub artifacts: Option<Arc<ArtifactRuntime>>,
     /// Optional bounded selector/compressor; omission uses bounded selection and previews only.
     pub context_runtime: Option<Arc<ContextRuntime>>,
+    /// Output schemas and approved read-only verifiers.
+    pub verification: Option<Arc<VerificationRuntime>>,
     /// Time source and timers.
     pub clock: Arc<dyn Clock>,
     /// New internal run/message/event identities, never business foreign keys.
@@ -171,6 +174,7 @@ struct Inner {
     profile: AgentProfile,
     bindings: AgentBindings,
     context: Arc<ContextRuntime>,
+    verification: Arc<VerificationRuntime>,
     runs: Mutex<BTreeMap<Id, Arc<LocalRun>>>,
 }
 struct LocalRun {
@@ -209,9 +213,9 @@ impl fmt::Debug for Agent {
     }
 }
 
-/// Validate the initial text/turn-end runtime without invoking any Host callback.
-/// Catalog tools use already-created executors. Asset loaders, adapter exports,
-/// verifiers and extension execution require their separate runtime bindings.
+/// Validate the configured runtime without invoking any Host callback.
+/// Tools, adapters, skills, context strategies, and verifiers use existing Host bindings.
+/// Instruction asset loading and generic extension execution remain unsupported.
 pub fn create_agent(
     profile: AgentProfile,
     bindings: AgentBindings,
@@ -219,8 +223,6 @@ pub fn create_agent(
     profile.validate_structure()?;
     bindings.settings.validate()?;
     if !matches!(profile.instructions, Instructions::Text(_))
-        || !matches!(profile.output_contract, OutputContract::Text {})
-        || !matches!(profile.completion_policy, CompletionPolicy::TurnEnd {})
         || (!profile.skills.is_empty() && bindings.skills.is_none())
         || (bindings.components.is_none()
             && (!profile.connectors.is_empty()
@@ -234,6 +236,15 @@ pub fn create_agent(
         None => Arc::new(ContextRuntime::bounded(bindings.scope.clone())?),
     };
     context.plan(&profile, &bindings.scope)?;
+    let verification = match &bindings.verification {
+        Some(runtime) => runtime.clone(),
+        None => Arc::new(VerificationRuntime::text(bindings.scope.clone())?),
+    };
+    if verification.scope != bindings.scope {
+        return Err(fail(ErrorCode::AccessDenied, "agent.verification_scope"));
+    }
+    verification.plan(&profile, None)?;
+
     if bindings
         .skills
         .as_ref()
@@ -314,6 +325,7 @@ pub fn create_agent(
             profile,
             bindings,
             context,
+            verification,
             runs: Mutex::new(BTreeMap::new()),
         }),
     })

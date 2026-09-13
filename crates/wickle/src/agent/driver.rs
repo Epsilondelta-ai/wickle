@@ -92,6 +92,7 @@ impl Agent {
                         output: vec![],
                         continuation: vec![],
                         unresolved_effects: vec![],
+                        verification: None,
                     },
                     &budget,
                     segment.as_ref().expect("metadata segment"),
@@ -118,14 +119,14 @@ impl Agent {
                             local,
                         )
                         .await;
-                        self.run_segment(
+                        Box::pin(self.run_segment(
                             run_id,
                             prompt,
                             segment.as_ref().expect("bound segment"),
                             &budget,
                             &lease,
                             local,
-                        )
+                        ))
                         .await
                     }
                     Err(error) => {
@@ -163,6 +164,7 @@ impl Agent {
                                 output: vec![],
                                 continuation: vec![],
                                 unresolved_effects: vec![],
+                                verification: None,
                             },
                             &budget,
                             segment.as_ref().expect("metadata segment"),
@@ -279,6 +281,23 @@ impl Agent {
             .await?;
         let mut pending_round = saved.snapshot.tool_ledger.iter().find(|entry| !matches!(&entry.state, ToolCallState::Settled { result } if result.status != ToolResultStatus::Unknown && result.effect != ToolEffect::Unknown)).map(|entry| entry.call.model_request_id.clone());
         let attempt = loop {
+            let current = self
+                .inner
+                .bindings
+                .state
+                .load(budget.scope(), run_id)
+                .await?;
+            if current.snapshot.candidate_ref.is_some() {
+                match Box::pin(self.verify_candidate(segment, budget)).await {
+                    Ok(super::verification::CandidateAction::Finish(candidate)) => {
+                        return self
+                            .finish(run_id, *candidate, budget, segment, local)
+                            .await;
+                    }
+                    Ok(super::verification::CandidateAction::Repair) => continue,
+                    Err(error) => break Some(Err(error)),
+                }
+            }
             if let Some(request_id) = pending_round.take() {
                 let round = self.tool_round(budget, segment).await?;
                 let result = round.execute(&request_id, context, budget).await;
@@ -292,10 +311,8 @@ impl Agent {
                     Err(error) => break Some(Err(error)),
                 }
             }
-            match self
-                .generate(run_id, prompt.clone(), segment, budget, lease)
-                .await
-            {
+            // Keep the nested model/verification path off the parent Tool loop stack.
+            match Box::pin(self.generate(run_id, prompt.clone(), segment, budget, lease)).await {
                 Ok(Guarded::Completed(ModelExchangeOutcome::Completed { response }))
                     if response.finish == ModelFinish::ToolCalls =>
                 {
@@ -313,6 +330,16 @@ impl Agent {
                         }
                         Err(error) => break Some(Err(error)),
                     }
+                }
+                Ok(Guarded::Completed(ModelExchangeOutcome::Completed { response }))
+                    if response.finish == ModelFinish::Stop
+                        && response.tool_calls.is_empty()
+                        && saved.snapshot.verification_plan_ref.is_some() =>
+                {
+                    if let Err(error) = Box::pin(self.candidate(&response, budget)).await {
+                        break Some(Err(error));
+                    }
+                    continue;
                 }
                 result => break Some(result),
             }
@@ -334,6 +361,7 @@ impl Agent {
                         output: vec![],
                         continuation: vec![],
                         unresolved_effects,
+                        verification: None,
                     },
                     budget,
                     segment,
@@ -430,6 +458,7 @@ impl Agent {
                 output,
                 continuation,
                 unresolved_effects: vec![],
+                verification: None,
             },
             budget,
             segment,
@@ -523,15 +552,27 @@ impl Agent {
                 budget,
             )
             .await?;
+        let verification_plan = self.verification_plan(&saved.snapshot).await?;
+        let output = match verification_plan.schema {
+            Some(schema) => ModelOutput::JsonSchema {
+                schema: schema.schema,
+            },
+            None => ModelOutput::Text {},
+        };
         let input = RoutedModelInput {
             model_step_id: step,
             routing: RouteRequest {
                 model_binding: saved.snapshot.profile.profile().model_binding.clone(),
                 purpose: ModelPurpose::Agent,
-                required_capabilities: if prompt.tools().is_empty() {
-                    std::collections::BTreeSet::from([Id::new("text")?])
-                } else {
-                    std::collections::BTreeSet::from([Id::new("text")?, Id::new("tool_calling")?])
+                required_capabilities: {
+                    let mut required = std::collections::BTreeSet::from([Id::new("text")?]);
+                    if !prompt.tools().is_empty() {
+                        required.insert(Id::new("tool_calling")?);
+                    }
+                    if matches!(output, ModelOutput::JsonSchema { .. }) {
+                        required.insert(Id::new("json_output")?);
+                    }
+                    required
                 },
                 input_tokens: 0,
                 max_output_tokens: bindings.settings.max_output_tokens,
@@ -547,6 +588,7 @@ impl Agent {
             },
         };
         let projector = Projector {
+            output,
             saved,
             prompt,
             settings: bindings.settings.clone(),
@@ -585,6 +627,7 @@ impl Agent {
             mut output,
             continuation,
             mut unresolved_effects,
+            verification,
         } = candidate;
         let bindings = &self.inner.bindings;
         let lease = budget.lease();
@@ -688,10 +731,21 @@ impl Agent {
             None
         };
         if let OutcomeResult::Failed { failure } = &mut result {
-            failure.diagnostic_ref = snapshot
-                .model_ledger
-                .last()
-                .and_then(|entry| entry.response_ref.clone());
+            let verification_diagnostic =
+                if let Some(reference) = snapshot.verification_records.last() {
+                    let record: crate::verification::VerificationRecord =
+                        self.read_verification(reference).await?;
+                    (snapshot.candidate_ref.as_ref() == Some(&record.candidate_ref))
+                        .then(|| reference.clone())
+                } else {
+                    None
+                };
+            failure.diagnostic_ref = verification_diagnostic.or_else(|| {
+                snapshot
+                    .model_ledger
+                    .last()
+                    .and_then(|entry| entry.response_ref.clone())
+            });
         }
         let outcome = RunOutcome {
             result,
@@ -699,7 +753,7 @@ impl Agent {
             artifacts: artifacts::produced(&snapshot),
             usage: snapshot.usage.clone(),
             checkpoint_revision: snapshot.revision,
-            verification: None,
+            verification,
             unresolved_effects,
         };
         let record = ProtectedRecord::new(
@@ -751,7 +805,9 @@ impl Agent {
             for continuation in continuation {
                 let route = &snapshot
                     .model_ledger
-                    .last()
+                    .iter()
+                    .rev()
+                    .find(|entry| entry.purpose == ModelPurpose::Agent)
                     .ok_or_else(|| fail(ErrorCode::InvalidSnapshot, "agent.continuation"))?
                     .route;
                 if continuation.route_digest() != &route.digest() {
@@ -860,14 +916,16 @@ impl Agent {
     }
 }
 
-struct PreparedOutcome {
-    result: OutcomeResult,
-    output: Vec<InputContent>,
-    continuation: Vec<OpaqueContinuation>,
-    unresolved_effects: Vec<RecordRef>,
+pub(super) struct PreparedOutcome {
+    pub result: OutcomeResult,
+    pub output: Vec<InputContent>,
+    pub continuation: Vec<OpaqueContinuation>,
+    pub unresolved_effects: Vec<RecordRef>,
+    pub verification: Option<VerificationSummary>,
 }
 
 struct Projector<'a> {
+    output: ModelOutput,
     saved: StoredRun,
     prompt: PromptSnapshot,
     settings: AgentSettings,
@@ -980,7 +1038,7 @@ impl ModelRequestProjector for Projector<'_> {
                 request_id: input.model_step_id.clone(),
                 purpose: input.routing.purpose,
                 route: selection.route.clone(),
-                output: ModelOutput::Text {},
+                output: self.output.clone(),
                 max_output_tokens: self.settings.max_output_tokens,
                 options: input.routing.options.clone(),
                 response_limits: self.settings.response_limits.clone(),

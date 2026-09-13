@@ -377,7 +377,7 @@ fn agent(
             hooks: None,
             components: None,
             context_sources: Some(sources.clone()),
-            context_token_estimator: Some(estimator), context_runtime: None, skills: None, artifacts: None,
+            context_token_estimator: Some(estimator), context_runtime: None, verification: None, skills: None, artifacts: None,
             system_input_resolver: None,
             external_receipt_verifier: None,
             clock,

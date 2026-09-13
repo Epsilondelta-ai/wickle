@@ -421,6 +421,7 @@ fn validate_history(
     event_ids: &mut BTreeSet<Id>,
 ) -> Result<(), ContractError> {
     super::context_state::validate_history(state, &run.snapshot, &run.events)?;
+    super::verification_state::history(state, &run.snapshot, &run.events)?;
     let empty = BTreeMap::new();
     let mut sequence = 0_u64;
     let mut started = 0;

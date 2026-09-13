@@ -12,10 +12,12 @@ Wickle is an agent engine being developed in Rust by EpsilonDelta. It aims to pr
 
 Its design uses Agent Profiles to configure agent behavior and adapters to connect different models and tools.
 
-**Status:** In development. Agents support serial model/tool loops, separate system inputs, persisted outcomes, event replay, cancellation, and resuming saved approval, input, or external-effect waits. Resume commands are deduplicated; external effects require Host verification. Lifecycle hooks support bounded context and argument transformations plus observations after commit. Adapter Tool/Hook/ContextSource exports support pinned assemblies and scoped instances that close when each execution segment ends. [Adapter runtime](docs/adapters.md). General interruption recovery and candidate verification remain unsupported. [Run an agent](docs/agents.md) · [Data contracts](docs/contracts.md).
+**Status:** In development. Agents support serial model/tool loops, separate system inputs, persisted outcomes, event replay, cancellation, and resuming saved approval, input, or external-effect waits. Resume commands are deduplicated; external effects require Host verification. Lifecycle hooks support bounded context and argument transformations plus observations after commit. Adapter Tool/Hook/ContextSource exports support pinned assemblies and scoped instances that close when each execution segment ends. [Adapter runtime](docs/adapters.md). General interruption recovery remains unsupported. [Run an agent](docs/agents.md) · [Data contracts](docs/contracts.md).
 
 Read-only [context sources](docs/context-sources.md) support Run and model-step collection, saved batches, and current access checks on reuse.
 
 [Skills](docs/skills.md) load complete, versioned instructions through a registered Tool. [Artifacts](docs/artifacts.md) preserve scoped originals, bounded previews, and source evidence.
 
 [Context rewriting](docs/context-compaction.md) preserves the original conversation while applying bounded previews and validated summaries. Model-based compression shares the Run budget.
+
+[Output verification](docs/verification.md) supports JSON schemas, versioned criteria, bounded repair, and approval of a fixed candidate. Model-based reviews share the Run budget.

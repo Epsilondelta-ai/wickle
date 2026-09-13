@@ -41,6 +41,7 @@ instructions, `SystemInputRegistry`, optional `ToolRegistry`,
 `ComponentRuntime`, optional `ContextSourceRuntime` and context token estimator,
 optional `SkillRuntime` and `ArtifactRuntime`,
 optional `ContextRuntime` for context selection and compression,
+optional `VerificationRuntime` for output schemas and candidate verification,
 clock, ID source, model token
 estimator, and `AgentSettings`.
 A single Agent instance owns one scope; use separately configured instances for
@@ -57,13 +58,13 @@ and remains separate from provider-reported usage. `AgentSettings` bounds output
 request/response/context sizes, admission preparation, lease renewal, and observer
 polling. Run-wide model, tool, recovery, and elapsed limits come from the profile.
 
-The driver supports text instructions, text output, the bounded context strategy,
+The driver supports text instructions, text or JSON schema output, the bounded context strategy,
 registered catalog tools, lifecycle Hooks and context sources, adapter
 Tool/Hook/ContextSource exports, versioned Skill loading, artifact references,
 bounded context previews and compression, and
-`turn_end` completion. Profile instruction-asset loading and verified
-completion are not connected to this driver. Profiles requiring these components
-are rejected explicitly.
+`turn_end` or `verified` completion. Profile instruction-asset loading is not yet
+connected to this driver and is rejected explicitly. See [output verification](verification.md)
+for criteria, repair budgets, and candidate approval waits.
 
 Selected lifecycle Hooks can add bounded context, transform model-owned tool
 arguments, or observe committed results. Their saved transformations are reused
@@ -306,9 +307,9 @@ an on-time acceptance does not expire merely because its previous wait's
 deadline later passes. Expired approvals supply no tool authorization evidence.
 Durable storage allows a saved wait to resume
 after the Host recreates compatible bindings. General interruption recovery via
-`ResumeAction::Recover` and candidate approval via
-`ApprovalTarget::Candidate` remain unsupported; they require their separate
-recovery and verification runtimes.
+`ResumeAction::Recover` remains unsupported. Candidate approval via
+`ApprovalTarget::Candidate` uses the [verification runtime](verification.md) and
+the exact saved candidate, verifier, wait identity, and revision.
 
 ## Start, replay, and observe
 
@@ -352,9 +353,9 @@ driver exists. Unstarted calls become `NotApplied`; existing `Applied` and
 it as `Cancelled`, which its handle can observe. New resume commands are then
 rejected.
 
-Success records `completion_basis=turn_ended`. This says the model completed its
-turn under the configured output contract; it does not claim external business
-verification. Failure, cancellation, and budget exhaustion have distinct outcomes.
+Success records `completion_basis=turn_ended` or `verified`, according to the
+profile. A valid format alone completes `turn_end`; `verified` also requires an
+accepted verdict with pinned criteria and evidence. Failure, cancellation, and budget exhaustion have distinct outcomes.
 Already stored response text can be retained as partial output without becoming
 a successful assistant transcript. Unfinished stream deltas are not guaranteed
 to survive an interrupted collector.

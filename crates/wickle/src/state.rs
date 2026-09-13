@@ -13,6 +13,7 @@ mod context_state;
 mod hook_state;
 mod skill_state;
 mod source_state;
+mod verification_state;
 pub use checkpoint::{STATE_STORE_CHECKPOINT_VERSION, StateStoreCheckpoint};
 use hook_state::{validate_hook_observation, validate_hook_snapshot, validate_hook_transition};
 use source_state::{validate_source_snapshot, validate_source_transition};
@@ -678,6 +679,14 @@ impl StateStore for MemoryStateStore {
             let additions = validate_records(state, &input.records)?;
             validate_snapshot_refs(state, &additions, &input.snapshot)?;
             context_state::validate_update(&run.snapshot, &input.snapshot, &input.events)?;
+            verification_state::transition(
+                state,
+                &additions,
+                &run.snapshot,
+                &input.snapshot,
+                &input.messages,
+                &input.events,
+            )?;
             validate_events(
                 state,
                 &additions,
@@ -967,6 +976,7 @@ fn validate_snapshot_refs(
     validate_source_snapshot(state, additions, snapshot)?;
     skill_state::validate_skill_snapshot(state, additions, snapshot)?;
     context_state::validate_snapshot(state, additions, snapshot)?;
+    verification_state::validate(state, additions, snapshot)?;
     validate_hook_snapshot(state, additions, snapshot)?;
     let mut references = Vec::new();
     for receipt in &snapshot.resume_receipts {
@@ -997,13 +1007,54 @@ fn validate_snapshot_refs(
         )?;
         for invocation in &snapshot.model_ledger {
             routing.validate_route(&invocation.route)?;
-            if invocation.inspection_ref.is_none()
-                || !routing.policy().rules.iter().any(|rule| {
-                    rule.model_binding == snapshot.profile.profile().model_binding
+            // The saved step identifies the logical binding independently of the physical route.
+            // Auxiliary stages may use their own purpose-specific rule.
+            #[derive(serde::Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct SavedStep {
+                schema_version: String,
+                run_id: Id,
+                input: crate::RoutedModelInput,
+            }
+            let key = (
+                Id::new(format!(
+                    "model-step-{}",
+                    crate::canonical_digest(&serde_json::json!([
+                        snapshot.run_id,
+                        invocation.model_step_id
+                    ]))
+                ))?,
+                1,
+            );
+            let value = additions
+                .get(&key)
+                .map(ProtectedRecord::value)
+                .or_else(|| state.records.get(&key).map(|record| &record.value))
+                .ok_or_else(|| error(ErrorCode::InvalidSnapshot, "routing.step_input"))?;
+            let step: SavedStep = serde_json::from_value(value.clone())
+                .map_err(|_| error(ErrorCode::InvalidSnapshot, "routing.step_input"))?;
+            if step.schema_version != "wickle.model-step.v1"
+                || step.run_id != snapshot.run_id
+                || step.input.model_step_id != invocation.model_step_id
+                || step.input.routing.scope != snapshot.scope
+                || step.input.routing.purpose != invocation.purpose
+                || (invocation.purpose == crate::ModelPurpose::Agent
+                    && step.input.routing.model_binding != snapshot.profile.profile().model_binding)
+            {
+                return Err(error(ErrorCode::InvalidSnapshot, "routing.step_identity"));
+            }
+            let rule = routing
+                .policy()
+                .rules
+                .iter()
+                .find(|rule| {
+                    rule.model_binding == step.input.routing.model_binding
                         && rule.purpose == invocation.purpose
-                        && (rule.primary == invocation.route.binding
-                            || rule.fallbacks.contains(&invocation.route.binding))
                 })
+                .ok_or_else(|| error(ErrorCode::InvalidSnapshot, "routing.invocation"))?;
+            if invocation.inspection_ref.is_none()
+                || !(rule.primary == invocation.route.binding
+                    || rule.fallbacks.contains(&invocation.route.binding))
             {
                 return Err(error(ErrorCode::InvalidSnapshot, "routing.invocation"));
             }
@@ -1016,11 +1067,7 @@ fn validate_snapshot_refs(
                     .map_err(|_| error(ErrorCode::InvalidSnapshot, "routing.inspection"))?;
             let require_pinned = invocation.route.version_semantics
                 == crate::VersionSemantics::Pinned
-                || routing.policy().rules.iter().any(|rule| {
-                    rule.model_binding == snapshot.profile.profile().model_binding
-                        && rule.purpose == invocation.purpose
-                        && rule.version_policy == crate::VersionPolicy::RequirePinned
-                });
+                || rule.version_policy == crate::VersionPolicy::RequirePinned;
             observation.validate(
                 &invocation.route,
                 if require_pinned {
@@ -1457,21 +1504,7 @@ fn validate_events(
                 result_ref
             }
             RunEventPayload::VerificationCompleted { verification_ref } => {
-                // Additional verification history needs an explicit checkpoint contract.
-                // A standalone event cannot substitute for the saved verification record.
-                let verification: VerificationSummary =
-                    event_record(state, additions, verification_ref)?;
-                if snapshot
-                    .outcome
-                    .as_ref()
-                    .and_then(|outcome| outcome.verification.as_ref())
-                    != Some(&verification)
-                {
-                    return Err(error(
-                        ErrorCode::InvalidEvent,
-                        "events.verification_completed",
-                    ));
-                }
+                verification_state::event(state, additions, snapshot, verification_ref)?;
                 verification_ref
             }
             RunEventPayload::RunWaiting { wait_ref } => {

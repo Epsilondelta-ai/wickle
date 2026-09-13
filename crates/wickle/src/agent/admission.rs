@@ -17,16 +17,15 @@ impl Agent {
             return Err(fail(ErrorCode::InvalidContract, "agent.request_size"));
         }
         if request
-            .output_contract
-            .as_ref()
-            .is_some_and(|value| !matches!(value, OutputContract::Text {}))
-            || request
-                .input
-                .iter()
-                .any(|content| !matches!(content, InputContent::Text { .. }))
+            .input
+            .iter()
+            .any(|content| !matches!(content, InputContent::Text { .. }))
         {
             return Err(fail(ErrorCode::CapabilityUnsupported, "agent.request"));
         }
+        self.inner
+            .verification
+            .plan(&self.inner.profile, request.output_contract.as_ref())?;
         let policy = PolicyRequest {
             owner_scope: bindings.scope.clone(),
             resource_id: request.request_id.clone(),
@@ -305,6 +304,16 @@ impl Agent {
                 )
                 .await?;
         }
+        let verification_plan = self
+            .inner
+            .verification
+            .plan(profile.profile(), request.output_contract.as_ref())?;
+        let verification_record = ProtectedRecord::new(
+            bindings.ids.next_id()?,
+            1,
+            serde_json::to_value(&verification_plan)
+                .map_err(|_| fail(ErrorCode::InvalidJson, "agent.verification_plan"))?,
+        );
         let context_record = ProtectedRecord::new(
             bindings.ids.next_id()?,
             1,
@@ -483,6 +492,9 @@ impl Agent {
             context_plan_ref: Some(context_record.reference().clone()),
             context_revision_ref,
             context_decisions: vec![],
+            verification_plan_ref: Some(verification_record.reference().clone()),
+            candidate_ref: None,
+            verification_records: vec![],
             revision: 0,
             resume_receipts: vec![],
             hook_plan_ref: hook_record
@@ -532,7 +544,7 @@ impl Agent {
                     assembly_record.into_iter().collect(),
                     source_record.into_iter().collect(),
                     skill_record.into_iter().collect(),
-                    vec![context_record],
+                    vec![context_record, verification_record],
                 ]
                 .concat(),
             },

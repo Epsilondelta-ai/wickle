@@ -7,7 +7,8 @@ use crate::{
 use tokio_util::sync::CancellationToken;
 
 /// One logical model step. Its physical retries receive separate attempt IDs.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RoutedModelInput {
     /// Stable step identifier chosen by the driver and retained during recovery.
     pub model_step_id: Id,
@@ -140,7 +141,9 @@ impl ModelExchange {
         let pinned = router.snapshot().clone();
         self.pin_routing(&pinned, context, budget).await?;
         let saved = budget.store().load(budget.scope(), budget.run_id()).await?;
-        if input.routing.model_binding != saved.snapshot.profile.profile().model_binding {
+        if input.routing.purpose == ModelPurpose::Agent
+            && input.routing.model_binding != saved.snapshot.profile.profile().model_binding
+        {
             return Err(failure(
                 ErrorCode::ModelRouteDenied,
                 "routing.profile_binding",
@@ -317,17 +320,19 @@ impl ModelExchange {
                 VersionPolicy::AllowMutable
             };
             // Keep nested auxiliary exchanges within the default executor stack budget.
-            let result = Box::pin(self.generate_inner(
-                &prepared.request,
-                context,
-                budget,
-                Some((&selection, version_policy)),
-                Some(ContextUseGate {
-                    projector,
-                    selection: &selection,
-                    input,
-                }),
-            ))
+            let result = crate::future::boxed(|| {
+                self.generate_inner(
+                    &prepared.request,
+                    context,
+                    budget,
+                    Some((&selection, version_policy)),
+                    Some(ContextUseGate {
+                        projector,
+                        selection: &selection,
+                        input,
+                    }),
+                )
+            })
             .await;
             let cause = match result {
                 Ok(Guarded::Completed(ModelExchangeOutcome::Failed { failure: ref error })) => {

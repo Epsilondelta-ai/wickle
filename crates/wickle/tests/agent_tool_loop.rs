@@ -2013,3 +2013,80 @@ async fn the_run_deadline_keeps_an_entered_write_unknown_and_closes_the_remainin
     assert_eq!(fixture.tools[0].calls.load(Ordering::SeqCst), 0);
     assert_eq!(fixture.model.calls.load(Ordering::SeqCst), 1);
 }
+
+struct RepairOnce(AtomicUsize);
+impl Verifier for RepairOnce {
+    fn definition(&self) -> VerifierDefinition {
+        VerifierDefinition {
+            verifier_ref: reference("review"),
+            criteria_ref: reference("review-criteria"),
+            criteria: "Synthetic revision decision for effect preservation testing.".into(),
+            configuration: Default::default(),
+        }
+    }
+    fn verify<'a>(
+        &'a self,
+        input: &'a VerificationInput,
+        _: &'a VerifierContext<'a>,
+    ) -> PortFuture<'a, VerificationDecision> {
+        Box::pin(async move {
+            assert!(!input.candidate.evidence_message_ids.is_empty());
+            if self.0.fetch_add(1, Ordering::SeqCst) == 0 {
+                Ok(VerificationDecision::Revise {
+                    feedback: "Revise the explanation using the completed operation.".into(),
+                })
+            } else {
+                Ok(VerificationDecision::Pass {})
+            }
+        })
+    }
+}
+#[tokio::test]
+async fn verifier_repair_does_not_repeat_an_applied_business_write() {
+    let mut fixture = Fixture::new(
+        vec![("write", object(json!({"query":"apply change"})))],
+        Behavior::Success,
+    );
+    fixture.profile.completion_policy = CompletionPolicy::Verified {
+        verifier_ref: reference("review"),
+    };
+    fixture.profile.limits.max_repair_attempts = 1;
+    let verifier = Arc::new(RepairOnce(AtomicUsize::new(0)));
+    let mut bindings = fixture.bindings();
+    bindings.verification = Some(Arc::new(
+        VerificationRuntime::new(
+            scope(),
+            vec![],
+            vec![verifier.clone()],
+            VerificationLimits::default(),
+        )
+        .unwrap(),
+    ));
+    let agent = create_agent(fixture.profile.clone(), bindings).unwrap();
+    let handle = fixture.start(&agent).await;
+    let outcome = fixture.outcome(&handle).await;
+    assert_eq!(
+        outcome.result,
+        OutcomeResult::Succeeded {
+            completion_basis: CompletionBasis::Verified
+        }
+    );
+    assert_eq!(outcome.usage.repair_attempts, 1);
+    assert_eq!(fixture.tools[1].calls.load(Ordering::SeqCst), 1);
+    assert_eq!(fixture.tools[1].applied.load(Ordering::SeqCst), 1);
+    assert_eq!(fixture.model.calls.load(Ordering::SeqCst), 3);
+    assert_eq!(verifier.0.load(Ordering::SeqCst), 2);
+    let saved = fixture
+        .base
+        .store
+        .load(&scope(), handle.run_id())
+        .await
+        .unwrap();
+    assert_eq!(saved.snapshot.tool_ledger.len(), 1);
+    assert!(
+        matches!(&saved.snapshot.tool_ledger[0].state,ToolCallState::Settled{result} if result.effect==ToolEffect::Applied&&result.effect_receipt_ref.is_some())
+    );
+    let replay = fixture.start(&agent).await;
+    assert_eq!(fixture.outcome(&replay).await, outcome);
+    assert_eq!(fixture.tools[1].applied.load(Ordering::SeqCst), 1);
+}
