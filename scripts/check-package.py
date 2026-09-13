@@ -48,6 +48,7 @@ def main():
     vertex = next(p for p in workspace["packages"] if p["name"] == "wickle-model-vertex")
     xai = next(p for p in workspace["packages"] if p["name"] == "wickle-model-xai")
     mcp = next(p for p in workspace["packages"] if p["name"] == "wickle-mcp")
+    sqlite_version = next(d["req"] for d in sqlite["dependencies"] if d["name"] == "rusqlite")
     libraries = [core, catalog, sqlite, adapters, responses, openai, azure, anthropic, bedrock, gemini, vertex, xai, mcp]
     versions = {d["name"]: d["req"] for d in core["dependencies"] if d["kind"] is None}
     for dep in core["dependencies"]:
@@ -107,6 +108,7 @@ def main():
             '[package]\nname = "wickle-package-consumer"\nversion = "0.0.0"\n'
             'edition = "2024"\npublish = false\n\n[workspace]\n\n'
             f'[dependencies]\n{library_dependencies}'
+            f'rusqlite = {{ version = "{sqlite_version}", default-features = false, features = ["bundled"] }}\n'
             f'serde_json = "{versions["serde_json"]}"\n'
             f'futures-util = {{ version = "{versions["futures-util"]}", default-features = false, features = ["std", "async-await"] }}\n'
             f'tokio = {{ version = "{versions["tokio"]}", features = ["rt", "macros", "net", "io-util"] }}\n'
@@ -115,6 +117,7 @@ def main():
         )
         shutil.copyfile(ROOT / "tests/support/consumer.rs", consumer / "src/main.rs")
         shutil.copyfile(ROOT / "tests/support/mcp_fixture.rs", consumer / "src/mcp_fixture.rs")
+        shutil.copyfile(ROOT / "tests/host_contract/delivery.rs", consumer / "src/host_delivery.rs")
         examples = sorted((ROOT / "tests/support").glob("*_consumer.rs"))
         if examples:
             (consumer / "src/bin").mkdir()

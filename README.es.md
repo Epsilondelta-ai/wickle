@@ -25,3 +25,5 @@ La [verificación de resultados](docs/verification.md) admite esquemas JSON, cri
 La [guía de proveedores de modelos](docs/model-providers.md) explica cómo conectar OpenAI, Azure OpenAI, Anthropic, AWS Bedrock, Gemini API, Vertex AI y xAI. Los adaptadores comparten los contratos del núcleo y conservan sus credenciales, versiones de API y diferencias de comportamiento.
 
 La guía de [herramientas MCP](docs/mcp.md) explica cómo conectar herramientas revisadas mediante stdio.
+
+La guía de [consumidores de eventos](docs/event-consumers.md) describe la entrega de registros a servicios de memoria y grafos desde el Host.

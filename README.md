@@ -25,3 +25,5 @@ Read-only [context sources](docs/context-sources.md) support Run and model-step 
 The [model provider guide](docs/model-providers.md) covers OpenAI, Azure OpenAI, Anthropic, AWS Bedrock, Gemini API, Vertex AI and xAI adapters. They use the same core contracts while retaining explicit credentials, API versions and provider-specific behavior.
 
 See [MCP tools](docs/mcp.md) for connecting reviewed tools over stdio.
+
+See [event consumers](docs/event-consumers.md) for Host-managed delivery to memory and graph services.

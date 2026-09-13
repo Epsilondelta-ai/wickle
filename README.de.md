@@ -25,3 +25,5 @@ Die [Ausgabeprüfung](docs/verification.md) unterstützt JSON-Schemas, versionie
 Der [Leitfaden für Modellanbieter](docs/model-providers.md) beschreibt die Anbindung von OpenAI, Azure OpenAI, Anthropic, AWS Bedrock, Gemini API, Vertex AI und xAI. Die Adapter nutzen gemeinsame Kernverträge und behalten eigene Zugangsdaten, API-Versionen und Verhaltensweisen.
 
 Die Anleitung für [MCP-Werkzeuge](docs/mcp.md) beschreibt die Verbindung geprüfter Werkzeuge über stdio.
+
+Die Anleitung für [Ereigniskonsumenten](docs/event-consumers.md) beschreibt die Übermittlung von Ausführungsdaten an Speicher- und Graphdienste durch den Host.

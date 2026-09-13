@@ -25,3 +25,5 @@ La [vérification des résultats](docs/verification.md) prend en charge les sch�
 Le [guide des fournisseurs de modèles](docs/model-providers.md) présente les adaptateurs OpenAI, Azure OpenAI, Anthropic, AWS Bedrock, Gemini API, Vertex AI et xAI. Ils partagent les contrats du cœur tout en conservant leurs identifiants, versions d’API et comportements spécifiques.
 
 Le guide des [outils MCP](docs/mcp.md) explique comment connecter des outils approuvés via stdio.
+
+Le guide des [consommateurs d’événements](docs/event-consumers.md) décrit la transmission des résultats aux services de mémoire et de graphe par le Host.

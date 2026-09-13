@@ -25,3 +25,5 @@ Agent Profile로 에이전트의 동작을 구성하고, 어댑터를 통해 다
 [모델 제공자 가이드](docs/model-providers.md)에서 OpenAI, Azure OpenAI, Anthropic, AWS Bedrock, Gemini API, Vertex AI, xAI 어댑터와 공통 연결 방법을 확인할 수 있습니다. 각 제공자의 인증, API 버전과 동작 차이는 별도로 처리합니다.
 
 [MCP 도구 연결](docs/mcp.md)은 검토한 도구를 stdio로 연결하는 방법을 설명합니다.
+
+[이벤트 소비자](docs/event-consumers.md) 가이드는 Host가 실행 기록을 기억·그래프 서비스에 전달하는 방법을 설명합니다.

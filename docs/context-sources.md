@@ -111,3 +111,5 @@ The [source consumer](../tests/support/source_consumer.rs) exercises collection,
 retry reuse, current access checks, and SQLite restoration with synthetic ports.
 Run it with the other independent consumers using
 `python3 scripts/check-package.py --allow-dirty`.
+
+For post-run memory updates, see [external event consumers](event-consumers.md). The Host owns delivery and application receipts; the next Run reads applied data through `ContextSource`.
