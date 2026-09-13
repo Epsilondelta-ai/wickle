@@ -255,7 +255,7 @@ impl SerialToolRound {
         Ok((entry, compiled))
     }
 
-    fn prepared_resolution(
+    pub(super) fn prepared_resolution(
         &self,
         saved: &StoredRun,
         result: ToolResult,

@@ -44,7 +44,7 @@ mod views;
 
 pub use agent::{
     Agent, AgentBindings, AgentSettings, CancelReceipt, ComponentReleaseView, HookObservationView,
-    ModelTokenEstimator, RunHandle, create_agent,
+    ModelTokenEstimator, PersistenceFailure, RunHandle, UnconfirmedToolEffect, create_agent,
 };
 pub use artifacts::{
     ArtifactCallContext, ArtifactData, ArtifactInput, ArtifactLimits, ArtifactMetadata,
@@ -182,3 +182,8 @@ pub use verification::{
 pub use verification::SchemaVerifier;
 
 mod future;
+
+pub use tool_execution::ToolReconciliation;
+
+mod recovery;
+pub use recovery::RecoveryReceipt;

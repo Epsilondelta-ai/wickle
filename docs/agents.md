@@ -306,8 +306,7 @@ retains already recorded effects. Expiry is recorded at command acceptance;
 an on-time acceptance does not expire merely because its previous wait's
 deadline later passes. Expired approvals supply no tool authorization evidence.
 Durable storage allows a saved wait to resume
-after the Host recreates compatible bindings. General interruption recovery via
-`ResumeAction::Recover` remains unsupported. Candidate approval via
+after the Host recreates compatible bindings. Interrupted Running runs use `ResumeAction::Recover` with an exact checkpoint reference and a new lease. See [recovery](recovery.md) for effect reconciliation and storage-failure diagnostics. Candidate approval via
 `ApprovalTarget::Candidate` uses the [verification runtime](verification.md) and
 the exact saved candidate, verifier, wait identity, and revision.
 

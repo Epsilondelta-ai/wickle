@@ -1085,3 +1085,238 @@ async fn historical_segment_outcomes_recheck_permission_after_the_protected_reco
     assert_eq!(fixture.tools[1].applied.load(Ordering::SeqCst), 1);
     assert_eq!(fixture.model.calls.load(Ordering::SeqCst), 2);
 }
+
+#[tokio::test]
+async fn recovery_query_budget_exhaustion_keeps_the_applied_write_unknown_without_redispatch() {
+    let mut fixture = Fixture::new(Mode::External);
+    fixture.profile.limits.max_recovery_attempts = 1;
+    fixture.store.mode.store(4, Ordering::SeqCst);
+    let agent = fixture.agent();
+    let original = fixture.started(&agent).await;
+    assert_eq!(
+        original.outcome(&context()).await.unwrap_err().code,
+        ErrorCode::PersistenceUnavailable
+    );
+    let before = fixture.saved(&original).await;
+    assert_eq!(before.snapshot.status, RunStatus::Running);
+    assert_eq!(fixture.tools[1].applied.load(Ordering::SeqCst), 1);
+    assert!(matches!(
+        before.snapshot.tool_ledger[1].state,
+        ToolCallState::Dispatching { .. }
+    ));
+    fixture.store.mode.store(0, Ordering::SeqCst);
+    let source = before
+        .snapshot
+        .recovery_record(id("write-checkpoint"))
+        .unwrap();
+    let command = ResumeCommand {
+        run_id: original.run_id().clone(),
+        expected_revision: before.snapshot.revision,
+        command_id: id("recover-write"),
+        action: ResumeAction::Recover {
+            recovery_ref: source.reference().clone(),
+        },
+    };
+    let resumed = completed(fixture.agent().resume(command, context()).await.unwrap());
+    let outcome = fixture.outcome(&resumed).await;
+    assert!(matches!(
+        outcome.result,
+        OutcomeResult::Exhausted {
+            budget: BudgetKind::RecoveryAttempts
+        }
+    ));
+    assert_eq!(outcome.unresolved_effects.len(), 1);
+    let record = fixture
+        .base
+        .store
+        .read_record(&scope(), &outcome.unresolved_effects[0])
+        .await
+        .unwrap();
+    let result: ToolResult = serde_json::from_value(record.value().clone()).unwrap();
+    assert_eq!(result.effect, ToolEffect::Unknown);
+    assert_eq!(fixture.tools[1].calls.load(Ordering::SeqCst), 1);
+    assert_eq!(fixture.tools[1].applied.load(Ordering::SeqCst), 1);
+    assert_eq!(fixture.tools[2].calls.load(Ordering::SeqCst), 0);
+    assert_eq!(fixture.model.calls.load(Ordering::SeqCst), 1);
+    let after = fixture.saved(&resumed).await;
+    assert!(matches!(
+        after.snapshot.tool_ledger[1].state,
+        ToolCallState::Unknown { .. }
+    ));
+    assert_eq!(
+        after.snapshot.tool_ledger[1].call.bound_input_ref,
+        before.snapshot.tool_ledger[1].call.bound_input_ref
+    );
+}
+
+#[tokio::test]
+async fn recovered_unknown_write_can_resume_with_a_verified_receipt_and_preserved_segment_history()
+{
+    let mut fixture = Fixture::new(Mode::External);
+    fixture.profile.limits.max_recovery_attempts = 4;
+    fixture.store.mode.store(4, Ordering::SeqCst);
+    let agent = fixture.agent();
+    let original = fixture.started(&agent).await;
+    assert_eq!(
+        original.outcome(&context()).await.unwrap_err().code,
+        ErrorCode::PersistenceUnavailable
+    );
+    let before = fixture.saved(&original).await;
+    fixture.store.mode.store(0, Ordering::SeqCst);
+    let source = before
+        .snapshot
+        .recovery_record(id("interrupted-write"))
+        .unwrap();
+    let command = ResumeCommand {
+        run_id: original.run_id().clone(),
+        expected_revision: before.snapshot.revision,
+        command_id: id("recover-write"),
+        action: ResumeAction::Recover {
+            recovery_ref: source.reference().clone(),
+        },
+    };
+    let recovered = completed(fixture.agent().resume(command, context()).await.unwrap());
+    let waiting = fixture.outcome(&recovered).await;
+    assert_eq!(waiting.result.status(), RunStatus::Waiting);
+    assert_eq!(waiting.unresolved_effects.len(), 1);
+    let receipt = external_command(
+        &fixture,
+        &recovered,
+        fixture.store.proof.reference().clone(),
+    )
+    .await;
+    let resumed = completed(fixture.agent().resume(receipt, context()).await.unwrap());
+    let outcome = fixture.outcome(&resumed).await;
+    assert_eq!(outcome.result.status(), RunStatus::Succeeded);
+    assert!(outcome.unresolved_effects.is_empty());
+    assert_eq!(fixture.outcome(&recovered).await, waiting);
+    let after = fixture.saved(&resumed).await;
+    assert_eq!(after.snapshot.resume_receipts.len(), 1);
+    assert_eq!(after.snapshot.recovery_receipts.len(), 1);
+    assert_eq!(
+        after.snapshot.resume_receipts[0].previous_segment_start_revision,
+        after.snapshot.recovery_receipts[0].accepted_revision
+    );
+    assert_eq!(fixture.tools[1].calls.load(Ordering::SeqCst), 1);
+    assert_eq!(fixture.tools[1].applied.load(Ordering::SeqCst), 1);
+    assert_eq!(fixture.tools[2].calls.load(Ordering::SeqCst), 1);
+    assert_eq!(fixture.resolver.calls.load(Ordering::SeqCst), 1);
+    let checkpoint = fixture.base.store.export_checkpoint(&scope()).unwrap();
+    StateStoreCheckpoint::from_json(
+        &serde_json::to_string(&checkpoint).unwrap(),
+        &scope(),
+        &checkpoint.digest(),
+    )
+    .unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn expired_recovery_preserves_an_unconfirmed_write_without_querying_or_dispatching() {
+    let fixture = Fixture::new(Mode::External);
+    fixture.store.mode.store(4, Ordering::SeqCst);
+    let original = fixture.started(&fixture.agent()).await;
+    assert_eq!(
+        original.outcome(&context()).await.unwrap_err().code,
+        ErrorCode::PersistenceUnavailable
+    );
+    let before = fixture.saved(&original).await;
+    fixture.store.mode.store(0, Ordering::SeqCst);
+    tokio::time::advance(Duration::from_secs(11)).await;
+    let source = before
+        .snapshot
+        .recovery_record(id("expired-write"))
+        .unwrap();
+    let command = ResumeCommand {
+        run_id: original.run_id().clone(),
+        expected_revision: before.snapshot.revision,
+        command_id: id("recover-expired-write"),
+        action: ResumeAction::Recover {
+            recovery_ref: source.reference().clone(),
+        },
+    };
+    let recovered = completed(fixture.agent().resume(command, context()).await.unwrap());
+    let outcome = fixture.outcome(&recovered).await;
+    assert!(matches!(
+        outcome.result,
+        OutcomeResult::Exhausted {
+            budget: BudgetKind::Elapsed
+        }
+    ));
+    assert_eq!(outcome.unresolved_effects.len(), 1);
+    assert_eq!(outcome.usage.recovery_attempts, 0);
+    assert_eq!(fixture.tools[1].calls.load(Ordering::SeqCst), 1);
+    assert_eq!(fixture.tools[1].applied.load(Ordering::SeqCst), 1);
+    assert_eq!(fixture.tools[2].calls.load(Ordering::SeqCst), 0);
+    assert_eq!(fixture.model.calls.load(Ordering::SeqCst), 1);
+    let saved = fixture.saved(&recovered).await;
+    assert!(matches!(
+        saved.snapshot.tool_ledger[1].state,
+        ToolCallState::Unknown { .. }
+    ));
+    let result: ToolResult = serde_json::from_value(
+        fixture
+            .base
+            .store
+            .read_record(&scope(), &outcome.unresolved_effects[0])
+            .await
+            .unwrap()
+            .value()
+            .clone(),
+    )
+    .unwrap();
+    assert_eq!(result.effect, ToolEffect::Unknown);
+}
+
+#[tokio::test]
+async fn persistent_storage_failure_reports_the_last_confirmed_revision_and_uncertain_effect_under_current_permission()
+ {
+    let fixture = Fixture::new(Mode::External);
+    fixture.store.mode.store(5, Ordering::SeqCst);
+    let agent = fixture.agent();
+    let original = fixture.started(&agent).await;
+    let error = original.outcome(&context()).await.unwrap_err();
+    assert_eq!(error.code, ErrorCode::PersistenceUnavailable);
+    let diagnostic = error
+        .persistence
+        .expect("authorized recovery metadata survives storage outage");
+    let saved = fixture.saved(&original).await;
+    assert_eq!(diagnostic.run_id, *original.run_id());
+    assert_eq!(diagnostic.last_confirmed_revision, saved.snapshot.revision);
+    assert_eq!(saved.snapshot.status, RunStatus::Running);
+    assert!(saved.snapshot.outcome.is_none());
+    assert_eq!(diagnostic.unconfirmed_effects.len(), 1);
+    let effect = &diagnostic.unconfirmed_effects[0];
+    let ToolCallState::Dispatching {
+        attempt_id,
+        idempotency_key,
+    } = &saved.snapshot.tool_ledger[1].state
+    else {
+        panic!("last confirmed state precedes settlement");
+    };
+    assert_eq!(&effect.attempt_id, attempt_id);
+    assert_eq!(&effect.idempotency_key, idempotency_key);
+    assert_eq!(
+        effect.bound_input_ref,
+        saved.snapshot.tool_ledger[1].call.bound_input_ref
+    );
+    assert_eq!(fixture.tools[1].calls.load(Ordering::SeqCst), 1);
+    assert_eq!(fixture.tools[1].applied.load(Ordering::SeqCst), 1);
+    assert_eq!(fixture.tools[2].calls.load(Ordering::SeqCst), 0);
+    assert_eq!(fixture.model.calls.load(Ordering::SeqCst), 1);
+    let events = fixture
+        .base
+        .store
+        .read_events(&scope(), original.run_id(), 0, 100)
+        .await
+        .unwrap();
+    assert!(
+        !events
+            .events
+            .iter()
+            .any(|event| matches!(event.payload, RunEventPayload::RunFinished { .. }))
+    );
+    fixture.policy.deny_details.store(true, Ordering::SeqCst);
+    let denied = original.outcome(&context()).await.unwrap_err();
+    assert_eq!(denied.code, ErrorCode::AccessDenied);
+    assert!(denied.persistence.is_none());
+}

@@ -160,6 +160,7 @@ impl PolicyPort for Policy {
                 ),
                 2 => matches!(request.action, PolicyAction::CancelRun {}),
                 3 => matches!(request.action, PolicyAction::StartRun {}),
+                4 => matches!(request.action, PolicyAction::ResumeRun { .. }),
                 _ => false,
             };
             Ok(if deny {
@@ -439,6 +440,11 @@ pub struct Fixture {
 
 #[derive(Clone, Copy)]
 pub enum FinalCommitMode {
+    RejectModelResult,
+    RejectRecoveryLease,
+    RejectRecoveryAcceptance,
+    LoseRecoveryAcknowledgement,
+    RejectCandidate,
     OmitVerificationEvent,
     RejectVerification,
     LoseVerificationAcknowledgement,
@@ -507,6 +513,13 @@ impl StateStore for FinalCommitStore {
     }
     fn load<'a>(&'a self, s: &'a Scope, r: &'a Id) -> PortFuture<'a, StoredRun> {
         Box::pin(async move {
+            if self.block_read.load(Ordering::SeqCst) == 4 {
+                return Err(ContractError::new(
+                    ErrorCode::PersistenceUnavailable,
+                    "load.offline",
+                ));
+            }
+
             if self
                 .block_read
                 .compare_exchange(1, 0, Ordering::SeqCst, Ordering::SeqCst)
@@ -538,6 +551,14 @@ impl StateStore for FinalCommitStore {
         n: i64,
         t: u64,
     ) -> PortFuture<'a, RunLease> {
+        if matches!(self.mode, FinalCommitMode::RejectRecoveryLease) {
+            return Box::pin(async {
+                Err(ContractError::new(
+                    ErrorCode::PersistenceUnavailable,
+                    "lease.offline",
+                ))
+            });
+        }
         self.inner.acquire_lease(s, r, o, n, t)
     }
     fn renew_lease<'a>(
@@ -601,6 +622,57 @@ impl StateStore for FinalCommitStore {
     ) -> PortFuture<'a, StoredRun> {
         Box::pin(async move {
             let mut input = input;
+            if matches!(self.mode, FinalCommitMode::RejectRecoveryAcceptance)
+                && input
+                    .events
+                    .iter()
+                    .any(|event| matches!(event.payload, RunEventPayload::RunRecovered { .. }))
+            {
+                return Err(ContractError::new(
+                    ErrorCode::PersistenceUnavailable,
+                    "recovery.offline",
+                ));
+            }
+
+            if matches!(self.mode, FinalCommitMode::LoseRecoveryAcknowledgement)
+                && input
+                    .events
+                    .iter()
+                    .any(|event| matches!(event.payload, RunEventPayload::RunRecovered { .. }))
+            {
+                self.inner.commit(s, r, input).await?;
+                return Err(ContractError::new(
+                    ErrorCode::PersistenceUnavailable,
+                    "recovery.ack",
+                ));
+            }
+            if matches!(self.mode, FinalCommitMode::RejectModelResult)
+                && input
+                    .snapshot
+                    .model_ledger
+                    .iter()
+                    .any(|entry| entry.response_ref.is_some())
+            {
+                return Err(ContractError::new(
+                    ErrorCode::PersistenceUnavailable,
+                    "model.result.commit",
+                ));
+            }
+            if matches!(self.mode, FinalCommitMode::RejectCandidate)
+                && self
+                    .inner
+                    .load(s, r)
+                    .await?
+                    .snapshot
+                    .candidate_ref
+                    .is_none()
+                && input.snapshot.candidate_ref.is_some()
+            {
+                return Err(ContractError::new(
+                    ErrorCode::PersistenceUnavailable,
+                    "candidate.commit",
+                ));
+            }
             if matches!(self.mode, FinalCommitMode::OmitVerificationEvent) {
                 let before = input.events.len();
                 input.events.retain(|event| {
@@ -660,6 +732,11 @@ impl StateStore for FinalCommitStore {
                     self.inner.commit(s, r, input).await
                 }
                 FinalCommitMode::PauseEmptyEventPage
+                | FinalCommitMode::LoseRecoveryAcknowledgement
+                | FinalCommitMode::RejectRecoveryLease
+                | FinalCommitMode::RejectRecoveryAcceptance
+                | FinalCommitMode::RejectModelResult
+                | FinalCommitMode::RejectCandidate
                 | FinalCommitMode::OmitVerificationEvent
                 | FinalCommitMode::RejectVerification
                 | FinalCommitMode::LoseVerificationAcknowledgement

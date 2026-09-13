@@ -579,6 +579,7 @@ impl AdapterFactory for Factory {
                 _ => {}
             }
             let executor = Arc::new(Executor {
+                reconciliations: AtomicUsize::new(0),
                 calls: AtomicUsize::new(0),
                 seen: Mutex::new(vec![]),
                 effect:if self.definition.exports.iter().any(|export|matches!(export,AdapterExportDefinition::Tool{descriptor,..} if descriptor.side_effect==ToolSideEffect::Write)){ToolEffect::Applied}else{ToolEffect::NotApplied},
@@ -641,6 +642,7 @@ impl AdapterFactory for Factory {
     }
 }
 pub struct Executor {
+    pub reconciliations: AtomicUsize,
     pub calls: AtomicUsize,
     pub effect: ToolEffect,
     pub seen: Mutex<Vec<(JsonObject, ToolExecutionContext)>>,
@@ -665,6 +667,35 @@ impl ToolExecutor for Executor {
                 receipt: (self.effect == ToolEffect::Applied).then(
                     || json!({"effect_id":"fixture-effect","target":arguments["workspace_id"]}),
                 ),
+            })
+        })
+    }
+    fn reconcile<'a>(
+        &'a self,
+        arguments: &'a JsonObject,
+        context: &'a ToolExecutionContext,
+    ) -> PortFuture<'a, ToolReconciliation> {
+        Box::pin(async move {
+            self.reconciliations.fetch_add(1, Ordering::SeqCst);
+            let known = self.seen.lock().unwrap().iter().any(|(args, prior)| {
+                args == arguments
+                    && prior.idempotency_key == context.idempotency_key
+                    && prior.call_id == context.call_id
+                    && prior.attempt_id == context.attempt_id
+            });
+            if !known {
+                return Ok(ToolReconciliation::Unknown);
+            }
+            Ok(ToolReconciliation::Known {
+                result: ToolExecutionResult {
+                    outcome: ToolExecutionOutcome::Succeeded {
+                        value: json!("found"),
+                    },
+                    effect: self.effect,
+                    receipt: (self.effect == ToolEffect::Applied).then(
+                        || json!({"effect_id":"fixture-effect","target":arguments["workspace_id"]}),
+                    ),
+                },
             })
         })
     }

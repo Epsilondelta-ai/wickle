@@ -832,3 +832,409 @@ async fn a_saved_failed_result_with_unknown_effect_still_blocks_following_tools(
     assert_eq!(fixture.executors[1].calls.load(Ordering::SeqCst), 0);
     assert_eq!(fixture.saved().await.snapshot.usage.tool_attempts, 0);
 }
+
+#[tokio::test]
+async fn reconciliation_reads_the_original_effect_and_frozen_inputs_without_executing_again() {
+    let fixture = Fixture::reconcilable(
+        &[("write", ToolSideEffect::Write, Action::Error)],
+        Some(OWNED),
+    )
+    .await;
+    fixture
+        .plan(&[("write-once", "write", object(json!({"query":"apply once"})))])
+        .await;
+    assert!(matches!(
+        fixture.execute().await.unwrap(),
+        ToolRoundOutcome::Unresolved { .. }
+    ));
+    let before = fixture.saved().await;
+    let original = fixture.executors[0].observed.lock().unwrap()[0].clone();
+    let mut context = fixture.context.clone();
+    context.data.system_inputs = Some(SystemInputs::new(object(json!({"workspace_id":FOREIGN}))));
+    let observed = fixture
+        .round()
+        .inspect_effect(
+            &id("write-once"),
+            &context,
+            &fixture.budget(fixture.store.clone()).await,
+        )
+        .await
+        .unwrap();
+    assert!(
+        matches!(observed,ToolReconciliation::Known{result} if result.effect==ToolEffect::Applied&&result.receipt.is_some())
+    );
+    assert_eq!(
+        fixture.executors[0].reconciled.lock().unwrap().as_slice(),
+        &[original]
+    );
+    assert_eq!(fixture.executors[0].calls.load(Ordering::SeqCst), 1);
+    assert_eq!(fixture.executors[0].applied.load(Ordering::SeqCst), 1);
+    let after = fixture.saved().await;
+    assert_eq!(after.snapshot.tool_ledger, before.snapshot.tool_ledger);
+    assert_eq!(after.snapshot.usage.tool_attempts, 1);
+    assert_eq!(
+        after.snapshot.usage.recovery_attempts,
+        before.snapshot.usage.recovery_attempts + 1
+    );
+}
+#[tokio::test]
+async fn reconciliation_denial_and_missing_capability_do_not_query_or_repeat_the_effect() {
+    for enabled in [false, true] {
+        let tools = [("write", ToolSideEffect::Write, Action::Error)];
+        let fixture = if enabled {
+            Fixture::reconcilable(&tools, Some(OWNED)).await
+        } else {
+            Fixture::new(&tools, Some(OWNED)).await
+        };
+        fixture
+            .plan(&[("write-once", "write", object(json!({"query":"apply once"})))])
+            .await;
+        fixture.execute().await.unwrap();
+        *fixture.policy.denied.lock().unwrap() = Some(id("write-once"));
+        let result = fixture
+            .round()
+            .inspect_effect(
+                &id("write-once"),
+                &fixture.context,
+                &fixture.budget(fixture.store.clone()).await,
+            )
+            .await;
+        if enabled {
+            assert_eq!(result.unwrap_err().code, ErrorCode::AccessDenied);
+        } else {
+            assert_eq!(result.unwrap(), ToolReconciliation::Unknown);
+        }
+        assert!(fixture.executors[0].reconciled.lock().unwrap().is_empty());
+        assert_eq!(fixture.executors[0].applied.load(Ordering::SeqCst), 1);
+    }
+}
+
+#[tokio::test]
+async fn reconciliation_settles_a_lost_result_without_reapplying_the_write() {
+    let fixture = Fixture::reconcilable(
+        &[("write", ToolSideEffect::Write, Action::Success)],
+        Some(OWNED),
+    )
+    .await;
+    fixture
+        .plan(&[("write-once", "write", object(json!({"query":"apply once"})))])
+        .await;
+    let unavailable = std::sync::Arc::new(FaultStore {
+        inner: fixture.store.clone(),
+        stage: FailStage::Result,
+        lose_ack: false,
+        failures: std::sync::atomic::AtomicUsize::new(0),
+    });
+    assert_eq!(
+        fixture
+            .round()
+            .execute(
+                &id("model-request"),
+                &fixture.context,
+                &fixture.budget(unavailable).await
+            )
+            .await
+            .unwrap_err()
+            .code,
+        ErrorCode::PersistenceUnavailable
+    );
+    assert!(matches!(
+        fixture.saved().await.snapshot.tool_ledger[0].state,
+        ToolCallState::Dispatching { .. }
+    ));
+    let budget = fixture.budget(fixture.store.clone()).await;
+    let result = fixture
+        .round()
+        .reconcile_call(&id("write-once"), &fixture.context, &budget)
+        .await
+        .unwrap();
+    assert_eq!(result.effect, ToolEffect::Applied);
+    assert_eq!(result.status, ToolResultStatus::Succeeded);
+    assert!(result.effect_receipt_ref.is_some());
+    let repeated = fixture
+        .round()
+        .reconcile_call(&id("write-once"), &fixture.context, &budget)
+        .await
+        .unwrap();
+    assert_eq!(repeated, result);
+    assert_eq!(fixture.executors[0].calls.load(Ordering::SeqCst), 1);
+    assert_eq!(fixture.executors[0].applied.load(Ordering::SeqCst), 1);
+    assert_eq!(fixture.executors[0].reconciled.lock().unwrap().len(), 1);
+}
+#[tokio::test]
+async fn reconciliation_preserves_unknown_when_the_executor_has_no_result_query() {
+    let fixture = Fixture::new(
+        &[("write", ToolSideEffect::Write, Action::Success)],
+        Some(OWNED),
+    )
+    .await;
+    fixture
+        .plan(&[("write-once", "write", object(json!({"query":"apply once"})))])
+        .await;
+    let unavailable = std::sync::Arc::new(FaultStore {
+        inner: fixture.store.clone(),
+        stage: FailStage::Result,
+        lose_ack: false,
+        failures: std::sync::atomic::AtomicUsize::new(0),
+    });
+    fixture
+        .round()
+        .execute(
+            &id("model-request"),
+            &fixture.context,
+            &fixture.budget(unavailable).await,
+        )
+        .await
+        .unwrap_err();
+    let result = fixture
+        .round()
+        .reconcile_call(
+            &id("write-once"),
+            &fixture.context,
+            &fixture.budget(fixture.store.clone()).await,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result.effect, ToolEffect::Unknown);
+    assert_eq!(result.status, ToolResultStatus::Unknown);
+    assert!(matches!(
+        fixture.execute().await.unwrap(),
+        ToolRoundOutcome::Unresolved { .. }
+    ));
+    assert_eq!(fixture.executors[0].applied.load(Ordering::SeqCst), 1);
+    assert!(fixture.executors[0].reconciled.lock().unwrap().is_empty());
+}
+#[tokio::test]
+async fn reconciliation_corrects_a_saved_unknown_observation_without_overwriting_it() {
+    let fixture = Fixture::reconcilable(
+        &[("write", ToolSideEffect::Write, Action::Error)],
+        Some(OWNED),
+    )
+    .await;
+    fixture
+        .plan(&[("write-once", "write", object(json!({"query":"apply once"})))])
+        .await;
+    fixture.execute().await.unwrap();
+    let before = fixture.saved().await;
+    let result = fixture
+        .round()
+        .reconcile_call(
+            &id("write-once"),
+            &fixture.context,
+            &fixture.budget(fixture.store.clone()).await,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result.effect, ToolEffect::Applied);
+    let after = fixture.saved().await;
+    assert!(after.messages.starts_with(&before.messages));
+    assert!(
+        matches!(after.messages.last().unwrap().content.as_slice(),[ContentBlock::ToolResultCorrection{result:corrected,..}] if corrected==&result)
+    );
+    assert_eq!(fixture.executors[0].applied.load(Ordering::SeqCst), 1);
+    let checkpoint = fixture.store.export_checkpoint(&scope()).unwrap();
+    let value = serde_json::to_value(&checkpoint).unwrap();
+    let restored =
+        StateStoreCheckpoint::from_json(&value.to_string(), &scope(), &checkpoint.digest())
+            .unwrap();
+    assert_eq!(
+        MemoryStateStore::from_checkpoint(restored)
+            .load(&scope(), &id("run"))
+            .await
+            .unwrap(),
+        after
+    );
+    let mut missing = value;
+    let events = missing["runs"][0]["events"].as_array_mut().unwrap();
+    let index = events
+        .iter()
+        .position(|event| event["payload"]["type"] == "tool.reconciled")
+        .unwrap();
+    events.remove(index);
+    for (index, event) in events.iter_mut().enumerate() {
+        event["seq"] = json!(index + 1);
+    }
+    missing["runs"][0]["snapshot"]["last_event_seq"] = json!(events.len());
+    assert!(
+        StateStoreCheckpoint::from_json(
+            &missing.to_string(),
+            &scope(),
+            &canonical_digest(&missing)
+        )
+        .is_err()
+    );
+}
+
+#[tokio::test]
+async fn interrupted_reconciliation_preserves_unknown_effect_and_charged_query() {
+    for interruption in ["cancel", "revoke", "lease"] {
+        let fixture = Fixture::reconcilable(
+            &[
+                ("write", ToolSideEffect::Write, Action::Error),
+                ("read", ToolSideEffect::ReadOnly, Action::Success),
+            ],
+            Some(OWNED),
+        )
+        .await;
+        fixture
+            .plan(&[
+                ("uncertain", "write", object(json!({"query":"apply once"}))),
+                ("later", "read", object(json!({"query":"later"}))),
+            ])
+            .await;
+        fixture.execute().await.unwrap();
+        let before = fixture.saved().await;
+        let original = fixture.executors[0].observed.lock().unwrap()[0].clone();
+        let executor = &fixture.executors[0];
+        executor.block_reconciliation.store(true, Ordering::SeqCst);
+        let round = fixture.round();
+        let budget = fixture.budget(fixture.store.clone()).await;
+        let call_id = id("uncertain");
+        let query = round.reconcile_call(&call_id, &fixture.context, &budget);
+        tokio::pin!(query);
+        tokio::select! {
+            result = &mut query => panic!("query finished before interruption: {result:?}"),
+            _ = executor.reconciliation_entered.notified() => {}
+        }
+        let expected = match interruption {
+            "cancel" => {
+                fixture.context.cancellation.cancel();
+                ErrorCode::Cancelled
+            }
+            "revoke" => {
+                *fixture.policy.denied.lock().unwrap() = Some(call_id.clone());
+                ErrorCode::AccessDenied
+            }
+            "lease" => {
+                let now = fixture.clock.now().unwrap().utc_ms;
+                fixture
+                    .store
+                    .release_lease(&scope(), &id("run"), &fixture.lease, now)
+                    .await
+                    .unwrap();
+                fixture
+                    .store
+                    .acquire_lease(&scope(), &id("run"), &id("replacement"), now, 20000)
+                    .await
+                    .unwrap();
+                ErrorCode::LeaseLost
+            }
+            _ => unreachable!(),
+        };
+        executor.reconciliation_release.notify_one();
+        assert_eq!(query.await.unwrap_err().code, expected, "{interruption}");
+        let after = fixture.saved().await;
+        assert_eq!(after.snapshot.tool_ledger, before.snapshot.tool_ledger);
+        assert_eq!(after.messages, before.messages);
+        assert_eq!(after.snapshot.usage.tool_attempts, 1);
+        assert_eq!(
+            after.snapshot.usage.recovery_attempts,
+            before.snapshot.usage.recovery_attempts + 1
+        );
+        assert_eq!(executor.reconciled.lock().unwrap().as_slice(), &[original]);
+        assert_eq!(executor.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(executor.applied.load(Ordering::SeqCst), 1);
+        assert_eq!(fixture.executors[1].calls.load(Ordering::SeqCst), 0);
+        assert!(
+            !fixture
+                .store
+                .read_events(&scope(), &id("run"), 0, 100)
+                .await
+                .unwrap()
+                .events
+                .iter()
+                .any(|event| matches!(event.payload, RunEventPayload::ToolReconciled { .. }))
+        );
+    }
+}
+
+#[tokio::test]
+async fn reconciliation_correction_commit_failure_and_ack_loss_preserve_exactly_one_correction() {
+    for lose_ack in [false, true] {
+        let fixture = Fixture::reconcilable_with_limit(
+            &[("write", ToolSideEffect::Write, Action::Error)],
+            Some(OWNED),
+            2,
+        )
+        .await;
+        fixture
+            .plan(&[("uncertain", "write", object(json!({"query":"apply once"})))])
+            .await;
+        fixture.execute().await.unwrap();
+        let before = fixture.saved().await;
+        let original = fixture.executors[0].observed.lock().unwrap()[0].clone();
+        let faulty = std::sync::Arc::new(FaultStore {
+            inner: fixture.store.clone(),
+            stage: FailStage::Correction,
+            lose_ack,
+            failures: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let round = fixture.round();
+        let result = round
+            .reconcile_call(
+                &id("uncertain"),
+                &fixture.context,
+                &fixture.budget(faulty.clone()).await,
+            )
+            .await;
+        assert_eq!(faulty.failures.load(Ordering::SeqCst), 1);
+        if lose_ack {
+            assert_eq!(result.unwrap().effect, ToolEffect::Applied);
+        } else {
+            assert_eq!(result.unwrap_err().code, ErrorCode::PersistenceUnavailable);
+            let rejected = fixture.saved().await;
+            assert_eq!(rejected.snapshot.tool_ledger, before.snapshot.tool_ledger);
+            assert_eq!(rejected.messages, before.messages);
+            assert_eq!(
+                rejected.snapshot.usage.recovery_attempts,
+                before.snapshot.usage.recovery_attempts + 1
+            );
+        }
+        let budget = fixture.budget(fixture.store.clone()).await;
+        let settled = round
+            .reconcile_call(&id("uncertain"), &fixture.context, &budget)
+            .await
+            .unwrap();
+        assert_eq!(settled.effect, ToolEffect::Applied);
+        assert_eq!(settled.status, ToolResultStatus::Succeeded);
+        assert!(settled.effect_receipt_ref.is_some());
+        let after = fixture.saved().await;
+        assert!(after.messages.starts_with(&before.messages));
+        assert_eq!(after.messages.len(), before.messages.len() + 1);
+        assert!(
+            matches!(after.messages.last().unwrap().content.as_slice(), [ContentBlock::ToolResultCorrection { result, .. }] if result == &settled)
+        );
+        let queries = if lose_ack { 1 } else { 2 };
+        assert_eq!(
+            after.snapshot.usage.recovery_attempts,
+            before.snapshot.usage.recovery_attempts + queries
+        );
+        assert_eq!(after.snapshot.usage.tool_attempts, 1);
+        assert_eq!(
+            fixture.executors[0].reconciled.lock().unwrap().as_slice(),
+            vec![original; queries as usize].as_slice()
+        );
+        assert_eq!(fixture.executors[0].calls.load(Ordering::SeqCst), 1);
+        assert_eq!(fixture.executors[0].applied.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            fixture
+                .store
+                .read_events(&scope(), &id("run"), 0, 100)
+                .await
+                .unwrap()
+                .events
+                .iter()
+                .filter(|event| matches!(event.payload, RunEventPayload::ToolReconciled { .. }))
+                .count(),
+            1
+        );
+        assert_eq!(
+            round
+                .reconcile_call(&id("uncertain"), &fixture.context, &budget)
+                .await
+                .unwrap(),
+            settled
+        );
+        assert_eq!(fixture.saved().await, after);
+    }
+}

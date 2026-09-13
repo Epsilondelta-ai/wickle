@@ -651,6 +651,9 @@ pub struct RunSnapshot {
     /// Append-only resume acceptances and prior segment outcomes.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub resume_receipts: Vec<ResumeReceipt>,
+    /// Accepted recoveries of interrupted Running segments.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub recovery_receipts: Vec<crate::RecoveryReceipt>,
     /// Exact selected lifecycle definitions pinned before any hook executes.
     #[serde(
         default,
@@ -832,19 +835,53 @@ impl RunSnapshot {
         }
         let mut commands = BTreeSet::new();
         let mut segment = 0;
-        for receipt in &self.resume_receipts {
-            if receipt.command.run_id != self.run_id
-                || !commands.insert(&receipt.command.command_id)
-                || receipt.accepted_revision > self.revision
-                || receipt.command.expected_revision.checked_add(1)
-                    != Some(receipt.accepted_revision)
-                || receipt.previous_segment_start_revision != segment
-                || receipt.command.expected_revision < segment
-                || receipt.previous_last_event_seq > self.last_event_seq
+        if self
+            .resume_receipts
+            .windows(2)
+            .any(|pair| pair[0].accepted_revision >= pair[1].accepted_revision)
+            || self
+                .recovery_receipts
+                .windows(2)
+                .any(|pair| pair[0].accepted_revision >= pair[1].accepted_revision)
+        {
+            return Err(invalid("command_receipts.order"));
+        }
+        let mut receipts: Vec<_> = self
+            .resume_receipts
+            .iter()
+            .map(|receipt| {
+                (
+                    &receipt.command,
+                    receipt.accepted_revision,
+                    receipt.previous_segment_start_revision,
+                    receipt.previous_last_event_seq,
+                    false,
+                )
+            })
+            .chain(self.recovery_receipts.iter().map(|receipt| {
+                (
+                    &receipt.command,
+                    receipt.accepted_revision,
+                    receipt.previous_segment_start_revision,
+                    receipt.previous_last_event_seq,
+                    true,
+                )
+            }))
+            .collect();
+        receipts.sort_by_key(|receipt| receipt.1);
+        for (command, accepted_revision, previous_segment, previous_event, recovery) in receipts {
+            if command.run_id != self.run_id
+                || !commands.insert(&command.command_id)
+                || accepted_revision > self.revision
+                || command.expected_revision.checked_add(1) != Some(accepted_revision)
+                || previous_segment != segment
+                || command.expected_revision < segment
+                || previous_event > self.last_event_seq
+                || matches!(command.action, ResumeAction::Recover { .. }) != recovery
             {
-                return Err(invalid("resume_receipts"));
+                return Err(invalid("command_receipts"));
             }
-            segment = receipt.accepted_revision;
+            segment = accepted_revision;
         }
         let mut calls = BTreeSet::new();
         for entry in &self.tool_ledger {
@@ -961,6 +998,12 @@ pub enum RunEventPayload {
         /// Protected result record.
         result_ref: RecordRef,
     },
+    /// Read-only reconciliation evidence committed with its corrected result.
+    #[serde(rename = "tool.reconciled")]
+    ToolReconciled {
+        /// Protected identity, recovery reservation and result evidence.
+        reconciliation_ref: RecordRef,
+    },
     /// A recorded result cannot establish whether an external operation applied.
     #[serde(rename = "tool.unresolved")]
     ToolUnresolved {
@@ -988,6 +1031,12 @@ pub enum RunEventPayload {
     RunResumed {
         /// Consumed command record.
         command_ref: RecordRef,
+    },
+    /// Interrupted Running segment recovered under a new lease.
+    #[serde(rename = "run.recovered")]
+    RunRecovered {
+        /// Exact accepted recovery receipt, including the original checkpoint reference.
+        recovery_receipt_ref: RecordRef,
     },
     /// Terminal outcome committed.
     #[serde(rename = "run.finished")]

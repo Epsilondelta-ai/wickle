@@ -477,3 +477,48 @@ async fn permission_revoked_while_the_factory_opens_prevents_publication_and_clo
         0
     );
 }
+
+#[tokio::test]
+async fn reconciliation_preserves_the_original_attempt_without_reentering_a_released_or_foreign_binding()
+ {
+    let fixture = Fixture::new();
+    let registry = Arc::new(fixture.registry().unwrap());
+    let runtime = fixture.runtime(registry.clone());
+    let (assembly, context) = fixture.admit(&registry, &profile(), "run", "segment").await;
+    let bound = runtime.bind(&assembly, &context).await.unwrap();
+    let tool = &bound.tools().get(&id("search_records")).unwrap().executor;
+    let args: JsonObject =
+        serde_json::from_value(json!({"workspace_id":"recorded-target","query":"original query"}))
+            .unwrap();
+    let original = execution_context(&context);
+    let result = tool.execute(&args, &original).await.unwrap();
+    let executor = fixture.factories[0].instances.lock().unwrap()[0]
+        .executor
+        .clone();
+    let mut current = original.clone();
+    current.principal_ref = id("recovery-reviewer");
+    let observed = tool.reconcile(&args, &current).await.unwrap();
+    assert_eq!(observed, ToolReconciliation::Known { result });
+    assert_eq!(executor.calls.load(Ordering::SeqCst), 1);
+    let queries = executor.reconciliations.load(Ordering::SeqCst);
+    for kind in [0, 1, 2] {
+        let mut foreign = current.clone();
+        match kind {
+            0 => foreign.scope.tenant_id = id("foreign"),
+            1 => foreign.run_id = id("different-run"),
+            _ => foreign.binding_set_id = Some(id("different-segment")),
+        };
+        assert_eq!(
+            tool.reconcile(&args, &foreign).await.unwrap_err().code,
+            ErrorCode::AccessDenied
+        );
+    }
+    assert_eq!(executor.reconciliations.load(Ordering::SeqCst), queries);
+    bound.release(&release_context(&context)).await.unwrap();
+    assert_eq!(
+        tool.reconcile(&args, &current).await.unwrap_err().code,
+        ErrorCode::InvalidTransition
+    );
+    assert_eq!(executor.reconciliations.load(Ordering::SeqCst), queries);
+    assert_eq!(executor.calls.load(Ordering::SeqCst), 1);
+}

@@ -629,10 +629,26 @@ impl StateStore for CommandStore {
         self.inner.admit(s, input)
     }
     fn load<'a>(&'a self, s: &'a Scope, r: &'a Id) -> PortFuture<'a, StoredRun> {
-        self.inner.load(s, r)
+        Box::pin(async move {
+            if self.mode.load(Ordering::SeqCst) == 6 {
+                return Err(ContractError::new(
+                    ErrorCode::PersistenceUnavailable,
+                    "store.offline",
+                ));
+            }
+            self.inner.load(s, r).await
+        })
     }
     fn load_session<'a>(&'a self, s: &'a Scope, r: &'a Id) -> PortFuture<'a, SessionSnapshot> {
-        self.inner.load_session(s, r)
+        Box::pin(async move {
+            if self.mode.load(Ordering::SeqCst) == 6 {
+                return Err(ContractError::new(
+                    ErrorCode::PersistenceUnavailable,
+                    "store.offline",
+                ));
+            }
+            self.inner.load_session(s, r).await
+        })
     }
     fn check_lease<'a>(
         &'a self,
@@ -641,7 +657,15 @@ impl StateStore for CommandStore {
         l: &'a RunLease,
         n: i64,
     ) -> PortFuture<'a, RunLease> {
-        self.inner.check_lease(s, r, l, n)
+        Box::pin(async move {
+            if self.mode.load(Ordering::SeqCst) == 6 {
+                return Err(ContractError::new(
+                    ErrorCode::PersistenceUnavailable,
+                    "store.offline",
+                ));
+            }
+            self.inner.check_lease(s, r, l, n).await
+        })
     }
     fn acquire_lease<'a>(
         &'a self,
@@ -661,7 +685,15 @@ impl StateStore for CommandStore {
         n: i64,
         t: u64,
     ) -> PortFuture<'a, RunLease> {
-        self.inner.renew_lease(s, r, l, n, t)
+        Box::pin(async move {
+            if self.mode.load(Ordering::SeqCst) == 6 {
+                return Err(ContractError::new(
+                    ErrorCode::PersistenceUnavailable,
+                    "store.offline",
+                ));
+            }
+            self.inner.renew_lease(s, r, l, n, t).await
+        })
     }
     fn release_lease<'a>(
         &'a self,
@@ -670,7 +702,15 @@ impl StateStore for CommandStore {
         l: &'a RunLease,
         n: i64,
     ) -> PortFuture<'a, ()> {
-        self.inner.release_lease(s, r, l, n)
+        Box::pin(async move {
+            if self.mode.load(Ordering::SeqCst) == 6 {
+                return Err(ContractError::new(
+                    ErrorCode::PersistenceUnavailable,
+                    "store.offline",
+                ));
+            }
+            self.inner.release_lease(s, r, l, n).await
+        })
     }
     fn read_events<'a>(
         &'a self,
@@ -679,7 +719,15 @@ impl StateStore for CommandStore {
         after: u64,
         limit: usize,
     ) -> PortFuture<'a, EventPage> {
-        self.inner.read_events(s, r, after, limit)
+        Box::pin(async move {
+            if self.mode.load(Ordering::SeqCst) == 6 {
+                return Err(ContractError::new(
+                    ErrorCode::PersistenceUnavailable,
+                    "store.offline",
+                ));
+            }
+            self.inner.read_events(s, r, after, limit).await
+        })
     }
     fn read_record<'a>(
         &'a self,
@@ -687,6 +735,12 @@ impl StateStore for CommandStore {
         r: &'a RecordRef,
     ) -> PortFuture<'a, ProtectedRecord> {
         Box::pin(async move {
+            if self.mode.load(Ordering::SeqCst) == 6 {
+                return Err(ContractError::new(
+                    ErrorCode::PersistenceUnavailable,
+                    "store.offline",
+                ));
+            }
             let pause = {
                 let mut reference = self.pause_record.lock().unwrap();
                 if reference.as_ref() == Some(r) {
@@ -710,6 +764,36 @@ impl StateStore for CommandStore {
         mut input: CommitInput,
     ) -> PortFuture<'a, StoredRun> {
         Box::pin(async move {
+            if self.mode.load(Ordering::SeqCst) == 6 {
+                return Err(ContractError::new(
+                    ErrorCode::PersistenceUnavailable,
+                    "store.offline",
+                ));
+            }
+            if self.mode.load(Ordering::SeqCst) == 5
+                && input
+                    .events
+                    .iter()
+                    .any(|event| matches!(event.payload, RunEventPayload::ToolUnresolved { .. }))
+            {
+                self.mode.store(6, Ordering::SeqCst);
+                return Err(ContractError::new(
+                    ErrorCode::PersistenceUnavailable,
+                    "store.offline",
+                ));
+            }
+
+            if self.mode.load(Ordering::SeqCst) == 4
+                && input
+                    .events
+                    .iter()
+                    .any(|event| matches!(event.payload, RunEventPayload::ToolUnresolved { .. }))
+            {
+                return Err(ContractError::new(
+                    ErrorCode::PersistenceUnavailable,
+                    "tool.result.commit",
+                ));
+            }
             let timeout = self.wait_timeout_ms.load(Ordering::SeqCst);
             if timeout > 0
                 && input

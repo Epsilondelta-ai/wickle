@@ -1,5 +1,5 @@
 use super::*;
-use std::panic::AssertUnwindSafe;
+use std::{collections::BTreeSet, panic::AssertUnwindSafe};
 
 impl Agent {
     pub(super) async fn drive(
@@ -119,14 +119,16 @@ impl Agent {
                             local,
                         )
                         .await;
-                        Box::pin(self.run_segment(
-                            run_id,
-                            prompt,
-                            segment.as_ref().expect("bound segment"),
-                            &budget,
-                            &lease,
-                            local,
-                        ))
+                        crate::future::boxed(|| {
+                            self.run_segment(
+                                run_id,
+                                prompt,
+                                segment.as_ref().expect("bound segment"),
+                                &budget,
+                                &lease,
+                                local,
+                            )
+                        })
                         .await
                     }
                     Err(error) => {
@@ -273,14 +275,58 @@ impl Agent {
     ) -> Result<(), ContractError> {
         let context = &segment.context;
         let mut waiting = None;
-        let saved = self
+        let mut saved = self
             .inner
             .bindings
             .state
             .load(budget.scope(), run_id)
             .await?;
+        let recovering = saved
+            .snapshot
+            .recovery_receipts
+            .last()
+            .is_some_and(|receipt| receipt.accepted_revision == local.segment_start_revision);
+        let mut recovery_error = None;
+        if recovering {
+            let uncertain: Vec<_> = saved
+                .snapshot
+                .tool_ledger
+                .iter()
+                .filter(|entry| {
+                    matches!(
+                        entry.state,
+                        ToolCallState::Dispatching { .. } | ToolCallState::Unknown { .. }
+                    )
+                })
+                .map(|entry| entry.call.call_id.clone())
+                .collect();
+            let round = self.tool_round(budget, segment).await?;
+            for call_id in uncertain {
+                match crate::future::boxed(|| round.reconcile_call(&call_id, context, budget)).await
+                {
+                    Ok(result) if result.effect == ToolEffect::Unknown => break,
+                    Ok(_) => {}
+                    Err(error) => {
+                        recovery_error = Some(error);
+                        break;
+                    }
+                }
+            }
+            saved = self
+                .inner
+                .bindings
+                .state
+                .load(budget.scope(), run_id)
+                .await?;
+        }
+        let mut reuse_step = recovering
+            && matches!(saved.snapshot.phase, RunPhase::Prepare | RunPhase::Model)
+            && saved.snapshot.model_step_id.is_some();
         let mut pending_round = saved.snapshot.tool_ledger.iter().find(|entry| !matches!(&entry.state, ToolCallState::Settled { result } if result.status != ToolResultStatus::Unknown && result.effect != ToolEffect::Unknown)).map(|entry| entry.call.model_request_id.clone());
         let attempt = loop {
+            if let Some(error) = recovery_error.take() {
+                break Some(Err(error));
+            }
             let current = self
                 .inner
                 .bindings
@@ -300,7 +346,8 @@ impl Agent {
             }
             if let Some(request_id) = pending_round.take() {
                 let round = self.tool_round(budget, segment).await?;
-                let result = round.execute(&request_id, context, budget).await;
+                let result =
+                    crate::future::boxed(|| round.execute(&request_id, context, budget)).await;
                 self.remember_observer_error(local, round.observer_error());
                 match result {
                     Ok(ToolRoundOutcome::Completed) => {}
@@ -312,7 +359,16 @@ impl Agent {
                 }
             }
             // Keep the nested model/verification path off the parent Tool loop stack.
-            match Box::pin(self.generate(run_id, prompt.clone(), segment, budget, lease)).await {
+            match Box::pin(self.generate(
+                run_id,
+                prompt.clone(),
+                segment,
+                budget,
+                lease,
+                std::mem::take(&mut reuse_step),
+            ))
+            .await
+            {
                 Ok(Guarded::Completed(ModelExchangeOutcome::Completed { response }))
                     if response.finish == ModelFinish::ToolCalls =>
                 {
@@ -320,7 +376,10 @@ impl Agent {
                         break Some(Err(error));
                     }
                     let round = self.tool_round(budget, segment).await?;
-                    let result = round.execute(&response.request_id, context, budget).await;
+                    let result = crate::future::boxed(|| {
+                        round.execute(&response.request_id, context, budget)
+                    })
+                    .await;
                     self.remember_observer_error(local, round.observer_error());
                     match result {
                         Ok(ToolRoundOutcome::Completed) => continue,
@@ -474,6 +533,7 @@ impl Agent {
         segment: &SegmentBindings,
         budget: &RunBudget,
         lease: &RunLease,
+        reuse_step: bool,
     ) -> Result<Guarded<ModelExchangeOutcome>, ContractError> {
         let context = &segment.context;
         let bindings = &self.inner.bindings;
@@ -483,35 +543,41 @@ impl Agent {
         let run_context = self.before_run(budget, segment).await?;
         let mut snapshot = bindings.state.load(&bindings.scope, run_id).await?.snapshot;
         let expected_revision = snapshot.revision;
-        let step = bindings.ids.next_id()?;
-        let (elapsed, now) = budget.settlement_time(snapshot.usage.elapsed_ms)?;
-        snapshot.revision = snapshot
-            .revision
-            .checked_add(1)
-            .ok_or_else(|| fail(ErrorCode::RevisionConflict, "agent.prepare"))?;
-        snapshot.phase = RunPhase::Prepare;
-        snapshot.model_step_id = Some(step.clone());
-        snapshot
-            .source_states
-            .retain(|state| state.trigger != ContextTrigger::BeforeModel);
-        snapshot.usage.elapsed_ms = elapsed;
-        snapshot.timing.last_observed_at_ms = now;
-        let saved = bindings
-            .state
-            .commit(
-                &bindings.scope,
-                run_id,
-                CommitInput {
-                    expected_revision,
-                    lease: lease.clone(),
-                    now_ms: now,
-                    snapshot,
-                    messages: vec![],
-                    events: vec![],
-                    records: vec![],
-                },
-            )
-            .await?;
+        let step = match snapshot.model_step_id.as_ref().filter(|_| reuse_step) {
+            Some(step) => step.clone(),
+            None => bindings.ids.next_id()?,
+        };
+        if !reuse_step {
+            let (elapsed, now) = budget.settlement_time(snapshot.usage.elapsed_ms)?;
+            snapshot.revision = snapshot
+                .revision
+                .checked_add(1)
+                .ok_or_else(|| fail(ErrorCode::RevisionConflict, "agent.prepare"))?;
+            snapshot.phase = RunPhase::Prepare;
+            snapshot.model_step_id = Some(step.clone());
+            snapshot
+                .source_states
+                .retain(|state| state.trigger != ContextTrigger::BeforeModel);
+            snapshot.usage.elapsed_ms = elapsed;
+            snapshot.timing.last_observed_at_ms = now;
+            bindings
+                .state
+                .commit(
+                    &bindings.scope,
+                    run_id,
+                    CommitInput {
+                        expected_revision,
+                        lease: lease.clone(),
+                        now_ms: now,
+                        snapshot,
+                        messages: vec![],
+                        events: vec![],
+                        records: vec![],
+                    },
+                )
+                .await?;
+        }
+        let saved = bindings.state.load(&bindings.scope, run_id).await?;
         let router = bindings.router.snapshot();
         let rule = router
             .policy()
@@ -635,11 +701,43 @@ impl Agent {
         if saved.snapshot.status.is_terminal() {
             return Ok(());
         }
-        if unresolved_effects.is_empty() && saved.snapshot.tool_ledger.iter().any(|entry| matches!(entry.state, ToolCallState::Unknown { .. }) || matches!(&entry.state, ToolCallState::Settled { result } if result.effect == ToolEffect::Unknown)) {
-            if let Some(receipt) = saved.snapshot.resume_receipts.last() {
-                let record = bindings.state.read_record(&bindings.scope, &receipt.previous_outcome_ref).await?;
-                let previous: RunOutcome = serde_json::from_value(record.value().clone()).map_err(|_| fail(ErrorCode::InvalidSnapshot, "agent.previous_outcome"))?;
-                unresolved_effects = previous.unresolved_effects;
+        let unresolved: BTreeSet<_> = saved
+            .snapshot
+            .tool_ledger
+            .iter()
+            .filter_map(|entry| match &entry.state {
+                ToolCallState::Unknown {
+                    attempt_id,
+                    idempotency_key,
+                } => Some((attempt_id.clone(), idempotency_key.clone())),
+                _ => None,
+            })
+            .collect();
+        if !unresolved.is_empty() {
+            let mut after = 0;
+            loop {
+                let page = bindings
+                    .state
+                    .read_events(&bindings.scope, run_id, after, MAX_EVENT_PAGE_SIZE)
+                    .await?;
+                for event in &page.events {
+                    if let RunEventPayload::ToolUnresolved {
+                        result_ref,
+                        attempt_id,
+                        idempotency_key,
+                    } = &event.payload
+                    {
+                        if unresolved.contains(&(attempt_id.clone(), idempotency_key.clone()))
+                            && !unresolved_effects.contains(result_ref)
+                        {
+                            unresolved_effects.push(result_ref.clone());
+                        }
+                    }
+                }
+                if !page.has_more {
+                    break;
+                }
+                after = page.next_after_seq;
             }
         }
         if output.is_empty() && !matches!(result, OutcomeResult::Succeeded { .. }) {

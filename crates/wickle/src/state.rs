@@ -11,6 +11,8 @@ use serde_json::Value;
 mod checkpoint;
 mod context_state;
 mod hook_state;
+mod reconciliation_state;
+mod recovery_state;
 mod skill_state;
 mod source_state;
 mod verification_state;
@@ -417,6 +419,7 @@ impl StateStore for MemoryStateStore {
                 || !input.snapshot.tool_ledger.is_empty()
                 || !input.snapshot.reservations.is_empty()
                 || !input.snapshot.resume_receipts.is_empty()
+                || !input.snapshot.recovery_receipts.is_empty()
                 || !input.snapshot.hook_applications.is_empty()
                 || !input.snapshot.context_batches.is_empty()
                 || !input.snapshot.source_states.is_empty()
@@ -647,9 +650,12 @@ impl StateStore for MemoryStateStore {
                 return Err(error(ErrorCode::RevisionConflict, "revision"));
             }
             validate_transition(&run.snapshot, &input.snapshot)?;
+            recovery_state::transition(&run.snapshot, &input.snapshot, &input.events)?;
             if input.events.iter().any(|event| {
-                matches!(event.payload, RunEventPayload::RunResumed { .. })
-                    && event.timestamp_ms > input.now_ms
+                matches!(
+                    event.payload,
+                    RunEventPayload::RunResumed { .. } | RunEventPayload::RunRecovered { .. }
+                ) && event.timestamp_ms > input.now_ms
             }) {
                 return Err(error(ErrorCode::InvalidEvent, "events.resume_time"));
             }
@@ -673,6 +679,19 @@ impl StateStore for MemoryStateStore {
                     return Err(error(
                         ErrorCode::DeadlineExceeded,
                         "resume.acceptance_expiry",
+                    ));
+                }
+            }
+            if let Some(receipt) = input
+                .snapshot
+                .recovery_receipts
+                .last()
+                .filter(|receipt| receipt.accepted_revision == input.snapshot.revision)
+            {
+                if receipt.expired != (input.now_ms >= run.snapshot.timing.deadline_at_ms) {
+                    return Err(error(
+                        ErrorCode::DeadlineExceeded,
+                        "recovery.acceptance_expiry",
                     ));
                 }
             }
@@ -973,6 +992,7 @@ fn validate_snapshot_refs(
     additions: &BTreeMap<RecordKey, ProtectedRecord>,
     snapshot: &RunSnapshot,
 ) -> Result<(), ContractError> {
+    recovery_state::validate(state, additions, snapshot)?;
     validate_source_snapshot(state, additions, snapshot)?;
     skill_state::validate_skill_snapshot(state, additions, snapshot)?;
     context_state::validate_snapshot(state, additions, snapshot)?;
@@ -1382,9 +1402,19 @@ fn validate_events(
     let mut started = 0;
     let mut finished = 0;
     let mut resumed = 0;
+    let reconciled = reconciliation_state::corrections(
+        state,
+        additions,
+        snapshot,
+        &events.iter().collect::<Vec<_>>(),
+        &messages.iter().collect::<Vec<_>>(),
+    )?;
     for message in messages {
         for content in &message.content {
             if let ContentBlock::ToolResultCorrection { result, .. } = content {
+                if reconciled.contains(&message.message_id) {
+                    continue;
+                }
                 let previous = state.runs.get(&snapshot.run_id).ok_or_else(not_found)?;
                 if !matches!(previous.snapshot.wait.as_ref().map(|wait| &wait.target), Some(WaitTarget::External { call_id, .. }) if call_id == &result.call_id)
                     || !snapshot.resume_receipts.last().is_some_and(|receipt| {
@@ -1418,6 +1448,13 @@ fn validate_events(
             return Err(error(ErrorCode::InvalidEvent, "events"));
         }
         let reference = match &event.payload {
+            RunEventPayload::RunRecovered {
+                recovery_receipt_ref,
+            } => {
+                recovery_state::event(state, additions, snapshot, event, recovery_receipt_ref)?;
+                recovery_receipt_ref
+            }
+            RunEventPayload::ToolReconciled { reconciliation_ref } => reconciliation_ref,
             RunEventPayload::ContextRewritten { revision_ref } => {
                 let revision = context_state::revision(state, additions, revision_ref, snapshot)?;
                 if snapshot.context_revision_ref.as_ref() != Some(revision_ref)
@@ -1607,6 +1644,7 @@ fn validate_events(
             {
                 continue;
             }
+            if messages.iter().any(|message|reconciled.contains(&message.message_id)&&matches!(message.content.as_slice(),[ContentBlock::ToolResultCorrection{result,..}] if result.call_id==old.call.call_id)){continue;}
             if !snapshot.resume_receipts.last().is_some_and(|receipt| {
                     receipt.accepted_revision == snapshot.revision
                         && matches!(receipt.command.action, ResumeAction::External { .. })
@@ -1672,7 +1710,16 @@ fn validate_resume_history(
     }
     let mut previous_resume_seq = 0;
     let mut corrected_calls = BTreeSet::new();
-    let mut authorized_corrections = BTreeSet::new();
+    let mut authorized_corrections =
+        reconciliation_state::corrections(state, additions, snapshot, events, messages)?;
+    for message in messages
+        .iter()
+        .filter(|message| authorized_corrections.contains(&message.message_id))
+    {
+        if let [ContentBlock::ToolResultCorrection { result, .. }] = message.content.as_slice() {
+            corrected_calls.insert(result.call_id.clone());
+        }
+    }
     for (event, receipt) in resumed.into_iter().zip(&snapshot.resume_receipts) {
         let RunEventPayload::RunResumed { command_ref } = &event.payload else {
             unreachable!()
@@ -2109,7 +2156,9 @@ fn validate_transition(previous: &RunSnapshot, next: &RunSnapshot) -> Result<(),
                     || old.inspection_ref != new.inspection_ref
                     || (matches!(
                         old.state,
-                        ModelAttemptState::Completed {} | ModelAttemptState::Failed { .. }
+                        ModelAttemptState::Completed {}
+                            | ModelAttemptState::Failed { .. }
+                            | ModelAttemptState::Interrupted { .. }
                     ) && old != new)
                     || (matches!(old.state, ModelAttemptState::Unknown {})
                         && matches!(new.state, ModelAttemptState::Reserved {}))

@@ -348,3 +348,99 @@ async fn repeating_the_same_source_trigger_is_rejected_even_with_different_limit
         assert!(fixture.catalog_source.queries.lock().unwrap().is_empty());
     }
 }
+
+#[tokio::test]
+async fn interrupted_model_recovery_reuses_saved_batches_with_new_scoped_instances_and_current_access()
+ {
+    for revoked in [false, true] {
+        let mut fixture = Fixture::new(false, true);
+        fixture.profile.limits.max_recovery_attempts = 2;
+        let mut bindings = fixture.bindings();
+        bindings.state = Arc::new(agent_support::FinalCommitStore::new(
+            fixture.base.store.clone(),
+            agent_support::FinalCommitMode::RejectCandidate,
+        ));
+
+        let original_agent = create_agent(fixture.profile.clone(), bindings).unwrap();
+
+        let original = fixture.start(&original_agent).await;
+        assert_eq!(
+            original
+                .outcome(&agent_support::context())
+                .await
+                .unwrap_err()
+                .code,
+            ErrorCode::PersistenceUnavailable
+        );
+
+        fixture.released(&original).await;
+
+        let saved = fixture
+            .base
+            .store
+            .load(&scope(), original.run_id())
+            .await
+            .unwrap();
+        assert_eq!(saved.snapshot.status, RunStatus::Running);
+        assert!(!saved.snapshot.context_batches.is_empty());
+        let model_calls = fixture.model.calls.load(Ordering::SeqCst);
+        let first = fixture.factory.instances.lock().unwrap()[0].clone();
+        assert_eq!(first.closes.load(Ordering::SeqCst), 1);
+        let queries = first.source.queries.lock().unwrap().len();
+        fixture.factory.revoke_new.store(revoked, Ordering::SeqCst);
+        let checkpoint = saved
+            .snapshot
+            .recovery_record(id("interrupted-context"))
+            .unwrap();
+        let command = ResumeCommand {
+            run_id: original.run_id().clone(),
+            expected_revision: saved.snapshot.revision,
+            command_id: id("recover-context"),
+            action: ResumeAction::Recover {
+                recovery_ref: checkpoint.reference().clone(),
+            },
+        };
+
+        let recovered = agent_support::completed(
+            fixture
+                .agent()
+                .resume(command, agent_support::context())
+                .await
+                .unwrap(),
+        );
+
+        let outcome = fixture.outcome(&recovered).await;
+        assert_eq!(
+            outcome.result.status(),
+            if revoked {
+                RunStatus::Failed
+            } else {
+                RunStatus::Succeeded
+            }
+        );
+        fixture.released(&recovered).await;
+        assert_eq!(fixture.model.calls.load(Ordering::SeqCst), model_calls);
+        {
+            let instances = fixture.factory.instances.lock().unwrap();
+            assert_eq!(instances.len(), 2);
+            assert_eq!(instances[1].closes.load(Ordering::SeqCst), 1);
+            assert_ne!(
+                instances[0].context.execution.binding_set_id,
+                instances[1].context.execution.binding_set_id
+            );
+            assert!(instances[1].source.queries.lock().unwrap().is_empty());
+            assert_eq!(instances[0].source.queries.lock().unwrap().len(), queries);
+        }
+        assert_eq!(
+            fixture
+                .base
+                .store
+                .load(&scope(), recovered.run_id())
+                .await
+                .unwrap()
+                .snapshot
+                .context_batches,
+            saved.snapshot.context_batches
+        );
+    }
+}
