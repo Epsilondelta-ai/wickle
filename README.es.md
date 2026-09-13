@@ -27,3 +27,5 @@ La [guía de proveedores de modelos](docs/model-providers.md) explica cómo cone
 La guía de [herramientas MCP](docs/mcp.md) explica cómo conectar herramientas revisadas mediante stdio.
 
 La guía de [consumidores de eventos](docs/event-consumers.md) describe la entrega de registros a servicios de memoria y grafos desde el Host.
+
+La [matriz de versiones](docs/model-support.md) distingue las pruebas locales de contrato de las comprobaciones con servicios reales.

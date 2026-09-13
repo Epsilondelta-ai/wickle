@@ -514,3 +514,48 @@ async fn arm_scope_and_target_rejection_precedes_credential_lookup() {
         assert!(server.requests.lock().unwrap().is_empty());
     }
 }
+
+#[tokio::test]
+async fn two_documented_releases_keep_deployment_and_model_identity_distinct() {
+    let releases = ["gpt-6-astra", "gpt-5.6-sol"];
+    let server = Server::new(
+        releases
+            .iter()
+            .map(|release| Reply::sse(&events(release, release)))
+            .collect(),
+    )
+    .await;
+    let mut bindings = vec![];
+    for (index, release) in releases.iter().enumerate() {
+        let mut options = options(&server);
+        options.deployment = format!("deployment-{index}");
+        let connection = AzureOpenAiConnection::new(
+            scope(),
+            reference(&format!("account-{index}")),
+            Arc::new(AzureCredential::ApiKey("fixture-key".into())),
+            options,
+        )
+        .unwrap();
+        let mut request = request(&connection, release);
+        request.route.model_version = id(if index == 0 {
+            "2026-09-03"
+        } else {
+            "2026-07-09"
+        });
+        bindings.push((AzureOpenAiModel::new(connection), request));
+    }
+    for ((model, request), release) in bindings.iter().zip(releases) {
+        let result = collect_model_response(request, model.generate(request, &context(request)))
+            .await
+            .unwrap();
+        assert_eq!(result.text, release);
+        assert_eq!(result.metadata.reported_model_id, Some(id(release)));
+        assert!(result.metadata.reported_model_version.is_none());
+    }
+    let requests = server.requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    for (index, request) in requests.iter().enumerate() {
+        assert_eq!(request.body["model"], format!("deployment-{index}"));
+        assert_eq!(request.path, "/openai/v1/responses");
+    }
+}

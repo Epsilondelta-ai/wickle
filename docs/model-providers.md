@@ -35,3 +35,5 @@ All adapters enforce scope/target/API matching, finite deadlines, bounded stream
 The independent package check runs each provider's HTTP/SSE consumer and a common dispatcher conformance consumer across all seven concrete adapters. The latter checks binding isolation and rejects foreign scopes, unknown credential revisions and incompatible API contracts before network access. Provider fixtures separately exercise successful encoding, streaming, Tool replay, usage and failures.
 
 These checks establish library and transport-contract behavior. They do not establish every model version's live availability, account permissions or production support. Actual model/account verification and support promotion require separate evidence; missing metadata remains unknown.
+
+See the [model-version evidence matrix](model-support.md) for selected release identities and the distinction between local contract checks and live smoke results.

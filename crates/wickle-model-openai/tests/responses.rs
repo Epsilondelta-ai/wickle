@@ -583,3 +583,33 @@ async fn final_content_cannot_move_between_messages_or_parts() {
         }
     }
 }
+
+#[tokio::test]
+async fn two_documented_release_ids_coexist_without_replacing_connection_state() {
+    let releases = ["gpt-6-astra", "gpt-5.6-sol"];
+    let server = Server::new(
+        releases
+            .iter()
+            .map(|release| Reply::sse(&events(release, release)))
+            .collect(),
+    )
+    .await;
+    let connection = connection(&server);
+    let model = OpenAiModel::new(connection.clone());
+    for (index, release) in releases.iter().enumerate() {
+        let mut request = request(&connection, release);
+        request.route.binding = reference(&format!("binding-{index}"));
+        request.route.model_version = id(&format!("fixture-revision-{index}"));
+        let result = collect_model_response(&request, model.generate(&request, &context(&request)))
+            .await
+            .unwrap();
+        assert_eq!(result.text, *release);
+        assert_eq!(result.metadata.reported_model_id, Some(id(release)));
+        assert!(result.metadata.reported_model_version.is_none());
+    }
+    let requests = server.requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    for (request, release) in requests.iter().zip(releases) {
+        assert_eq!(request.body["model"], release);
+    }
+}

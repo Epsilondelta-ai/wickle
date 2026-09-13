@@ -647,3 +647,50 @@ async fn credential_lookup_obeys_cancellation_and_deadline_before_http() {
         assert!(server.requests.lock().unwrap().is_empty());
     }
 }
+
+#[tokio::test]
+async fn two_documented_releases_keep_independent_selectors() {
+    let releases = ["anthropic.claude-opus-5", "anthropic.claude-opus-4-8"];
+    for endpoint in [BedrockEndpoint::Runtime, BedrockEndpoint::Mantle] {
+        let server = Server::new(
+            releases
+                .iter()
+                .map(|release| reply(BedrockOperation::Messages, &events(release, release)))
+                .collect(),
+        )
+        .await;
+        let mut bindings = vec![];
+        for (index, release) in releases.iter().enumerate() {
+            let mut options = options(&server);
+            options.selector = BedrockSelector::Foundation((*release).into());
+            options.operation = BedrockOperation::Messages;
+            options.endpoint = endpoint;
+            let connection = BedrockConnection::new(
+                scope(),
+                reference(&format!("account-{index}")),
+                Arc::new(BedrockCredential::Bearer("fixture-bearer".into())),
+                options,
+            )
+            .unwrap()
+            .with_clock(Arc::new(FixedClock));
+            let mut request = request(&connection, release);
+            request.route.model_version = id(&format!("fixture-revision-{index}"));
+            bindings.push((BedrockModel::new(connection), request));
+        }
+        for ((model, request), release) in bindings.iter().zip(releases) {
+            let result =
+                collect_model_response(request, model.generate(request, &context(request)))
+                    .await
+                    .unwrap();
+            assert_eq!(result.text, release);
+            assert_eq!(result.metadata.reported_model_id, Some(id(release)));
+            assert!(result.metadata.reported_model_version.is_none());
+        }
+        let requests = server.requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        for (request, release) in requests.iter().zip(releases) {
+            assert_eq!(request.body["model"], release);
+            assert_eq!(request.path, "/anthropic/v1/messages");
+        }
+    }
+}

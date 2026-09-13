@@ -612,3 +612,61 @@ async fn idless_parallel_results_are_matched_in_original_call_order() {
             .all(|p| p["functionResponse"].get("id").is_none())
     );
 }
+
+#[tokio::test]
+async fn minimal_thinking_is_rejected_for_both_flash_releases_before_network() {
+    for release in ["gemini-3.7-flash", "gemini-3.8-flash"] {
+        let server = Server::new(vec![reply(&events("would otherwise succeed"))]).await;
+        let connection = connection(&server);
+        let mut request = request(&connection, release);
+        request
+            .options
+            .insert("thinking_level".into(), json!("minimal"));
+        let model = GeminiModel::new(connection);
+        let error = collect_model_response(&request, model.generate(&request, &context(&request)))
+            .await
+            .expect_err("unsupported option must fail before dispatch");
+        assert_eq!(error.kind, ModelFailureKind::Unsupported);
+        assert!(server.requests.lock().unwrap().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn two_documented_release_ids_keep_path_and_reported_revision_separate() {
+    let releases = ["gemini-3.8-flash", "gemini-3.7-flash"];
+    let replies = releases
+        .iter()
+        .enumerate()
+        .map(|(index, release)| {
+            let mut data = events(release);
+            data[0]["modelVersion"] = json!(format!("fixture-revision-{index}"));
+            reply(&data)
+        })
+        .collect();
+    let server = Server::new(replies).await;
+    let connection = connection(&server);
+    let model = GeminiModel::new(connection.clone());
+    for (index, release) in releases.iter().enumerate() {
+        let mut request = request(&connection, release);
+        request.route.binding = reference(&format!("binding-{index}"));
+        request.route.model_version = id(&format!("fixture-revision-{index}"));
+        let result = collect_model_response(&request, model.generate(&request, &context(&request)))
+            .await
+            .unwrap();
+        assert_eq!(result.text, *release);
+        assert_eq!(
+            result.metadata.reported_model_version,
+            Some(id(&format!("fixture-revision-{index}")))
+        );
+        assert!(result.metadata.reported_model_id.is_none());
+    }
+    let requests = server.requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    for (request, release) in requests.iter().zip(releases) {
+        assert!(
+            request
+                .path
+                .contains(&format!("/models/{release}:streamGenerateContent"))
+        );
+    }
+}

@@ -27,3 +27,5 @@ Wickle 是 EpsilonDelta 正在使用 Rust 开发的智能体引擎，旨在以�
 [MCP 工具连接](docs/mcp.md)介绍如何通过 stdio 连接已审核的工具。
 
 [事件消费者](docs/event-consumers.md)介绍 Host 如何将执行记录传递给记忆和图服务。
+
+[模型版本验证矩阵](docs/model-support.md)区分本地契约测试与实际连接结果。

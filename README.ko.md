@@ -27,3 +27,5 @@ Agent Profile로 에이전트의 동작을 구성하고, 어댑터를 통해 다
 [MCP 도구 연결](docs/mcp.md)은 검토한 도구를 stdio로 연결하는 방법을 설명합니다.
 
 [이벤트 소비자](docs/event-consumers.md) 가이드는 Host가 실행 기록을 기억·그래프 서비스에 전달하는 방법을 설명합니다.
+
+[모델 버전별 검증 행렬](docs/model-support.md)에서 로컬 계약 검증과 실제 연결 결과를 구분해 확인할 수 있습니다.
