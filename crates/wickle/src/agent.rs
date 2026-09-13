@@ -18,6 +18,9 @@ mod artifacts;
 mod components;
 mod driver;
 mod hooks;
+mod persistence;
+pub use persistence::{PersistenceFailure, UnconfirmedToolEffect};
+mod recovery;
 mod resume;
 mod sources;
 mod tools;
@@ -176,6 +179,7 @@ struct Inner {
     context: Arc<ContextRuntime>,
     verification: Arc<VerificationRuntime>,
     runs: Mutex<BTreeMap<Id, Arc<LocalRun>>>,
+    observed: Arc<persistence::ObservedState>,
 }
 struct LocalRun {
     segment_start_revision: u64,
@@ -218,7 +222,7 @@ impl fmt::Debug for Agent {
 /// Instruction asset loading and generic extension execution remain unsupported.
 pub fn create_agent(
     profile: AgentProfile,
-    bindings: AgentBindings,
+    mut bindings: AgentBindings,
 ) -> Result<Agent, ContractError> {
     profile.validate_structure()?;
     bindings.settings.validate()?;
@@ -320,6 +324,11 @@ pub fn create_agent(
             "agent.source_estimator",
         ));
     }
+    let observed = Arc::new(persistence::ObservedState::default());
+    bindings.state = Arc::new(persistence::ObservedStore {
+        inner: bindings.state.clone(),
+        observed: observed.clone(),
+    });
     Ok(Agent {
         inner: Arc::new(Inner {
             profile,
@@ -327,6 +336,7 @@ pub fn create_agent(
             context,
             verification,
             runs: Mutex::new(BTreeMap::new()),
+            observed,
         }),
     })
 }
@@ -422,7 +432,7 @@ impl Agent {
         context: &ExecutionContext,
     ) -> Result<Guarded<RunSnapshot>, ContractError> {
         self.check_scope(context)?;
-        let saved = caller_read(
+        let loaded = caller_read(
             context,
             None,
             self.inner
@@ -430,7 +440,14 @@ impl Agent {
                 .state
                 .load(&self.inner.bindings.scope, run_id),
         )
-        .await?;
+        .await;
+        let saved = match loaded {
+            Ok(saved) => saved,
+            Err(error) if error.code == ErrorCode::PersistenceUnavailable => {
+                return self.persistence_error(run_id, context, error).await;
+            }
+            Err(error) => return Err(error),
+        };
         self.inner
             .bindings
             .policy
@@ -446,11 +463,41 @@ impl Agent {
     ) -> Result<Guarded<RunHandle>, ContractError> {
         let runtime = tokio::runtime::Handle::try_current()
             .map_err(|_| fail(ErrorCode::RuntimeUnavailable, "agent.runtime"))?;
+        self.check_scope(&context)?;
+        let run_id = command.run_id.clone();
+        let disclosure_context = context.clone();
         let agent = self.clone();
-        runtime
+        let result = runtime
             .spawn(async move { agent.resume_command(command, context).await })
             .await
-            .map_err(|_| fail(ErrorCode::InvalidContract, "agent.resume"))?
+            .map_err(|_| fail(ErrorCode::InvalidContract, "agent.resume"))?;
+        match result {
+            Err(error) if error.code == ErrorCode::PersistenceUnavailable => {
+                self.persistence_error(&run_id, &disclosure_context, error)
+                    .await
+            }
+            other => other,
+        }
+    }
+    async fn persistence_error<T>(
+        &self,
+        run_id: &Id,
+        context: &ExecutionContext,
+        error: ContractError,
+    ) -> Result<Guarded<T>, ContractError> {
+        self.check_scope(context)?;
+        let request = PolicyRequest {
+            owner_scope: self.inner.bindings.scope.clone(),
+            resource_id: run_id.clone(),
+            action: PolicyAction::ReadRunDetails {},
+        };
+        self.inner
+            .bindings
+            .policy
+            .guard(&request, context, None, None, || async {
+                Err(self.inner.observed.attach(run_id, error))
+            })
+            .await
     }
     fn check_scope(&self, context: &ExecutionContext) -> Result<(), ContractError> {
         if context.data.scope != self.inner.bindings.scope {
@@ -627,13 +674,19 @@ impl RunHandle {
                     .guard(&request, context, None, None, || async { Ok(outcome) })
                     .await;
             }
+            if snapshot.recovery_receipts.iter().any(|receipt| {
+                receipt.previous_segment_start_revision == self.segment_start_revision
+            }) {
+                return Err(fail(ErrorCode::RevisionConflict, "agent.segment_recovered"));
+            }
             if segment_revision(&snapshot) != self.segment_start_revision {
                 return Err(fail(ErrorCode::InvalidSnapshot, "agent.segment"));
             }
             if let Some(outcome) = snapshot.outcome {
                 return Ok(Guarded::Completed(outcome));
             }
-            self.local_error()?;
+            self.local_error()
+                .map_err(|error| self.agent.inner.observed.attach(&self.run_id, error))?;
             self.wait(context).await?;
         }
     }
@@ -824,6 +877,13 @@ impl RunHandle {
         {
             return Ok(Some(receipt.previous_last_event_seq));
         }
+        if let Some(receipt) = snapshot
+            .recovery_receipts
+            .iter()
+            .find(|receipt| receipt.previous_segment_start_revision == self.segment_start_revision)
+        {
+            return Ok(Some(receipt.previous_last_event_seq));
+        }
         if segment_revision(snapshot) != self.segment_start_revision {
             return Err(fail(ErrorCode::InvalidSnapshot, "agent.segment"));
         }
@@ -848,6 +908,12 @@ fn segment_revision(snapshot: &RunSnapshot) -> u64 {
         .resume_receipts
         .last()
         .map_or(0, |receipt| receipt.accepted_revision)
+        .max(
+            snapshot
+                .recovery_receipts
+                .last()
+                .map_or(0, |receipt| receipt.accepted_revision),
+        )
 }
 
 // Only read-only caller operations use this helper. Cancelling a read drops its

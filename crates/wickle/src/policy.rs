@@ -258,6 +258,15 @@ pub enum PolicyAction {
         /// Purpose being authorized.
         purpose: ModelPurpose,
     },
+    /// Read the external outcome of a previously dispatched attempt.
+    ReconcileTool {
+        /// Frozen inputs and selected external binding.
+        input: ToolPolicyInput,
+        /// Original charged attempt, not a new execution.
+        attempt_id: Id,
+        /// Original external idempotency identity.
+        idempotency_key: Id,
+    },
     /// Dispatch one tool using final validated inputs.
     ExecuteTool {
         /// Final inputs, including system-owned parameters.

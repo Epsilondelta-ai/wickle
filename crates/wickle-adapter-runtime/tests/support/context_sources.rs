@@ -372,7 +372,7 @@ impl Fixture {
             self.base.clock.clone(),
         ))
     }
-    pub fn agent(&self) -> Agent {
+    pub fn bindings(&self) -> AgentBindings {
         let mut bindings = self.base.bindings();
         bindings.components = Some(self.runtime());
         bindings.profile_resolver = Arc::new(Catalog(self.registry.clone()));
@@ -402,7 +402,10 @@ impl Fixture {
         );
         bindings.settings.lease_ttl_ms = 30_000;
         bindings.settings.heartbeat_interval_ms = 5_000;
-        create_agent(self.profile.clone(), bindings).unwrap()
+        bindings
+    }
+    pub fn agent(&self) -> Agent {
+        create_agent(self.profile.clone(), self.bindings()).unwrap()
     }
     pub async fn start(&self, agent: &Agent) -> RunHandle {
         let mut context = agent_support::context();

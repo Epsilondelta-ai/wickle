@@ -6,7 +6,7 @@ use std::{
     collections::BTreeSet,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::Duration,
 };
@@ -122,7 +122,9 @@ impl PolicyPort for Policy {
         _: PolicyContext<'a>,
     ) -> PortFuture<'a, PolicyDecision> {
         Box::pin(async move {
-            if let PolicyAction::ExecuteTool { input } = &request.action {
+            if let PolicyAction::ExecuteTool { input } | PolicyAction::ReconcileTool { input, .. } =
+                &request.action
+            {
                 let count = {
                     let mut calls = self.calls.lock().unwrap();
                     calls.push(input.clone());
@@ -188,6 +190,10 @@ pub struct Invocation {
     pub args: JsonObject,
 }
 pub struct Executor {
+    pub reconciled: Mutex<Vec<Invocation>>,
+    pub block_reconciliation: AtomicBool,
+    pub reconciliation_entered: Notify,
+    pub reconciliation_release: Notify,
     pub action: Action,
     pub side_effect: ToolSideEffect,
     pub calls: AtomicUsize,
@@ -276,6 +282,43 @@ impl ToolExecutor for Executor {
             }
         })
     }
+    fn reconcile<'a>(
+        &'a self,
+        args: &'a JsonObject,
+        context: &'a ToolExecutionContext,
+    ) -> PortFuture<'a, ToolReconciliation> {
+        Box::pin(async move {
+            let query = Invocation {
+                call_id: context.call_id.clone(),
+                attempt_id: context.attempt_id.clone(),
+                idempotency_key: context.idempotency_key.clone(),
+                args: args.clone(),
+            };
+            self.reconciled.lock().unwrap().push(query.clone());
+            self.reconciliation_entered.notify_one();
+            if self.block_reconciliation.load(Ordering::SeqCst) {
+                self.reconciliation_release.notified().await;
+            }
+            if !self.observed.lock().unwrap().contains(&query) {
+                return Ok(ToolReconciliation::Unknown);
+            }
+            let effect = if self.side_effect == ToolSideEffect::ReadOnly {
+                ToolEffect::NotApplied
+            } else {
+                ToolEffect::Applied
+            };
+            Ok(ToolReconciliation::Known {
+                result: ToolExecutionResult {
+                    outcome: ToolExecutionOutcome::Succeeded {
+                        value: json!("observed result"),
+                    },
+                    effect,
+                    receipt: (effect == ToolEffect::Applied)
+                        .then(|| json!({"effect_id":"external-effect","value":args["query"]})),
+                },
+            })
+        })
+    }
 }
 
 pub struct Fixture {
@@ -293,6 +336,27 @@ pub struct Fixture {
 }
 impl Fixture {
     pub async fn new(tools: &[(&str, ToolSideEffect, Action)], system_value: Option<&str>) -> Self {
+        Self::build(tools, system_value, false, 1).await
+    }
+    pub async fn reconcilable(
+        tools: &[(&str, ToolSideEffect, Action)],
+        system_value: Option<&str>,
+    ) -> Self {
+        Self::build(tools, system_value, true, 1).await
+    }
+    pub async fn reconcilable_with_limit(
+        tools: &[(&str, ToolSideEffect, Action)],
+        system_value: Option<&str>,
+        recovery_attempts: u64,
+    ) -> Self {
+        Self::build(tools, system_value, true, recovery_attempts).await
+    }
+    async fn build(
+        tools: &[(&str, ToolSideEffect, Action)],
+        system_value: Option<&str>,
+        reconcile: bool,
+        recovery_attempts: u64,
+    ) -> Self {
         let store = Arc::new(MemoryStateStore::new());
         let input_registry = Arc::new(input_registry());
         let order = Arc::new(Mutex::new(vec![]));
@@ -301,7 +365,20 @@ impl Fixture {
         let mut registrations = vec![];
         for (name, side_effect, action) in tools {
             let compiled = compiled(name, *side_effect, &input_registry);
+            let compiled = if reconcile {
+                let mut descriptor = compiled.descriptor().clone();
+                descriptor.reconcile = true;
+                SchemaCompiler::new()
+                    .compile(descriptor, &input_registry)
+                    .unwrap()
+            } else {
+                compiled
+            };
             let executor = Arc::new(Executor {
+                reconciled: Mutex::new(vec![]),
+                block_reconciliation: AtomicBool::new(false),
+                reconciliation_entered: Notify::new(),
+                reconciliation_release: Notify::new(),
                 action: *action,
                 side_effect: *side_effect,
                 calls: AtomicUsize::new(0),
@@ -339,6 +416,7 @@ impl Fixture {
             })
             .collect();
         profile.limits.max_tool_attempts = 8;
+        profile.limits.max_recovery_attempts = recovery_attempts;
         input.snapshot.profile = ProfileValidator::new(&Catalog)
             .validate(&profile, &scope())
             .await
@@ -492,6 +570,7 @@ pub enum FailStage {
     Reservation,
     Dispatch,
     Result,
+    Correction,
 }
 pub struct FaultStore {
     pub inner: Arc<MemoryStateStore>,
@@ -599,6 +678,10 @@ impl StateStore for FaultStore {
                         ToolCallState::Dispatching { .. }
                     )
                 }
+                FailStage::Correction => input
+                    .events
+                    .iter()
+                    .any(|event| matches!(event.payload, RunEventPayload::ToolReconciled { .. })),
                 FailStage::Result => {
                     matches!(
                         input.snapshot.tool_ledger[0].state,

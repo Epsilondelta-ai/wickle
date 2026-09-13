@@ -4,6 +4,7 @@ use serde_json::Value;
 use std::{collections::BTreeMap, fmt, sync::Arc};
 use tokio_util::sync::CancellationToken;
 
+mod reconciliation;
 mod resume;
 mod round;
 
@@ -114,6 +115,18 @@ impl fmt::Debug for ToolExecutionResult {
     }
 }
 
+/// Read-only observation of the original attempt's external effect.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ToolReconciliation {
+    /// The Host authenticated a complete result for the original idempotency key.
+    Known {
+        /// Output validation still applies and must retain confirmed effect receipts.
+        result: ToolExecutionResult,
+    },
+    /// The effect cannot be established. This never authorizes another execution.
+    Unknown,
+}
+
 /// Exactly one physical execution. Implementations must not hide retry loops or
 /// spawn untracked operations; effect uncertainty must be reported honestly.
 pub trait ToolExecutor: Send + Sync {
@@ -124,6 +137,18 @@ pub trait ToolExecutor: Send + Sync {
         execution_args: &'a JsonObject,
         context: &'a ToolExecutionContext,
     ) -> PortFuture<'a, ToolExecutionResult>;
+
+    /// Read the outcome of the original attempt without executing it again.
+    /// Arguments and attempt/idempotency identities are frozen; actor, grant and
+    /// cancellation/deadline belong to the current recovery operation.
+    /// The conservative default leaves the effect unknown.
+    fn reconcile<'a>(
+        &'a self,
+        _execution_args: &'a JsonObject,
+        _context: &'a ToolExecutionContext,
+    ) -> PortFuture<'a, ToolReconciliation> {
+        Box::pin(async { Ok(ToolReconciliation::Unknown) })
+    }
 }
 
 /// Exact saved effect and protected evidence presented to a trusted Host verifier.
@@ -552,3 +577,22 @@ impl SerialToolRound {
 fn error(code: ErrorCode, path: &str) -> ContractError {
     ContractError::new(code, path)
 }
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ReconciliationRecord {
+    pub schema_version: String,
+    pub scope: Scope,
+    pub run_id: Id,
+    pub call_id: Id,
+    pub attempt_id: Id,
+    pub idempotency_key: Id,
+    pub binding_ref: RecordRef,
+    pub recovery_attempt_id: Id,
+    pub result_ref: RecordRef,
+    pub correction_message_id: Id,
+    pub actor_ref: Id,
+    pub capability_grant_ref: Id,
+}
+
+pub(crate) use round::call_message;

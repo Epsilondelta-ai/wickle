@@ -138,10 +138,12 @@ impl PolicyGate {
                 RunEventPayload::ContextRewritten { .. } => "context.rewritten",
                 RunEventPayload::ToolPlanned { .. } => "tool.planned",
                 RunEventPayload::ToolSettled { .. } => "tool.settled",
+                RunEventPayload::ToolReconciled { .. } => "tool.reconciled",
                 RunEventPayload::ToolUnresolved { .. } => "tool.unresolved",
                 RunEventPayload::VerificationCompleted { .. } => "verification.completed",
                 RunEventPayload::RunWaiting { .. } => "run.waiting",
                 RunEventPayload::RunResumed { .. } => "run.resumed",
+                RunEventPayload::RunRecovered { .. } => "run.recovered",
                 RunEventPayload::RunFinished { .. } => "run.finished",
                 RunEventPayload::ModelRouteSelected { .. } => "model.route_selected",
             };

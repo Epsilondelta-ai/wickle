@@ -135,10 +135,11 @@ impl SerialToolRound {
                     }
                 }
             }
-            let bound = match self
-                .binder
-                .bind(&registered.compiled, &call_id, context, budget)
-                .await
+            let bound = match crate::future::boxed(|| {
+                self.binder
+                    .bind(&registered.compiled, &call_id, context, budget)
+            })
+            .await
             {
                 Ok(bound) => bound,
                 Err(error) if control_or_storage(error.code) => return Err(error),
@@ -782,7 +783,7 @@ impl SerialToolRound {
         ))
     }
 
-    async fn settle(
+    pub(super) async fn settle(
         &self,
         call_id: &Id,
         state: ToolCallState,
@@ -905,7 +906,7 @@ impl SerialToolRound {
         }
         Ok(reference)
     }
-    async fn commit(
+    pub(super) async fn commit(
         &self,
         mut snapshot: RunSnapshot,
         messages: Vec<Message>,
@@ -992,7 +993,7 @@ impl SerialToolRound {
     }
 }
 
-pub(super) fn call_message(saved: &StoredRun, call: &ToolCall) -> Result<Id, ContractError> {
+pub(crate) fn call_message(saved: &StoredRun, call: &ToolCall) -> Result<Id, ContractError> {
     let messages: Vec<_> = saved.messages.iter().filter(|message| message.run_id == saved.snapshot.run_id && message.role == MessageRole::Assistant && message.content.iter().any(|content| matches!(content, ContentBlock::ToolCall { call: candidate } if candidate.call_id == call.call_id && candidate.model_request_id == call.model_request_id && candidate.provider_call_id == call.provider_call_id && candidate.tool_name == call.tool_name && candidate.model_inputs == call.model_inputs && candidate.descriptor_digest == call.descriptor_digest))).collect();
     if messages.len() != 1 {
         return Err(error(ErrorCode::InvalidSnapshot, "tool.call_message"));

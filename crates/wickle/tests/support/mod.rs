@@ -109,6 +109,7 @@ pub async fn admission(
         timing: RunTiming::new(0, profile.profile().limits.max_elapsed_ms.get()).unwrap(),
         reservations: vec![],
         resume_receipts: vec![],
+        recovery_receipts: vec![],
         hook_plan_ref: None,
         source_plan_ref: None,
         skill_plan_ref: None,

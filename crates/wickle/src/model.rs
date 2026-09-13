@@ -225,6 +225,11 @@ pub enum ModelAttemptState {
     },
     /// Dispatch/result is not yet known after interruption.
     Unknown {},
+    /// A fenced recovery accepted that no complete response was saved.
+    Interrupted {
+        /// Recovery command that closed this attempt without refunding its budget.
+        recovery_command_id: Id,
+    },
 }
 
 /// Durable record of one physical invocation and the selected model version.

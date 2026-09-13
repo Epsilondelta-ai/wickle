@@ -420,6 +420,7 @@ fn validate_history(
     run: &RunState,
     event_ids: &mut BTreeSet<Id>,
 ) -> Result<(), ContractError> {
+    super::recovery_state::history(state, &run.snapshot, &run.events)?;
     super::context_state::validate_history(state, &run.snapshot, &run.events)?;
     super::verification_state::history(state, &run.snapshot, &run.events)?;
     let empty = BTreeMap::new();
@@ -447,6 +448,17 @@ fn validate_history(
                 if revision.run_id != run.snapshot.run_id {
                     return Err(invalid("checkpoint.context_event"));
                 }
+            }
+            RunEventPayload::RunRecovered {
+                recovery_receipt_ref,
+            } => {
+                super::recovery_state::event(
+                    state,
+                    &empty,
+                    &run.snapshot,
+                    event,
+                    recovery_receipt_ref,
+                )?;
             }
             RunEventPayload::RunStarted {
                 request_ref,
@@ -484,6 +496,9 @@ fn validate_history(
                 if call != current.call {
                     return Err(invalid("checkpoint.tool_planned"));
                 }
+            }
+            RunEventPayload::ToolReconciled { reconciliation_ref } => {
+                record_value(state, &empty, reconciliation_ref)?;
             }
             RunEventPayload::ToolSettled { result_ref } => {
                 let result: ToolResult = event_record(state, &empty, result_ref)?;
@@ -605,7 +620,9 @@ fn validate_history(
                     || old.route.digest() != *route_digest
                     || (matches!(
                         old.state,
-                        ModelAttemptState::Completed {} | ModelAttemptState::Failed { .. }
+                        ModelAttemptState::Completed {}
+                            | ModelAttemptState::Failed { .. }
+                            | ModelAttemptState::Interrupted { .. }
                     ) && &old != current)
                     || (matches!(old.state, ModelAttemptState::Unknown {})
                         && matches!(current.state, ModelAttemptState::Reserved {}))

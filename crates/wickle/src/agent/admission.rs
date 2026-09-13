@@ -497,6 +497,7 @@ impl Agent {
             verification_records: vec![],
             revision: 0,
             resume_receipts: vec![],
+            recovery_receipts: vec![],
             hook_plan_ref: hook_record
                 .as_ref()
                 .map(|record| record.reference().clone()),

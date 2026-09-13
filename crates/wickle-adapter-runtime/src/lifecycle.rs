@@ -55,6 +55,28 @@ impl ToolExecutor for ScopedTool {
             }
         })
     }
+    fn reconcile<'a>(
+        &'a self,
+        args: &'a JsonObject,
+        context: &'a ToolExecutionContext,
+    ) -> PortFuture<'a, ToolReconciliation> {
+        Box::pin(async move {
+            self.lifetime
+                .check(&context.scope, context.binding_set_id.as_ref())?;
+            if context.run_id != self.lifetime.run_id {
+                return Err(ContractError::new(ErrorCode::AccessDenied, "adapter.run"));
+            }
+            let mut controlled = context.clone();
+            controlled.cancellation = CancellationToken::new();
+            let _cancel = controlled.cancellation.clone().drop_guard();
+            tokio::select! { biased;
+                _ = self.lifetime.stopped.cancelled() => Err(ContractError::new(ErrorCode::Cancelled, "adapter.released")),
+                _ = context.cancellation.cancelled() => Err(ContractError::new(ErrorCode::Cancelled, "adapter.reconcile")),
+                _ = tokio::time::sleep_until(context.deadline) => Err(ContractError::new(ErrorCode::DeadlineExceeded, "adapter.reconcile")),
+                result = self.executor.reconcile(args, &controlled) => result,
+            }
+        })
+    }
 }
 
 pub(crate) struct ScopedHook {

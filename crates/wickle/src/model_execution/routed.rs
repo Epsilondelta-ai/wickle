@@ -180,6 +180,7 @@ impl ModelExchange {
             .cloned();
         let mut routing = input.routing.clone();
         let mut replay = None;
+        let mut interrupted = None;
         if let Some(previous) = previous {
             if previous.purpose != routing.purpose {
                 return Err(failure(
@@ -190,6 +191,7 @@ impl ModelExchange {
             routing.previous_route = Some(previous.route.clone());
             match previous.state {
                 ModelAttemptState::Completed {} => replay = Some(previous),
+                ModelAttemptState::Interrupted { .. } => interrupted = Some(previous),
                 ModelAttemptState::Failed { kind } => routing.previous_failure = Some(kind),
                 ModelAttemptState::Reserved {} | ModelAttemptState::Unknown {} => {
                     return Err(failure(
@@ -266,6 +268,16 @@ impl ModelExchange {
             final_selection.reason = RouteSelectionReason::Reuse;
             final_selection.request_digest = final_requirements.digest();
             pinned.validate_selection(&final_requirements, &final_selection)?;
+            if let Some(previous) = interrupted.take() {
+                let mut physical = prepared.request.clone();
+                physical.request_id = previous.attempt_id;
+                if physical.digest() != previous.request_digest {
+                    return Err(failure(
+                        ErrorCode::RequestConflict,
+                        "routing.recovery_projection",
+                    ));
+                }
+            }
             if let Some(previous) = replay.take() {
                 let mut physical = prepared.request.clone();
                 physical.request_id = previous.attempt_id;

@@ -704,6 +704,7 @@ async fn snapshot() -> RunSnapshot {
         scope: scope(),
         timing: RunTiming::new(0, profile.profile().limits.max_elapsed_ms.get()).unwrap(),
         resume_receipts: vec![],
+        recovery_receipts: vec![],
         hook_plan_ref: None,
         source_plan_ref: None,
         skill_plan_ref: None,

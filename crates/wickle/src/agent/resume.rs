@@ -8,18 +8,15 @@ impl Agent {
         context: ExecutionContext,
     ) -> Result<Guarded<RunHandle>, ContractError> {
         self.check_scope(&context)?;
-        if matches!(command.action, ResumeAction::Recover { .. }) {
-            return Err(fail(
-                ErrorCode::CapabilityUnsupported,
-                "agent.resume_action",
-            ));
-        }
         if serde_json::to_vec(&command)
             .map_err(|_| fail(ErrorCode::InvalidJson, "agent.command"))?
             .len()
             > self.inner.bindings.settings.max_request_bytes
         {
             return Err(fail(ErrorCode::InvalidContract, "agent.command_size"));
+        }
+        if matches!(command.action, ResumeAction::Recover { .. }) {
+            return self.recover_command(command, context).await;
         }
         let saved = self
             .resume_read(
@@ -450,7 +447,7 @@ impl Agent {
         Ok((receipt, prompt, true, observation.into_iter().collect()))
     }
 
-    async fn authorize_resume(
+    pub(super) async fn authorize_resume(
         &self,
         command: &ResumeCommand,
         context: &ExecutionContext,
@@ -493,7 +490,7 @@ impl Agent {
             }
         }
     }
-    async fn resume_inputs(
+    pub(super) async fn resume_inputs(
         &self,
         snapshot: &RunSnapshot,
         context: &ExecutionContext,
@@ -523,7 +520,7 @@ impl Agent {
         }
         Ok(())
     }
-    async fn restore_resume_runtime(
+    pub(super) async fn restore_resume_runtime(
         &self,
         saved: &StoredRun,
         context: &ExecutionContext,
@@ -775,7 +772,7 @@ impl Agent {
                 .await;
         }
     }
-    async fn resume_read<T>(
+    pub(super) async fn resume_read<T>(
         &self,
         context: &ExecutionContext,
         future: impl std::future::Future<Output = Result<T, ContractError>>,
@@ -798,8 +795,25 @@ impl Agent {
         lease: RunLease,
         observer_error: Vec<(HookTarget, HookInput)>,
     ) -> Result<RunHandle, ContractError> {
-        let segment_start_revision = receipt.accepted_revision;
-        let expired = receipt.expired;
+        self.launch_segment(
+            run_id,
+            (receipt.accepted_revision, receipt.expired),
+            prompt,
+            context,
+            lease,
+            observer_error,
+        )
+    }
+    pub(super) fn launch_segment(
+        &self,
+        run_id: Id,
+        segment: (u64, bool),
+        prompt: PromptSnapshot,
+        context: ExecutionContext,
+        lease: RunLease,
+        observer_error: Vec<(HookTarget, HookInput)>,
+    ) -> Result<RunHandle, ContractError> {
+        let (segment_start_revision, expired) = segment;
         let local = Arc::new(LocalRun::new(segment_start_revision));
         *local
             .pending_observations
@@ -1080,6 +1094,13 @@ fn accepted<'a>(
     snapshot: &'a RunSnapshot,
     command: &ResumeCommand,
 ) -> Result<Option<&'a ResumeReceipt>, ContractError> {
+    if snapshot
+        .recovery_receipts
+        .iter()
+        .any(|receipt| receipt.command.command_id == command.command_id)
+    {
+        return Err(fail(ErrorCode::RequestConflict, "agent.resume_command"));
+    }
     let receipt = snapshot
         .resume_receipts
         .iter()

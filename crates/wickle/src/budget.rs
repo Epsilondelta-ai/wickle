@@ -401,7 +401,7 @@ fn failure(code: ErrorCode, path: &str) -> ContractError {
     ContractError::new(code, path)
 }
 
-fn charge(
+pub(crate) fn charge(
     usage: &mut BudgetUsage,
     limits: &RunLimits,
     kind: &ReservationKind,

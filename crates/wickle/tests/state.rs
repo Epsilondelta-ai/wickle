@@ -901,3 +901,104 @@ async fn event_pages_are_exclusive_ordered_replayable_and_preserved_after_comple
             .is_err()
     );
 }
+
+#[tokio::test]
+async fn recovery_acceptance_requires_the_exact_running_checkpoint_and_its_event() {
+    for mode in ["valid", "missing-event", "changed-source"] {
+        let store = MemoryStateStore::new();
+        let saved = store
+            .admit(
+                &scope(),
+                admission("run", "request", "session", "input", "1").await,
+            )
+            .await
+            .unwrap()
+            .state;
+        let lease = store
+            .acquire_lease(&scope(), &id("run"), &id("recovery-worker"), 0, 1000)
+            .await
+            .unwrap();
+        let mut source = saved.snapshot.clone();
+        if mode == "changed-source" {
+            source.phase = RunPhase::Tool;
+        }
+        let source = source.recovery_record(id("source-checkpoint")).unwrap();
+        let command = ResumeCommand {
+            run_id: id("run"),
+            expected_revision: saved.snapshot.revision,
+            command_id: id("recover-once"),
+            action: ResumeAction::Recover {
+                recovery_ref: source.reference().clone(),
+            },
+        };
+        let command_record = ProtectedRecord::new(
+            id("recovery-command"),
+            1,
+            serde_json::to_value(&command).unwrap(),
+        );
+        let receipt = RecoveryReceipt {
+            command,
+            command_ref: command_record.reference().clone(),
+            source_snapshot_ref: source.reference().clone(),
+            accepted_revision: saved.snapshot.revision + 1,
+            previous_segment_start_revision: 0,
+            previous_last_event_seq: saved.snapshot.last_event_seq,
+            actor_ref: id("operator"),
+            capability_grant_ref: id("grant"),
+            expired: false,
+            recovery_attempt_id: Some(id("recovery-budget")),
+        };
+        let record = ProtectedRecord::new(
+            id("recovery-receipt"),
+            1,
+            serde_json::to_value(&receipt).unwrap(),
+        );
+        let mut update = prepared(&saved.snapshot, lease, 0);
+        update.snapshot.recovery_receipts.push(receipt);
+        update.snapshot.usage.recovery_attempts += 1;
+        update.snapshot.reservations.push(AttemptReservation {
+            attempt_id: id("recovery-budget"),
+            kind: ReservationKind::Recovery {},
+            reserved_at_ms: 0,
+        });
+        if mode != "missing-event" {
+            update.snapshot.last_event_seq += 1;
+            update.events.push(event(
+                &id("run"),
+                &id("session"),
+                &scope(),
+                update.snapshot.last_event_seq,
+                RunEventPayload::RunRecovered {
+                    recovery_receipt_ref: record.reference().clone(),
+                },
+            ));
+        }
+        for event in &mut update.events {
+            event.timestamp_ms = 0;
+        }
+        update.records = vec![source, command_record, record];
+        let result = store.commit(&scope(), &id("run"), update).await;
+        if mode == "valid" {
+            let result = result.unwrap();
+            assert_eq!(result.snapshot.status, RunStatus::Running);
+            assert!(result.snapshot.outcome.is_none());
+            let checkpoint = store.export_checkpoint(&scope()).unwrap();
+            let restored = StateStoreCheckpoint::from_json(
+                &serde_json::to_string(&checkpoint).unwrap(),
+                &scope(),
+                &checkpoint.digest(),
+            )
+            .unwrap();
+            assert_eq!(
+                MemoryStateStore::from_checkpoint(restored)
+                    .load(&scope(), &id("run"))
+                    .await
+                    .unwrap(),
+                result
+            );
+        } else {
+            assert!(result.is_err(), "{mode}");
+            assert_eq!(store.load(&scope(), &id("run")).await.unwrap(), saved);
+        }
+    }
+}

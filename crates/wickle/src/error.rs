@@ -157,6 +157,8 @@ pub struct ContractError {
     pub code: ErrorCode,
     /// Contract field or reference location, without submitted values.
     pub path: String,
+    /// Authorized run diagnostics when durable storage is unavailable.
+    pub persistence: Option<Box<crate::PersistenceFailure>>,
 }
 
 impl ContractError {
@@ -165,6 +167,7 @@ impl ContractError {
         Self {
             code,
             path: path.into(),
+            persistence: None,
         }
     }
 }
