@@ -24,6 +24,7 @@ pub struct Decoder<'a> {
     emitted: usize,
     terminal: Option<ModelEvent>,
     done: bool,
+    xai: bool,
 }
 impl<'a> Decoder<'a> {
     /// Start an attempt without making an HTTP request.
@@ -45,6 +46,14 @@ impl<'a> Decoder<'a> {
             emitted: 0,
             terminal: None,
             done: false,
+            xai: false,
+        }
+    }
+    /// Use xAI's documented reasoning identifiers and legacy/modern usage formats.
+    pub fn for_xai(request: &'a ModelRequest, request_id: Option<Id>) -> Self {
+        Self {
+            xai: true,
+            ..Self::new(request, request_id)
         }
     }
     /// Validate a framed provider event and emit normalized model deltas.
@@ -88,12 +97,12 @@ impl<'a> Decoder<'a> {
             "response.output_item.added" => {
                 let index = index(&value, "output_index")?;
                 let item = value.get("item").ok_or_else(invalid)?;
-                let item_id = string(item, "id")?;
+                let item_id = item_id(item, self.xai)?;
                 let item_type = string(item, "type")?;
                 if !matches!(item_type, "message" | "reasoning" | "function_call") {
                     return Err(error(ErrorCode::CapabilityUnsupported, "output_item"));
                 }
-                if self.items.values().any(|(_, id)| id == item_id)
+                if (!item_id.is_empty() && self.items.values().any(|(_, id)| id == item_id))
                     || self
                         .items
                         .insert(index, (item_type.into(), item_id.into()))
@@ -214,7 +223,7 @@ impl<'a> Decoder<'a> {
                 let index = index(&value, "output_index")?;
                 let item = value.get("item").ok_or_else(invalid)?;
                 let identity = self.items.get(&index).ok_or_else(invalid)?;
-                if identity.0 != string(item, "type")? || identity.1 != string(item, "id")? {
+                if identity.0 != string(item, "type")? || identity.1 != item_id(item, self.xai)? {
                     return Err(invalid());
                 }
                 if identity.0 == "message" {
@@ -244,7 +253,7 @@ impl<'a> Decoder<'a> {
                             .get("output")
                             .and_then(Value::as_array)
                             .ok_or_else(invalid)?;
-                        let decoded = codec::inspect_output_items(items)?;
+                        let decoded = codec::inspect_output_items(items, self.xai)?;
                         if decoded.refused != self.refused
                             || decoded.text != self.text
                             || decoded.calls.len() != self.calls.len()
@@ -256,7 +265,7 @@ impl<'a> Decoder<'a> {
                             let key = u32::try_from(position).map_err(|_| invalid())?;
                             let identity = self.items.get(&key).ok_or_else(invalid)?;
                             if identity.0 != string(item, "type")?
-                                || identity.1 != string(item, "id")?
+                                || identity.1 != item_id(item, self.xai)?
                             {
                                 return Err(invalid());
                             }
@@ -281,7 +290,7 @@ impl<'a> Decoder<'a> {
                         let continuation = if items.is_empty() {
                             vec![]
                         } else {
-                            let data = json!({"kind":codec::REPLAY_KIND,"items":items});
+                            let data = json!({"kind":if self.xai {codec::XAI_REPLAY_KIND} else {codec::REPLAY_KIND},"items":items});
                             self.charge(serde_json::to_vec(&data).map_err(|_| invalid())?.len())?;
                             vec![OpaqueContinuation::new(&self.request.route, data)]
                         };
@@ -444,10 +453,14 @@ impl<'a> Decoder<'a> {
                     .map(|value| value.as_u64().ok_or_else(invalid))
                     .transpose()
             };
-            self.metadata.usage = Some(ModelUsage {
-                measurement: UsageMeasurement::Reported,
-                input_tokens: count("input_tokens")?,
-                output_tokens: count("output_tokens")?,
+            self.metadata.usage = Some(if self.xai {
+                xai_usage(usage)?
+            } else {
+                ModelUsage {
+                    measurement: UsageMeasurement::Reported,
+                    input_tokens: count("input_tokens")?,
+                    output_tokens: count("output_tokens")?,
+                }
             });
         }
         Ok(())
@@ -489,4 +502,57 @@ pub(crate) fn failure_kind(code: Option<&str>) -> ModelFailureKind {
         }
         _ => ModelFailureKind::Protocol,
     }
+}
+
+fn item_id(item: &Value, xai: bool) -> Result<&str, ContractError> {
+    if xai && item["type"] == "reasoning" {
+        match item.get("id") {
+            None => Ok(""),
+            Some(value) => value.as_str().ok_or_else(invalid),
+        }
+    } else {
+        string(item, "id")
+    }
+}
+fn xai_usage(usage: &Value) -> Result<ModelUsage, ContractError> {
+    let count = |key| -> Result<Option<u64>, ContractError> {
+        usage
+            .get(key)
+            .filter(|v| !v.is_null())
+            .map(|v| v.as_u64().ok_or_else(invalid))
+            .transpose()
+    };
+    let modern_input = count("input_tokens")?;
+    let prompt = count("prompt_tokens")?;
+    if modern_input.zip(prompt).is_some_and(|(a, b)| a != b) {
+        return Err(invalid());
+    }
+    let input = modern_input.or(prompt);
+    let modern_output = count("output_tokens")?;
+    let total = count("total_tokens")?;
+    let derived = input
+        .zip(total)
+        .map(|(i, t)| t.checked_sub(i).ok_or_else(invalid))
+        .transpose()?;
+    if modern_output.zip(derived).is_some_and(|(a, b)| a != b) {
+        return Err(invalid());
+    }
+    let output = modern_output.or(derived);
+    let completion = count("completion_tokens")?;
+    let reasoning = usage
+        .pointer("/completion_tokens_details/reasoning_tokens")
+        .filter(|v| !v.is_null())
+        .map(|v| v.as_u64().ok_or_else(invalid))
+        .transpose()?;
+    if output.is_some_and(|out| {
+        completion.is_some_and(|n| n > out) || reasoning.is_some_and(|n| n > out)
+    }) {
+        return Err(invalid());
+    }
+    // Legacy completion counts alone do not establish total reasoning-inclusive output.
+    Ok(ModelUsage {
+        measurement: UsageMeasurement::Reported,
+        input_tokens: input,
+        output_tokens: output,
+    })
 }

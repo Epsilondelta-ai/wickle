@@ -33,3 +33,5 @@ For AWS signing, inference profiles and both Bedrock stream protocols, see the [
 For Gemini API versions, function schemas and thought-signature replay, see the [Gemini adapter guide](docs/gemini.md).
 
 For Google Cloud OAuth, global and regional targets, see the [Vertex AI adapter guide](docs/vertex.md).
+
+For Grok Responses, encrypted replay and xAI usage formats, see the [xAI adapter guide](docs/xai.md).

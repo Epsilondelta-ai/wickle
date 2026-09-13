@@ -33,3 +33,5 @@ AWS-Signaturen, Inferenzprofile und Streaming-Protokolle beschreibt der [Bedrock
 API-Versionen, Funktionsschemas und die Erhaltung von Gedankensignaturen beschreibt der [Gemini-Adapter-Leitfaden](docs/gemini.md).
 
 Google-Cloud-OAuth und globale oder regionale Ziele beschreibt der [Vertex-AI-Adapter-Leitfaden](docs/vertex.md).
+
+Grok Responses, verschlüsselte Zustände und Nutzungsformate beschreibt der [xAI-Adapter-Leitfaden](docs/xai.md).

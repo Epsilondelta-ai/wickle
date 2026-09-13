@@ -33,3 +33,5 @@ Consulta la [guía del adaptador Bedrock](docs/bedrock.md) para firmas AWS, perf
 Consulta la [guía del adaptador Gemini](docs/gemini.md) para versiones de API, esquemas de funciones y conservación de firmas de pensamiento.
 
 Consulta la [guía del adaptador Vertex AI](docs/vertex.md) para OAuth de Google Cloud y destinos globales o regionales.
+
+Consulta la [guía del adaptador xAI](docs/xai.md) para Grok Responses, estado cifrado y formatos de uso.

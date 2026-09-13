@@ -40,7 +40,7 @@ XAI_MODEL_2_MAX_OUTPUT_TOKENS=4096
 
 `XAI_MODEL_1_REASONING_EFFORT`는 논리 옵션 `reasoning_effort`입니다. 현재 공식 Responses API 예제에서는 `reasoning.effort`에 대응합니다. 지원 여부와 허용 수준은 모델·API별로 다르므로 선택한 조합의 schema를 확인합니다. 구형 모델의 제한을 모든 Grok 모델에 적용하지 않습니다. [xAI reasoning](https://docs.x.ai/developers/model-capabilities/text/reasoning).
 
-빈 effort는 전송하지 않습니다. 지원하지 않는 값이 공급자에서 무시·대체될 수 있더라도 테스트에서는 명시적으로 거부하며 조용히 낮은 수준으로 바꾸지 않습니다. 논리 옵션을 실제 요청 필드로 변환하는 어댑터의 SDK 연결은 아직 구현 전입니다.
+빈 effort는 전송하지 않습니다. 지원하지 않는 값이 공급자에서 무시·대체될 수 있더라도 테스트에서는 명시적으로 거부하며 조용히 낮은 수준으로 바꾸지 않습니다. [xAI 어댑터](../xai.md)가 논리 옵션을 명시적 Responses 요청으로 변환합니다. 실제 계정 연결 검증은 별도로 진행합니다.
 
 `MAX_OUTPUT_TOKENS=4096`은 응답 한 번의 출력 예산 예시입니다. 모델의 요건과 reasoning·도구 호출에 필요한 토큰에 맞춰 조정합니다. 긴 tool loop 전체에 충분한 예산이라는 뜻은 아닙니다.
 
@@ -53,3 +53,5 @@ ID가 채워진 슬롯마다 독립적인 모델·옵션 테스트 대상이 됩
 ## 확인한 현재 모델 계약
 
 `grok-4.6`은 Responses의 `reasoning.effort`에 `low`, `medium`, `high`, `xhigh`를 지원하며 기본은 `high`입니다. Thinking 비활성화는 지원하지 않습니다. `xhigh`를 지원하지 않는 구형 모델에 동일 옵션을 보내 조용히 강등시키지 않습니다. [Grok 4.6](https://docs.x.ai/developers/models/grok-4.6), [reasoning](https://docs.x.ai/developers/model-capabilities/text/reasoning).
+
+일부 retired slug는 공급자 정책에 따라 다른 모델로 자동 대체됩니다. 이름이나 날짜만으로 immutable release라고 판정하지 않고, 실제 응답 모델과 별도 release 증거를 확인합니다. [공식 이전 정책](https://docs.x.ai/developers/migration/may-15-retirement).

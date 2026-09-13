@@ -2,12 +2,34 @@ use serde_json::{Value, json};
 use wickle::*;
 
 pub(crate) const REPLAY_KIND: &str = "wickle.openai.responses.v1";
+pub(crate) const XAI_REPLAY_KIND: &str = "wickle.xai.responses.v1";
 fn failure(code: ErrorCode) -> ContractError {
     crate::error(code, "codec")
 }
 
 /// Encode a Responses request, preserving exact route-bound replay and model schemas.
 pub fn encode_request(request: &ModelRequest) -> Result<Value, ContractError> {
+    encode(request, false)
+}
+/// Encode xAI's Responses dialect without relaxing OpenAI/Azure validation.
+pub fn encode_xai_request(request: &ModelRequest) -> Result<Value, ContractError> {
+    if request.tools.len() > 350 || request.options.contains_key("verbosity") {
+        return Err(failure(ErrorCode::ModelCapabilityUnsupported));
+    }
+    if let Some(effort) = request.options.get("reasoning_effort") {
+        let effort = effort
+            .as_str()
+            .ok_or_else(|| failure(ErrorCode::ModelOptionUnsupported))?;
+        if !matches!(effort, "none" | "low" | "medium" | "high" | "xhigh")
+            || (matches!(request.route.model_id.as_str(), "grok-4.6" | "grok-4.5")
+                && effort == "none")
+        {
+            return Err(failure(ErrorCode::ModelOptionUnsupported));
+        }
+    }
+    encode(request, true)
+}
+fn encode(request: &ModelRequest, xai: bool) -> Result<Value, ContractError> {
     request.validate()?;
     if request.options.keys().any(|key| {
         !["reasoning_effort", "temperature", "top_p", "verbosity"].contains(&key.as_str())
@@ -32,14 +54,17 @@ pub fn encode_request(request: &ModelRequest) -> Result<Value, ContractError> {
             let object = replay
                 .as_object()
                 .ok_or_else(|| failure(ErrorCode::ModelContextIncompatible))?;
-            if object.len() != 2 || object.get("kind") != Some(&json!(REPLAY_KIND)) {
+            if object.len() != 2
+                || object.get("kind")
+                    != Some(&json!(if xai { XAI_REPLAY_KIND } else { REPLAY_KIND }))
+            {
                 return Err(failure(ErrorCode::ModelContextIncompatible));
             }
             let items = replay
                 .get("items")
                 .and_then(Value::as_array)
                 .ok_or_else(|| failure(ErrorCode::ModelContextIncompatible))?;
-            let decoded = inspect_output_items(items)?;
+            let decoded = inspect_output_items(items, xai)?;
             let mut text = String::new();
             let mut calls = Vec::new();
             for content in &message.content {
@@ -174,7 +199,10 @@ pub(crate) struct OutputItems {
     pub calls: Vec<OutputCall>,
     pub refused: bool,
 }
-pub(crate) fn inspect_output_items(items: &[Value]) -> Result<OutputItems, ContractError> {
+pub(crate) fn inspect_output_items(
+    items: &[Value],
+    xai: bool,
+) -> Result<OutputItems, ContractError> {
     let mut output = OutputItems {
         text: String::new(),
         calls: vec![],
@@ -185,12 +213,12 @@ pub(crate) fn inspect_output_items(items: &[Value]) -> Result<OutputItems, Contr
         let object = item
             .as_object()
             .ok_or_else(|| failure(ErrorCode::InvalidContract))?;
-        if object
-            .get("id")
-            .is_some_and(|id| id.as_str().is_none_or(str::is_empty))
-            || object
-                .get("status")
-                .is_some_and(|status| status != "completed")
+        if object.get("id").is_some_and(|id| {
+            id.as_str()
+                .is_none_or(|id| id.is_empty() && !(xai && item["type"] == "reasoning"))
+        }) || object
+            .get("status")
+            .is_some_and(|status| status != "completed")
         {
             return Err(failure(ErrorCode::InvalidContract));
         }
