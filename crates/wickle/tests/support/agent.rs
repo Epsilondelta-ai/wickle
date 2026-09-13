@@ -661,6 +661,8 @@ impl Fixture {
             system_input_resolver: None,
             external_receipt_verifier: None,
             components: None,
+            context_sources: None,
+            context_token_estimator: None,
             hooks: None,
             token_estimator: self.estimator.clone(),
             settings: AgentSettings {

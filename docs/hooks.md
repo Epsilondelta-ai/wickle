@@ -118,6 +118,11 @@ context as data, preserving Host/Profile instructions and the original request.
 Required additions must fit within the context budget; they grant no extra
 authority.
 
+Before-model Hooks receive the currently authorized ContextSource items in
+profile order followed by saved before-run Hook additions. Before-run Hooks keep
+their original input and Hook-chain contract. Source access is checked again
+before each physical model attempt; revocation also blocks Hook-derived copies.
+
 ## Reuse stored transformations
 
 Each accepted transformation is saved before it can affect a model or tool

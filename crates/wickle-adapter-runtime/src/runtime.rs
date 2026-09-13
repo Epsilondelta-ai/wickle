@@ -1,6 +1,6 @@
 use crate::{
     AdapterRegistry,
-    lifecycle::{ReleaseOwner, ScopedHook, ScopedTool, SegmentLifetime},
+    lifecycle::{ReleaseOwner, ScopedHook, ScopedSource, ScopedTool, SegmentLifetime},
 };
 use futures_util::FutureExt;
 use std::{
@@ -254,7 +254,8 @@ impl AdapterRuntime {
                 for export in returned {
                     let export_id = match &export {
                         AdapterExportInstance::Tool { export_id, .. }
-                        | AdapterExportInstance::Hook { export_id, .. } => export_id,
+                        | AdapterExportInstance::Hook { export_id, .. }
+                        | AdapterExportInstance::ContextSource { export_id, .. } => export_id,
                     };
                     let selection = selected
                         .iter()
@@ -381,9 +382,62 @@ impl AdapterRuntime {
                     },
                 ));
             }
+            let sources = if context.purpose == ComponentBindPurpose::ObserversOnly {
+                ContextSourceRegistry::metadata(context.scope.clone(), assembly.sources().to_vec())?
+            } else {
+                let mut sources: Vec<ContextSourceRegistration> = Vec::new();
+                for binding in assembly.sources() {
+                    if sources
+                        .iter()
+                        .any(|entry| entry.selection == binding.binding.source)
+                    {
+                        continue;
+                    }
+                    let source = match &binding.binding.source {
+                        ContextSourceRef::Catalog(reference) => self
+                            .registry
+                            .catalog_source(&VersionedRef {
+                                id: reference.source_id.clone(),
+                                version: reference.version.clone(),
+                            })
+                            .ok_or_else(|| {
+                                error(ErrorCode::ComponentUnavailable, "adapter.catalog_source")
+                            })?
+                            .source
+                            .source
+                            .clone(),
+                        ContextSourceRef::Export(reference) => match exports.get(&(
+                            reference.adapter_binding.clone(),
+                            reference.export_id.clone(),
+                        )) {
+                            Some(AdapterExportInstance::ContextSource { source, .. }) => {
+                                source.clone()
+                            }
+                            _ => {
+                                return Err(error(
+                                    ErrorCode::InvalidReference,
+                                    "adapter.source_export",
+                                ));
+                            }
+                        },
+                    };
+                    sources.push(ContextSourceRegistration {
+                        selection: binding.binding.source.clone(),
+                        definition: binding.definition.clone(),
+                        source: Arc::new(ScopedSource {
+                            lifetime: lifetime.clone(),
+                            selection: binding.binding.source.clone(),
+                            definition: binding.definition.clone(),
+                            source,
+                        }),
+                    });
+                }
+                ContextSourceRegistry::new(context.scope.clone(), sources)?
+            };
             Ok::<_, ContractError>((
                 Arc::new(ToolRegistry::from_bindings(context.scope.clone(), tools)?),
                 Arc::new(HookRegistry::from_bindings(context.scope.clone(), hooks)?),
+                Arc::new(sources),
             ))
         })
         .catch_unwind()
@@ -395,12 +449,13 @@ impl AdapterRuntime {
             self.settings.close_timeout_ms,
         ));
         match staged {
-            Ok((tools, hooks)) => BoundCapabilities::new(
+            Ok((tools, hooks, sources)) => BoundCapabilities::new(
                 context.scope,
                 context.run_id,
                 context.binding_set_id,
                 tools,
                 hooks,
+                sources,
                 release,
             ),
             Err(failure) => {
@@ -505,7 +560,10 @@ fn active_exports(
                 Err(error) => return Some(Err(error)),
             };
             let active = match export {
-                AdapterExportDefinition::Tool { .. } => purpose == ComponentBindPurpose::Execution,
+                AdapterExportDefinition::Tool { .. }
+                | AdapterExportDefinition::ContextSource { .. } => {
+                    purpose == ComponentBindPurpose::Execution
+                }
                 AdapterExportDefinition::Hook { definition, .. } => {
                     purpose == ComponentBindPurpose::Execution
                         || matches!(
@@ -541,6 +599,17 @@ fn attest_export(
                 definition: expected,
             },
             AdapterExportInstance::Hook {
+                export_id,
+                definition,
+                ..
+            },
+        ) => metadata.export_id == *export_id && expected == definition,
+        (
+            AdapterExportDefinition::ContextSource {
+                metadata,
+                definition: expected,
+            },
+            AdapterExportInstance::ContextSource {
                 export_id,
                 definition,
                 ..

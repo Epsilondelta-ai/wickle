@@ -44,10 +44,12 @@ pub enum AdapterExportDefinition {
         /// Exact Hook behavior/bounds.
         definition: HookDefinition,
     },
-    /// Metadata only until the context-source runtime is provided.
+    /// A read-only context source with collection and cached-use authorization.
     ContextSource {
         /// Declared source metadata.
         metadata: ExportMetadata,
+        /// Exact automatic-source origin and contract version.
+        definition: ContextSourceDefinition,
     },
     /// Host delivery metadata; never activated by an Agent Run.
     EventConsumer {
@@ -61,7 +63,7 @@ impl AdapterExportDefinition {
         match self {
             Self::Tool { metadata, .. }
             | Self::Hook { metadata, .. }
-            | Self::ContextSource { metadata }
+            | Self::ContextSource { metadata, .. }
             | Self::EventConsumer { metadata } => metadata,
         }
     }
@@ -227,6 +229,15 @@ pub enum AdapterExportInstance {
         /// Existing Hook handler.
         handler: Arc<dyn HookHandler>,
     },
+    /// Read-only context source; the same scoped instance authorizes cached use.
+    ContextSource {
+        /// Adapter-local export identity.
+        export_id: Id,
+        /// Exact native source version and permitted origin.
+        definition: ContextSourceDefinition,
+        /// Scoped provider and current ACL checker.
+        source: Arc<dyn ContextSource>,
+    },
 }
 /// Controls for one adapter's explicit asynchronous close.
 #[derive(Debug, Clone)]
@@ -314,6 +325,7 @@ pub struct BoundCapabilities {
     binding_set_id: Id,
     tools: Arc<ToolRegistry>,
     hooks: Arc<HookRegistry>,
+    sources: Arc<ContextSourceRegistry>,
     release: Arc<dyn ComponentRelease>,
 }
 impl BoundCapabilities {
@@ -324,9 +336,10 @@ impl BoundCapabilities {
         binding_set_id: Id,
         tools: Arc<ToolRegistry>,
         hooks: Arc<HookRegistry>,
+        sources: Arc<ContextSourceRegistry>,
         release: Arc<dyn ComponentRelease>,
     ) -> Result<Self, ContractError> {
-        if tools.scope() != &scope || hooks.scope() != &scope {
+        if tools.scope() != &scope || hooks.scope() != &scope || sources.scope() != &scope {
             return Err(component_error(ErrorCode::AccessDenied, "components.scope"));
         }
         Ok(Self {
@@ -335,6 +348,7 @@ impl BoundCapabilities {
             binding_set_id,
             tools,
             hooks,
+            sources,
             release,
         })
     }
@@ -357,6 +371,10 @@ impl BoundCapabilities {
     /// Ready Hook bindings and fixed selection metadata.
     pub fn hooks(&self) -> &Arc<HookRegistry> {
         &self.hooks
+    }
+    /// Scoped read-only providers and their immutable selection metadata.
+    pub fn sources(&self) -> &Arc<ContextSourceRegistry> {
+        &self.sources
     }
     /// Explicit cleanup independent of result status.
     pub fn release<'a>(
@@ -421,6 +439,8 @@ struct AssemblyData {
     adapters: Vec<ResolvedAdapterBinding>,
     tools: Vec<StoredToolBinding>,
     hooks: Vec<ResolvedHookBinding>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    sources: Vec<ResolvedSourceBinding>,
 }
 /// Validated immutable metadata used across process-local binding segments.
 #[derive(Clone)]
@@ -437,6 +457,7 @@ impl ResolvedAssembly {
         adapters: Vec<ResolvedAdapterBinding>,
         tools: Vec<ResolvedToolBinding>,
         hooks: Vec<ResolvedHookBinding>,
+        sources: Vec<ResolvedSourceBinding>,
     ) -> Result<Self, ContractError> {
         let data = AssemblyData {
             schema_version: RESOLVED_ASSEMBLY_SCHEMA_VERSION.into(),
@@ -465,6 +486,7 @@ impl ResolvedAssembly {
                 })
                 .collect::<Result<Vec<_>, ContractError>>()?,
             hooks,
+            sources,
         };
         let assembly = Self { data, tools };
         assembly.validate(profile, &context.system_inputs)?;
@@ -501,6 +523,10 @@ impl ResolvedAssembly {
     /// Hook selections with their pinned contracts.
     pub fn hooks(&self) -> &[ResolvedHookBinding] {
         &self.data.hooks
+    }
+    /// Automatic sources in their original profile order.
+    pub fn sources(&self) -> &[ResolvedSourceBinding] {
+        &self.data.sources
     }
     /// Frozen system-key definitions, without runtime values.
     pub fn system_inputs(&self) -> &[SystemInputDefinition] {
@@ -559,14 +585,11 @@ impl ResolvedAssembly {
             || self.profile_resolution_digest() != profile.resolution_digest()
             || self.data.system_inputs
                 != registry.definitions().values().cloned().collect::<Vec<_>>()
-            || selected
-                .context_sources
-                .as_ref()
-                .is_some_and(|sources| !sources.is_empty())
             || self.connections().len() != selected.connectors.len()
             || self.adapters().len() != selected.adapters.as_ref().map_or(0, Vec::len)
             || self.tools().len() != selected.tools.len()
             || self.hooks().len() != selected.hooks.as_ref().map_or(0, Vec::len)
+            || self.sources().len() != selected.context_sources.as_ref().map_or(0, Vec::len)
         {
             return Err(invalid());
         }
@@ -627,6 +650,7 @@ impl ResolvedAssembly {
                     return Err(invalid());
                 }
             }
+            let mut source_exports = std::collections::BTreeSet::new();
             let wanted: Vec<_> = selected
                 .tools
                 .iter()
@@ -644,6 +668,23 @@ impl ResolvedAssembly {
                         None
                     }
                 }))
+                .chain(
+                    selected
+                        .context_sources
+                        .iter()
+                        .flatten()
+                        .filter_map(|source| {
+                            if let ContextSourceRef::Export(export) = &source.source {
+                                Some(export)
+                            } else {
+                                None
+                            }
+                        })
+                        .filter(|export| {
+                            source_exports
+                                .insert((export.adapter_binding.clone(), export.export_id.clone()))
+                        }),
+                )
                 .filter(|export| export.adapter_binding == selection.binding_id)
                 .cloned()
                 .collect();
@@ -781,6 +822,55 @@ impl ResolvedAssembly {
                 }
             }
         }
+        let mut source_slots = std::collections::BTreeSet::new();
+        for (binding, selection) in self
+            .sources()
+            .iter()
+            .zip(selected.context_sources.iter().flatten())
+        {
+            binding.definition.validate()?;
+            if &binding.binding != selection
+                || !source_slots.insert(crate::canonical_digest(&serde_json::json!([
+                    selection.source,
+                    selection.trigger
+                ])))
+            {
+                return Err(invalid());
+            }
+            match &selection.source {
+                ContextSourceRef::Catalog(reference) => {
+                    let metadata = binding.metadata.as_ref().ok_or_else(invalid)?;
+                    attest_metadata(profile, metadata)?;
+                    if metadata.reference
+                        != (ComponentRef {
+                            kind: ComponentKind::ContextSource,
+                            id: reference.source_id.clone(),
+                            version: Some(reference.version.clone()),
+                        })
+                        || binding.definition.source
+                            != (VersionedRef {
+                                id: reference.source_id.clone(),
+                                version: reference.version.clone(),
+                            })
+                    {
+                        return Err(invalid());
+                    }
+                }
+                ContextSourceRef::Export(export) => {
+                    if export.alias.is_some() || binding.metadata.is_some() {
+                        return Err(invalid());
+                    }
+                    let AdapterExportDefinition::ContextSource { definition, .. } =
+                        self.export(export)?
+                    else {
+                        return Err(invalid());
+                    };
+                    if definition != &binding.definition {
+                        return Err(invalid());
+                    }
+                }
+            }
+        }
         Ok(())
     }
     /// Inspect the pinned original definition behind an Export selection.
@@ -835,7 +925,8 @@ impl AdapterDefinition {
                         && metadata.hook_position == Some(definition.position)
                         && metadata.model_name.is_none()
                 }
-                AdapterExportDefinition::ContextSource { .. } => {
+                AdapterExportDefinition::ContextSource { definition, .. } => {
+                    definition.validate()?;
                     metadata.kind == ExportKind::ContextSource
                         && metadata.model_name.is_none()
                         && metadata.hook_position.is_none()

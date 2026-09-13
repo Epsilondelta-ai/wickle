@@ -28,6 +28,15 @@ pub struct CatalogHookRegistration {
     pub hook: HookRegistration,
 }
 
+/// Existing catalog source and its independently validated component metadata.
+#[derive(Clone)]
+pub struct CatalogSourceRegistration {
+    /// Exact catalog metadata used by ProfileResolver.
+    pub metadata: ComponentMetadata,
+    /// Scoped read-only provider and native source definition.
+    pub source: ContextSourceRegistration,
+}
+
 /// Immutable scope-local metadata and implementation registry. Construction and
 /// resolution never invoke factories, tools, hooks, source readers or consumers.
 pub struct AdapterRegistry {
@@ -36,6 +45,7 @@ pub struct AdapterRegistry {
     pub(crate) connections: Vec<ConnectionRegistration>,
     pub(crate) tools: Vec<CatalogToolRegistration>,
     pub(crate) hooks: Vec<CatalogHookRegistration>,
+    pub(crate) sources: Vec<CatalogSourceRegistration>,
     pub(crate) states: Vec<AdapterBindingState>,
 }
 impl std::fmt::Debug for AdapterRegistry {
@@ -125,8 +135,40 @@ impl AdapterRegistry {
             connections,
             tools,
             hooks,
+            sources: vec![],
             states,
         })
+    }
+    /// Register catalog sources without invoking their provide or ACL callbacks.
+    pub fn with_sources(
+        mut self,
+        sources: Vec<CatalogSourceRegistration>,
+    ) -> Result<Self, ContractError> {
+        for (index, entry) in sources.iter().enumerate() {
+            entry.source.definition.validate()?;
+            let ContextSourceRef::Catalog(reference) = &entry.source.selection else {
+                return Err(error(
+                    ErrorCode::InvalidReference,
+                    "registry.source_selection",
+                ));
+            };
+            if entry.metadata.reference.kind != ComponentKind::ContextSource
+                || entry.metadata.reference.id != reference.source_id
+                || entry.metadata.reference.version.as_ref() != Some(&reference.version)
+                || entry.source.definition.source
+                    != (VersionedRef {
+                        id: reference.source_id.clone(),
+                        version: reference.version.clone(),
+                    })
+                || sources[..index]
+                    .iter()
+                    .any(|prior| prior.source.selection == entry.source.selection)
+            {
+                return Err(error(ErrorCode::InvalidContract, "registry.source"));
+            }
+        }
+        self.sources = sources;
+        Ok(self)
     }
     /// Exact namespace for all registrations and prepared binding states.
     pub fn scope(&self) -> &Scope {
@@ -152,6 +194,12 @@ impl AdapterRegistry {
             .iter()
             .find(|entry| entry.hook.definition.hook == *reference)
     }
+    /// Lookup the exact source code revision without reading source data.
+    pub fn catalog_source(&self, reference: &VersionedRef) -> Option<&CatalogSourceRegistration> {
+        self.sources
+            .iter()
+            .find(|entry| entry.source.definition.source == *reference)
+    }
     /// Metadata for a Host ProfileResolver; unrelated model/assets remain in the
     /// Host's resolver and do not become adapter-owned components.
     pub fn component_metadata(&self, reference: &ComponentRef) -> Option<ComponentMetadata> {
@@ -161,6 +209,7 @@ impl AdapterRegistry {
             .chain(self.connections.iter().map(|entry| &entry.metadata))
             .chain(self.tools.iter().map(|entry| &entry.metadata))
             .chain(self.hooks.iter().map(|entry| &entry.metadata))
+            .chain(self.sources.iter().map(|entry| &entry.metadata))
             .find(|metadata| &metadata.reference == reference)
             .cloned()
     }
@@ -200,6 +249,7 @@ impl AdapterRegistry {
             let registered = self
                 .adapter(&reference)
                 .ok_or_else(|| error(ErrorCode::ComponentUnavailable, "registry.adapter"))?;
+            let mut source_exports = std::collections::BTreeSet::new();
             let selected_exports = selected
                 .tools
                 .iter()
@@ -217,6 +267,23 @@ impl AdapterRegistry {
                         None
                     }
                 }))
+                .chain(
+                    selected
+                        .context_sources
+                        .iter()
+                        .flatten()
+                        .filter_map(|binding| {
+                            if let ContextSourceRef::Export(export) = &binding.source {
+                                Some(export)
+                            } else {
+                                None
+                            }
+                        })
+                        .filter(|export| {
+                            source_exports
+                                .insert((export.adapter_binding.clone(), export.export_id.clone()))
+                        }),
+                )
                 .filter(|export| export.adapter_binding == binding.binding_id)
                 .cloned()
                 .collect();
@@ -330,7 +397,45 @@ impl AdapterRegistry {
                 definition,
             });
         }
-        ResolvedAssembly::new(profile, context, connections, adapters, tools, hooks)
+        let mut sources = Vec::new();
+        for binding in selected.context_sources.iter().flatten() {
+            let (metadata, definition) = match &binding.source {
+                ContextSourceRef::Catalog(reference) => {
+                    let entry = self
+                        .catalog_source(&VersionedRef {
+                            id: reference.source_id.clone(),
+                            version: reference.version.clone(),
+                        })
+                        .ok_or_else(|| error(ErrorCode::ComponentUnavailable, "registry.source"))?;
+                    (
+                        Some(entry.metadata.clone()),
+                        entry.source.definition.clone(),
+                    )
+                }
+                ContextSourceRef::Export(reference) => {
+                    let AdapterExportDefinition::ContextSource { definition, .. } =
+                        lookup_export(reference)?
+                    else {
+                        return Err(error(ErrorCode::InvalidReference, "registry.source_kind"));
+                    };
+                    (None, definition.clone())
+                }
+            };
+            sources.push(ResolvedSourceBinding {
+                binding: binding.clone(),
+                definition,
+                metadata,
+            });
+        }
+        ResolvedAssembly::new(
+            profile,
+            context,
+            connections,
+            adapters,
+            tools,
+            hooks,
+            sources,
+        )
     }
     /// Refuse metadata/connection/state drift before opening any resource.
     pub fn ensure_assembly(&self, assembly: &ResolvedAssembly) -> Result<(), ContractError> {
@@ -384,6 +489,21 @@ impl AdapterRegistry {
                     .ok_or_else(mismatch)?;
                 if binding.metadata.as_ref() != Some(&entry.metadata)
                     || entry.hook.definition != binding.definition
+                {
+                    return Err(mismatch());
+                }
+            }
+        }
+        for binding in assembly.sources() {
+            if let ContextSourceRef::Catalog(reference) = &binding.binding.source {
+                let entry = self
+                    .catalog_source(&VersionedRef {
+                        id: reference.source_id.clone(),
+                        version: reference.version.clone(),
+                    })
+                    .ok_or_else(mismatch)?;
+                if binding.metadata.as_ref() != Some(&entry.metadata)
+                    || binding.definition != entry.source.definition
                 {
                     return Err(mismatch());
                 }

@@ -85,6 +85,10 @@ pub enum ErrorCode {
     ContextMismatch,
     /// Required context cannot fit the explicit byte or item bounds without truncation.
     ContextBudgetExceeded,
+    /// A required context source is explicitly unavailable.
+    ContextSourceUnavailable,
+    /// Context access requires approval through a separate interactive operation.
+    ContextApprovalRequired,
     /// The document format is not supported.
     UnsupportedSchemaVersion,
     /// A reference or binding is missing or inconsistent.

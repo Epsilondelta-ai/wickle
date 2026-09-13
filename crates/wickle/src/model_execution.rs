@@ -142,7 +142,8 @@ impl ModelExchange {
                 "model.routing_required",
             ));
         }
-        self.generate_inner(request, context, budget, None).await
+        self.generate_inner(request, context, budget, None, None)
+            .await
     }
 
     async fn generate_inner(
@@ -151,6 +152,7 @@ impl ModelExchange {
         context: &ExecutionContext,
         budget: &RunBudget,
         routed: Option<(&crate::RouteSelection, crate::VersionPolicy)>,
+        context_use: Option<routed::ContextUseGate<'_>>,
     ) -> Result<Guarded<ModelExchangeOutcome>, ContractError> {
         for retry_number in 0..=self.retry.max_retries {
             let model = self.resolve_model(request, context, budget)?;
@@ -159,6 +161,9 @@ impl ModelExchange {
                 self.authorize(request, context, budget).await?
             {
                 return Ok(Guarded::ApprovalRequired(challenge));
+            }
+            if let Some(gate) = &context_use {
+                gate.check(context, budget).await?;
             }
             let observation = if let Some((_, version_policy)) = routed {
                 Some(
@@ -217,6 +222,9 @@ impl ModelExchange {
                 self.authorize(&physical_request, context, budget).await?
             {
                 return Ok(Guarded::ApprovalRequired(challenge));
+            }
+            if let Some(gate) = &context_use {
+                gate.check(context, budget).await?;
             }
             budget.check_boundary().await?;
             if context.cancellation.is_cancelled() {

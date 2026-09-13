@@ -8,7 +8,7 @@ mod registry;
 mod runtime;
 
 pub use registry::{
-    AdapterRegistration, AdapterRegistry, CatalogHookRegistration, CatalogToolRegistration,
-    ConnectionRegistration,
+    AdapterRegistration, AdapterRegistry, CatalogHookRegistration, CatalogSourceRegistration,
+    CatalogToolRegistration, ConnectionRegistration,
 };
 pub use runtime::{AdapterRuntime, AdapterRuntimeSettings};

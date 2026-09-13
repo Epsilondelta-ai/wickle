@@ -1,6 +1,6 @@
 # Bind adapter exports to an agent
 
-`wickle-adapter-runtime` assembles approved Tool and lifecycle Hook implementations
+`wickle-adapter-runtime` assembles approved Tool, lifecycle Hook, and ContextSource implementations
 for one Agent execution segment. Core traits and data contracts live in `wickle`;
 the Host runtime is a separate library crate. No server or network protocol is
 required between them.
@@ -10,14 +10,16 @@ adapter versions and exports; it cannot supply an executable path or credentials
 
 ## Choose a binding mode
 
-| Agent configuration | Source of tools and hooks |
+| Agent configuration | Source of tools, hooks, and context sources |
 | --- | --- |
-| `components: None` | Existing `AgentBindings.tools` and `hooks`, managed by the Host |
+| `components: None` | Existing `AgentBindings.tools`, `hooks`, and `context_sources`, managed by the Host |
 | `components: Some(runtime)` | All selected catalog entries and adapter exports from that runtime |
 
-The component mode requires `AgentBindings.tools` and `hooks` to be `None`.
+The component mode requires `AgentBindings.tools`, `hooks`, and `context_sources` to be `None`.
 Register existing catalog implementations through `CatalogToolRegistration` and
-`CatalogHookRegistration` when mixing them with adapter exports. Duplicate visible
+`CatalogHookRegistration` when mixing them with adapter exports. Add catalog sources
+with `AdapterRegistry::with_sources` and `CatalogSourceRegistration`, and supply
+`AgentBindings.context_token_estimator` when selecting sources. Duplicate visible
 names or conflicting selections are errors; later registrations do not overwrite
 earlier ones.
 
@@ -27,11 +29,12 @@ earlier ones.
 connection registrations, catalog tools, catalog hooks, and optional existing
 binding-state snapshots. Registration validates metadata without calling a factory.
 The application's `ProfileResolver` can use `registry.component_metadata` for
-registered adapters, connectors, tools, and hooks, and its existing resolver for
+registered adapters, connectors, tools, hooks, and sources, and its existing resolver for
 model bindings.
 
 Configure the runtime with the same scoped state, policy, and clock used by the
-Agent. The supplied bindings below must have direct `tools` and `hooks` set to `None`:
+Agent. The supplied bindings below must have direct `tools`, `hooks`, and
+`context_sources` set to `None`:
 
 ```rust
 use std::sync::Arc;
@@ -80,7 +83,7 @@ multiple connection bindings with distinct selections and visible names.
 ## Resolve before opening
 
 For a new request, the Agent resolves metadata and saves a `ResolvedAssembly`
-alongside its prompt, hook plan, and system-input definitions. The assembly fixes
+alongside its prompt, hook/source plans, and system-input definitions. The assembly fixes
 the full export contracts, compiler digests, connection revisions, and selected
 Host state. Duplicate requests reuse saved state before resolving current metadata.
 
@@ -88,12 +91,12 @@ Only after admission and lease acquisition does `ComponentRuntime::bind` open
 resources. Each `AdapterFactory::open` receives `AdapterInitContext` with the
 scope, Run, fresh `binding_set_id`, current actor, exact binding, selected exports,
 and finite cancellation/deadline controls. Return an `AdapterInstance` exposing
-exactly those requested Tool or Hook exports.
+exactly those requested Tool, Hook, or ContextSource exports.
 
-Instances are staged privately. Their returned descriptors and hook contracts
+Instances are staged privately. Their returned descriptors, hook and source contracts
 must match the saved assembly before any executable registry becomes available.
 The Agent also checks a custom runtime's returned contracts. Current
-`BindAdapter`, Tool, Hook, and data-access policies remain separate checks;
+`BindAdapter`, Tool, Hook, source collection/use, and data-access policies remain separate checks;
 registration or a binding-set identifier does not grant permission.
 
 ## Preserve state across execution segments
@@ -113,7 +116,8 @@ before accepting the command, so invalid commands need no business-tool instance
 
 Expired resumes and cancellation of saved waits finalize from metadata. When
 configured observers are needed afterward, `ObserversOnly` activates only those
-observers. A failed execution bind is not retried as an observer bind.
+observers; it does not activate context sources. A failed execution bind is not
+retried as an observer bind.
 
 ## Release explicitly
 
@@ -137,7 +141,7 @@ from the saved Run outcome. Failed-initialization rollback reports are available
 from `AdapterRuntime::take_failed_cleanup_report` in the owning Host process.
 
 The [adapter consumer](../tests/support/adapter_consumer.rs) exercises the public
-crate contracts with synthetic factories. Context-source and event-consumer
-exports can be declared as metadata; automatic source execution and event delivery
-are not activated by this runtime. Close callbacks must not hide required business
+crate contracts with synthetic factories. [Context-source exports](context-sources.md)
+support read-only collection and fresh authorization of saved batches. Event-consumer
+exports remain metadata-only; this runtime does not deliver events. Close callbacks must not hide required business
 writes, and in-process Rust callbacks are trusted code rather than a sandbox.

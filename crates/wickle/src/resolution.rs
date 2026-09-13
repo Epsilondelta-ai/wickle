@@ -347,7 +347,11 @@ impl<'a> ProfileValidator<'a> {
                 )
                 .await?;
         }
+        let mut source_slots = BTreeSet::new();
         for item in profile.context_sources.iter().flatten() {
+            if !source_slots.insert(data_digest(&(&item.source, item.trigger))) {
+                return Err(invalid("context_sources.duplicate"));
+            }
             match &item.source {
                 ContextSourceRef::Catalog(item) => {
                     checks
@@ -574,7 +578,8 @@ impl<'a> Checks<'a> {
         if !self.selected_exports.insert((
             reference.adapter_binding.clone(),
             reference.export_id.clone(),
-        )) {
+        )) && kind != ExportKind::ContextSource
+        {
             return Err(invalid("export.duplicate"));
         }
         if kind == ExportKind::Tool {

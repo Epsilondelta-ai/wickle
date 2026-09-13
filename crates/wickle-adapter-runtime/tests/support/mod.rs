@@ -100,7 +100,14 @@ pub fn definition(name: &str) -> AdapterDefinition {
                 metadata: tool,
                 descriptor: Box::new(descriptor("search")),
             },
-            AdapterExportDefinition::ContextSource { metadata: source },
+            AdapterExportDefinition::ContextSource {
+                metadata: source,
+                definition: ContextSourceDefinition {
+                    source: reference("recall"),
+                    origin: ContextOrigin::Memory,
+                    contract_version: 1,
+                },
+            },
             AdapterExportDefinition::EventConsumer { metadata: consumer },
             AdapterExportDefinition::Hook {
                 metadata: hook,

@@ -10,8 +10,10 @@ use serde_json::Value;
 
 mod checkpoint;
 mod hook_state;
+mod source_state;
 pub use checkpoint::{STATE_STORE_CHECKPOINT_VERSION, StateStoreCheckpoint};
 use hook_state::{validate_hook_observation, validate_hook_snapshot, validate_hook_transition};
+use source_state::{validate_source_snapshot, validate_source_transition};
 
 use crate::{
     ApprovalTarget, BudgetUsage, ContentBlock, ContractError, ErrorCode, Id, Message,
@@ -413,6 +415,8 @@ impl StateStore for MemoryStateStore {
                 || !input.snapshot.reservations.is_empty()
                 || !input.snapshot.resume_receipts.is_empty()
                 || !input.snapshot.hook_applications.is_empty()
+                || !input.snapshot.context_batches.is_empty()
+                || !input.snapshot.source_states.is_empty()
                 || input.snapshot.usage != BudgetUsage::default()
             {
                 return Err(error(ErrorCode::InvalidSnapshot, "admission"));
@@ -948,6 +952,7 @@ fn validate_snapshot_refs(
     additions: &BTreeMap<RecordKey, ProtectedRecord>,
     snapshot: &RunSnapshot,
 ) -> Result<(), ContractError> {
+    validate_source_snapshot(state, additions, snapshot)?;
     validate_hook_snapshot(state, additions, snapshot)?;
     let mut references = Vec::new();
     for receipt in &snapshot.resume_receipts {
@@ -1878,6 +1883,7 @@ fn validate_transition(previous: &RunSnapshot, next: &RunSnapshot) -> Result<(),
     }
     next.validate()?;
     validate_hook_transition(previous, next)?;
+    validate_source_transition(previous, next)?;
     crate::budget::validate_budget_transition(previous, next)?;
     if !next.resume_receipts.starts_with(&previous.resume_receipts)
         || next.resume_receipts.len() > previous.resume_receipts.len() + 1

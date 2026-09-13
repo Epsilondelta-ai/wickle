@@ -18,6 +18,7 @@ mod clock;
 mod component_runtime;
 mod context;
 mod context_projection;
+mod context_source;
 mod error;
 mod hooks;
 mod input_binding;
@@ -56,6 +57,12 @@ pub use context_projection::{
     CONTEXT_ASSEMBLER_VERSION, ContextAssembler, ContextItem, ContextLifetime, ContextOrigin,
     ContextPriority, ContextProjection, InstructionAssetContent, PinnedPromptTool, ProjectionInput,
     ProjectionLimits, PromptSnapshot, PromptToolBinding, ScopedOpaque, SkillManifest,
+};
+pub use context_source::{
+    ContextBatch, ContextCallContext, ContextRequest, ContextResult, ContextSource,
+    ContextSourceDefinition, ContextSourcePlan, ContextSourceRegistration, ContextSourceRegistry,
+    ContextSourceRuntime, ContextSourceUsage, ContextTokenEstimator, ContextUseRequest,
+    PlannedContextSource, ResolvedSourceBinding,
 };
 pub use hooks::{
     HookApplication, HookApplicationRecord, HookContext, HookContextAddition, HookDefinition,

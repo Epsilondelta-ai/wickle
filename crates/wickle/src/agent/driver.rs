@@ -449,6 +449,8 @@ impl Agent {
         let context = &segment.context;
         let bindings = &self.inner.bindings;
         budget.check_boundary().await?;
+        self.collect_sources(ContextTrigger::RunStart, None, segment, budget)
+            .await?;
         let run_context = self.before_run(budget, segment).await?;
         let mut snapshot = bindings.state.load(&bindings.scope, run_id).await?.snapshot;
         let expected_revision = snapshot.revision;
@@ -460,6 +462,9 @@ impl Agent {
             .ok_or_else(|| fail(ErrorCode::RevisionConflict, "agent.prepare"))?;
         snapshot.phase = RunPhase::Prepare;
         snapshot.model_step_id = Some(step.clone());
+        snapshot
+            .source_states
+            .retain(|state| state.trigger != ContextTrigger::BeforeModel);
         snapshot.usage.elapsed_ms = elapsed;
         snapshot.timing.last_observed_at_ms = now;
         let saved = bindings
@@ -488,11 +493,21 @@ impl Agent {
                     && rule.purpose == ModelPurpose::Agent
             })
             .ok_or_else(|| fail(ErrorCode::ModelRouteDenied, "agent.routing"))?;
+        self.collect_sources(
+            ContextTrigger::BeforeModel,
+            Some(step.clone()),
+            segment,
+            budget,
+        )
+        .await?;
+        let (source_batch_refs, mut source_items) =
+            self.source_context(&step, segment, budget).await?;
+        source_items.extend(run_context);
         let context_items = self
             .before_model(
                 &step,
                 saved.snapshot.request.input.clone(),
-                run_context,
+                source_items,
                 segment,
                 budget,
             )
@@ -527,6 +542,8 @@ impl Agent {
             estimator: bindings.token_estimator.clone(),
             state: bindings.state.clone(),
             context_items,
+            sources: segment.sources.clone(),
+            source_batch_refs,
         };
         bindings
             .model_exchange
@@ -841,8 +858,42 @@ struct Projector {
     estimator: Arc<dyn ModelTokenEstimator>,
     state: Arc<dyn StateStore>,
     context_items: Vec<ContextItem>,
+    sources: Option<Arc<ContextSourceRuntime>>,
+    source_batch_refs: Vec<RecordRef>,
 }
 impl ModelRequestProjector for Projector {
+    fn authorize_use<'a>(
+        &'a self,
+        selection: &'a RouteSelection,
+        _input: &'a RoutedModelInput,
+        context: &'a ModelProjectionContext,
+    ) -> PortFuture<'a, ()> {
+        Box::pin(async move {
+            if let Some(sources) = &self.sources {
+                let deadline = context.deadline;
+                let context = ExecutionContext::new(
+                    ExecutionContextData {
+                        scope: context.scope.clone(),
+                        principal_ref: context.principal_ref.clone(),
+                        capability_grant_ref: context.capability_grant_ref.clone(),
+                        trace_context: None,
+                        system_inputs: None,
+                    },
+                    context.cancellation.clone(),
+                );
+                sources
+                    .authorize_use(
+                        &self.saved.snapshot.run_id,
+                        &self.source_batch_refs,
+                        Some(&selection.route),
+                        &context,
+                        deadline,
+                    )
+                    .await?;
+            }
+            Ok(())
+        })
+    }
     fn project<'a>(
         &'a self,
         selection: &'a RouteSelection,
@@ -853,6 +904,7 @@ impl ModelRequestProjector for Projector {
             if context.cancellation.is_cancelled() {
                 return Err(fail(ErrorCode::Cancelled, "agent.projection"));
             }
+            self.authorize_use(selection, input, context).await?;
             let request_message = self
                 .saved
                 .messages

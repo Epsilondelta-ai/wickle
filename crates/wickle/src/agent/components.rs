@@ -6,6 +6,7 @@ pub(super) struct SegmentBindings {
     pub context: ExecutionContext,
     pub tools: Arc<ToolRegistry>,
     pub hooks: Option<Arc<HookRuntime>>,
+    pub sources: Option<Arc<ContextSourceRuntime>>,
     pub owned: Option<BoundCapabilities>,
 }
 impl SegmentBindings {
@@ -31,6 +32,7 @@ impl Agent {
                     vec![],
                 )?)),
             hooks: self.inner.bindings.hooks.clone(),
+            sources: self.inner.bindings.context_sources.clone(),
             owned: None,
         })
     }
@@ -96,6 +98,7 @@ impl Agent {
                     assembly.tools().to_vec(),
                 )?),
                 hooks: None,
+                sources: None,
                 owned: None,
             }),
             None => self.direct_segment(context),
@@ -204,10 +207,53 @@ impl Agent {
             owned.hooks().clone(),
         )
         .with_binding_set_id(owned.binding_set_id().clone());
+        let sources = std::panic::catch_unwind(AssertUnwindSafe(|| -> Result<_, ContractError> {
+            if assembly.sources().is_empty() {
+                Ok(None)
+            } else {
+                let estimator = bindings
+                    .context_token_estimator
+                    .as_ref()
+                    .ok_or_else(|| fail(ErrorCode::InvalidConfiguration, "agent.source_estimator"))?
+                    .clone();
+                let runtime = ContextSourceRuntime::new(
+                    bindings.state.clone(),
+                    bindings.policy.clone(),
+                    bindings.clock.clone(),
+                    bindings.ids.clone(),
+                    owned.sources().clone(),
+                    estimator,
+                )?
+                .with_binding_set_id(owned.binding_set_id().clone());
+                let expected = saved
+                    .snapshot
+                    .source_plan_ref
+                    .as_ref()
+                    .ok_or_else(|| fail(ErrorCode::InvalidSnapshot, "sources.plan"))?;
+                if runtime.plan(saved.snapshot.profile.profile())?.digest() != expected.digest {
+                    return Err(fail(ErrorCode::ContextMismatch, "components.bound_sources"));
+                }
+                Ok(Some(Arc::new(runtime)))
+            }
+        }))
+        .unwrap_or_else(|_| {
+            Err(fail(
+                ErrorCode::InvalidContract,
+                "components.source_runtime",
+            ))
+        });
+        let sources = match sources {
+            Ok(sources) => sources,
+            Err(error) => {
+                self.release_bound(&owned, local).await;
+                return Err(error);
+            }
+        };
         Ok(SegmentBindings {
             context,
             tools: owned.tools().clone(),
             hooks: Some(Arc::new(hook_runtime)),
+            sources,
             owned: Some(owned),
         })
     }

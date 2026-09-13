@@ -152,6 +152,32 @@ pub enum PolicyAction {
     ReadRecord {},
     /// Use scoped data in model context.
     UseContext {},
+    /// Read one explicitly selected automatic context source.
+    ProvideContext {
+        /// Catalog or adapter export selection.
+        source: crate::ContextSourceRef,
+        /// Pinned source contract.
+        definition_digest: JsonDigest,
+        /// Logical lookup identity, reused after persistence.
+        context_request_id: Id,
+        /// Collection point.
+        trigger: crate::ContextTrigger,
+        /// Logical model step for step-scoped lookups.
+        model_step_id: Option<Id>,
+        /// Identity of the scoped query and lookup settings.
+        input_digest: JsonDigest,
+    },
+    /// Recheck a saved source batch before local transformation or model transmission.
+    UseSourceContext {
+        /// Exact original source selection.
+        source: crate::ContextSourceRef,
+        /// Pinned source contract.
+        definition_digest: JsonDigest,
+        /// Saved batch whose data and derived context are being used.
+        batch_ref: crate::RecordRef,
+        /// None for local preparation, otherwise the exact model destination.
+        route: Option<Box<crate::ResolvedModelRoute>>,
+    },
     /// Invoke one selected lifecycle hook under its pinned definition and target.
     InvokeHook {
         /// Exact selected hook version.

@@ -499,6 +499,7 @@ impl ComponentRuntime for WrongRuntime {
                 context.binding_set_id.clone(),
                 Arc::new(ToolRegistry::from_bindings(context.scope.clone(), entries)?),
                 original.hooks().clone(),
+                original.sources().clone(),
                 Arc::new(ForwardRelease { original }),
             )
         })
