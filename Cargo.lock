@@ -2391,6 +2391,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "wickle-model-vertex"
+version = "0.1.0"
+dependencies = [
+ "futures-util",
+ "reqwest",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+ "wickle",
+ "wickle-model-gemini",
+ "wickle-model-responses",
+]
+
+[[package]]
 name = "wickle-state-sqlite"
 version = "0.1.0"
 dependencies = [

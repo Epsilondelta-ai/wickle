@@ -31,3 +31,5 @@ For Claude Messages, signed thinking replay and workspace-scoped credentials, se
 For AWS signing, inference profiles and both Bedrock stream protocols, see the [Bedrock adapter guide](docs/bedrock.md).
 
 For Gemini API versions, function schemas and thought-signature replay, see the [Gemini adapter guide](docs/gemini.md).
+
+For Google Cloud OAuth, global and regional targets, see the [Vertex AI adapter guide](docs/vertex.md).

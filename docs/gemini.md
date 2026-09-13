@@ -19,6 +19,8 @@ Register `connection.binding()`, `connection.target()` and `connection.api_contr
 
 The default API version is `v1`; `v1beta` is an explicit Host choice. Both use SSE `streamGenerateContent?alt=sse`. The Interactions API is a different protocol and is not implemented here.
 
+The public `protocol` module also supplies shared wire primitives for the [Vertex AI adapter](vertex.md). Pair `encode_vertex_request` with `GenerateContentDecoder::for_vertex` for Vertex's JSON function schemas, structured output format and complete function-call metadata. The direct Gemini adapter uses `encode_request` and `GenerateContentDecoder::new`; its API-version rules remain as follows.
+
 | Declaration | `v1` | `v1beta` |
 | --- | --- | --- |
 | Function input | `parameters` using OpenAPI Schema | `parametersJsonSchema` |

@@ -31,3 +31,5 @@ Claude Messages, thinking 서명 보존, workspace별 인증은 [Anthropic 어�
 AWS 서명, inference profile과 Bedrock 스트림은 [Bedrock 어댑터 가이드](docs/bedrock.md)를 참고하세요.
 
 Gemini API 버전, 함수 스키마와 thinking 서명 재전달은 [Gemini 어댑터 가이드](docs/gemini.md)를 참고하세요.
+
+Google Cloud 인증과 global·리전별 연결은 [Vertex AI 어댑터 가이드](docs/vertex.md)를 참고하세요.

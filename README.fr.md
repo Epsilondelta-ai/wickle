@@ -31,3 +31,5 @@ Consultez le [guide de l’adaptateur Anthropic](docs/anthropic.md) pour Claude 
 Consultez le [guide de l’adaptateur Bedrock](docs/bedrock.md) pour la signature AWS, les profils d’inférence et les protocoles de streaming.
 
 Consultez le [guide de l’adaptateur Gemini](docs/gemini.md) pour les versions d’API, les schémas de fonctions et la conservation des signatures de raisonnement.
+
+Consultez le [guide de l’adaptateur Vertex AI](docs/vertex.md) pour OAuth Google Cloud et les connexions globales ou régionales.

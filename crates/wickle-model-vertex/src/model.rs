@@ -1,24 +1,24 @@
-use crate::{GeminiConnection, error};
-use crate::{codec::encode_request, response::Decoder as GenerateContentDecoder};
+use crate::{VertexAudience, VertexConnection, error};
 use futures_util::stream;
 use reqwest::Response;
 use std::collections::VecDeque;
 use wickle::*;
+use wickle_model_gemini::protocol::{GenerateContentDecoder, encode_vertex_request};
 use wickle_model_responses::SseDecoder;
 
-/// One Gemini streamGenerateContent POST per invocation, streamed into Wickle model events.
+/// One Vertex streamGenerateContent POST per invocation, streamed into Wickle model events.
 /// The adapter does not retry, run Tool handlers, or load environment variables.
 #[derive(Debug, Clone)]
-pub struct GeminiModel {
-    connection: GeminiConnection,
+pub struct VertexModel {
+    connection: VertexConnection,
 }
-impl GeminiModel {
+impl VertexModel {
     /// Bind an already configured connection without making a network request.
-    pub fn new(connection: GeminiConnection) -> Self {
+    pub fn new(connection: VertexConnection) -> Self {
         Self { connection }
     }
 }
-impl ModelPort for GeminiModel {
+impl ModelPort for VertexModel {
     fn binding(&self) -> ModelPortBinding {
         self.connection.binding()
     }
@@ -32,7 +32,7 @@ impl ModelPort for GeminiModel {
             request,
             context,
             response: None,
-            decoder: GenerateContentDecoder::new(request),
+            decoder: GenerateContentDecoder::for_vertex(request),
             framing: SseDecoder::new(
                 self.connection.0.options.max_transport_bytes,
                 self.connection.0.options.max_event_bytes,
@@ -106,7 +106,7 @@ impl ModelPort for GeminiModel {
     }
 }
 struct State<'a> {
-    connection: &'a GeminiConnection,
+    connection: &'a VertexConnection,
     request: &'a ModelRequest,
     context: &'a ModelCallContext,
     response: Option<Response>,
@@ -124,12 +124,7 @@ impl State<'_> {
             return Err(error(ErrorCode::RequestConflict, "attempt"));
         }
         self.request.validate()?;
-        let format = if self.connection.0.options.api_version == "v1" {
-            crate::codec::FunctionSchemaFormat::OpenApi
-        } else {
-            crate::codec::FunctionSchemaFormat::JsonSchema
-        };
-        let value = encode_request(self.request, format)?;
+        let value = encode_vertex_request(self.request)?;
         let body =
             serde_json::to_vec(&value).map_err(|_| error(ErrorCode::InvalidJson, "request"))?;
         if body.len() > self.request.limits.max_input_bytes {
@@ -141,16 +136,37 @@ impl State<'_> {
             .0
             .base
             .join(&format!(
-                "{}/models/{}:streamGenerateContent",
-                self.connection.0.options.api_version, name
+                "v1/projects/{}/locations/{}/publishers/google/models/{}:streamGenerateContent",
+                self.connection.0.options.project, self.connection.0.options.location, name
             ))
             .map_err(|_| error(ErrorCode::InvalidConfiguration, "generate_url"))?;
         url.query_pairs_mut().append_pair("alt", "sse");
+        let headers = match self
+            .connection
+            .headers(
+                VertexAudience::Inference,
+                &self.context.cancellation,
+                self.context.deadline,
+            )
+            .await
+        {
+            Ok(value) => value,
+            Err(failure) if failure.code == ErrorCode::AccessDenied => {
+                self.queue.push_back(Ok(ModelEvent::ResponseError {
+                    kind: ModelFailureKind::Authentication,
+                    metadata: self.decoder.metadata.clone(),
+                }));
+                self.finished = true;
+                return Ok(());
+            }
+            Err(failure) => return Err(failure),
+        };
         let operation = self
             .connection
             .0
             .client
             .post(url)
+            .headers(headers)
             .header("accept", "text/event-stream")
             .header("accept-encoding", "identity")
             .body(body)

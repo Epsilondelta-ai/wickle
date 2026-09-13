@@ -10,7 +10,7 @@ pub use inspection::{GeminiInspector, GeminiSnapshot};
 pub use model::GeminiModel;
 /// generateContent wire primitives for independently authenticated platform adapters.
 pub mod protocol {
-    pub use crate::codec::{FunctionSchemaFormat, encode_request};
+    pub use crate::codec::{FunctionSchemaFormat, encode_request, encode_vertex_request};
     pub use crate::response::Decoder as GenerateContentDecoder;
 }
 use wickle::{ContractError, ErrorCode};

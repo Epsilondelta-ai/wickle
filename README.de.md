@@ -31,3 +31,5 @@ Claude Messages, die Erhaltung von Thinking-Signaturen und Zugangsdaten pro Work
 AWS-Signaturen, Inferenzprofile und Streaming-Protokolle beschreibt der [Bedrock-Adapter-Leitfaden](docs/bedrock.md).
 
 API-Versionen, Funktionsschemas und die Erhaltung von Gedankensignaturen beschreibt der [Gemini-Adapter-Leitfaden](docs/gemini.md).
+
+Google-Cloud-OAuth und globale oder regionale Ziele beschreibt der [Vertex-AI-Adapter-Leitfaden](docs/vertex.md).

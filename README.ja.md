@@ -31,3 +31,5 @@ Claude Messages、thinking の署名保持、workspace ごとの認証につい�
 AWS 署名、推論プロファイル、Bedrock ストリームについては、[Bedrock アダプターガイド](docs/bedrock.md)を参照してください。
 
 Gemini API のバージョン、関数スキーマ、思考署名の再送については、[Gemini アダプターガイド](docs/gemini.md)を参照してください。
+
+Google Cloud 認証とグローバル・リージョン別接続については、[Vertex AI アダプターガイド](docs/vertex.md)を参照してください。

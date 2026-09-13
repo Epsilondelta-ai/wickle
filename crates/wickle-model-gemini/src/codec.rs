@@ -20,6 +20,32 @@ pub fn encode_request(
     request: &ModelRequest,
     format: FunctionSchemaFormat,
 ) -> Result<Value, ContractError> {
+    encode(request, format, false)
+}
+/// Encode Vertex v1 using JSON function schemas and its current text response format.
+pub fn encode_vertex_request(request: &ModelRequest) -> Result<Value, ContractError> {
+    let mut body = encode(request, FunctionSchemaFormat::JsonSchema, true)?;
+    if !request.tools.is_empty() {
+        body["toolConfig"] = json!({"functionCallingConfig":{"streamFunctionCallArguments":false}});
+    }
+    if let ModelOutput::JsonSchema { schema } = &request.output {
+        let config = body["generationConfig"]
+            .as_object_mut()
+            .ok_or_else(invalid)?;
+        config.remove("responseMimeType");
+        config.remove("responseJsonSchema");
+        config.insert(
+            "responseFormat".into(),
+            json!([{"text":{"mimeType":"APPLICATION_JSON","schema":schema}}]),
+        );
+    }
+    Ok(body)
+}
+fn encode(
+    request: &ModelRequest,
+    format: FunctionSchemaFormat,
+    vertex: bool,
+) -> Result<Value, ContractError> {
     request.validate()?;
     let mut contents: Vec<Value> = vec![];
     let mut system = vec![];
@@ -96,7 +122,7 @@ pub fn encode_request(
             let mut text = String::new();
             let mut decoded = vec![];
             for part in parts {
-                let item = inspect_part(part)?;
+                let item = inspect_part(part, vertex)?;
                 text.push_str(&item.text);
                 if let Some(call) = item.call {
                     decoded.push(call);
@@ -343,7 +369,7 @@ pub(crate) struct Part {
     pub text: String,
     pub call: Option<Call>,
 }
-pub(crate) fn inspect_part(part: &Value) -> Result<Part, ContractError> {
+pub(crate) fn inspect_part(part: &Value, vertex: bool) -> Result<Part, ContractError> {
     let object = part.as_object().ok_or_else(invalid)?;
     if object.keys().any(|k| {
         !matches!(
@@ -369,11 +395,18 @@ pub(crate) fn inspect_part(part: &Value) -> Result<Part, ContractError> {
             return Err(invalid());
         }
         let call = call.as_object().ok_or_else(invalid)?;
-        if call
-            .keys()
-            .any(|k| !matches!(k.as_str(), "name" | "args" | "id"))
+        if call.keys().any(|k| {
+            !matches!(k.as_str(), "name" | "args" | "id")
+                && !(vertex && matches!(k.as_str(), "willContinue" | "partialArgs"))
+        }) || call.get("willContinue").is_some_and(|v| v != &json!(false))
+            || call
+                .get("partialArgs")
+                .is_some_and(|v| v.as_array().is_none_or(|v| !v.is_empty()))
         {
-            return Err(invalid());
+            return Err(error(
+                ErrorCode::CapabilityUnsupported,
+                "partial_function_call",
+            ));
         }
         let name = call
             .get("name")
