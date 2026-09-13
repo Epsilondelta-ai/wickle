@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/wickle", "crates/wickle-model-router", "crates/wickle-state-sqlite", "crates/wickle-adapter-runtime", "crates/wickle-model-openai", "crates/wickle-model-responses", "crates/wickle-model-azure-openai", "crates/wickle-model-anthropic", "crates/wickle-model-bedrock"]
+members = ["crates/wickle", "crates/wickle-model-router", "crates/wickle-state-sqlite", "crates/wickle-adapter-runtime", "crates/wickle-model-openai", "crates/wickle-model-responses", "crates/wickle-model-azure-openai", "crates/wickle-model-anthropic", "crates/wickle-model-bedrock", "crates/wickle-model-gemini"]
 default-members = ["crates/wickle"]
 resolver = "3"
 

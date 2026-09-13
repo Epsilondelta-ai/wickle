@@ -29,3 +29,5 @@ Azure 리소스별 배포와 Host가 관리하는 API key·Entra 인증은 [Azur
 Claude Messages, thinking 서명 보존, workspace별 인증은 [Anthropic 어댑터 가이드](docs/anthropic.md)를 참고하세요.
 
 AWS 서명, inference profile과 Bedrock 스트림은 [Bedrock 어댑터 가이드](docs/bedrock.md)를 참고하세요.
+
+Gemini API 버전, 함수 스키마와 thinking 서명 재전달은 [Gemini 어댑터 가이드](docs/gemini.md)를 참고하세요.
