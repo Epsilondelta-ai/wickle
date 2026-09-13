@@ -287,7 +287,13 @@ pub(crate) fn validate_application_chain(
                             context_items,
                         },
                     ) if user_input == &snapshot.request.input
-                        && context_items == &run_context
+                        && context_items
+                            == &{
+                                let mut expected =
+                                    source_context_for_step(snapshot, records, model_step_id)?;
+                                expected.extend(run_context.clone());
+                                expected
+                            }
                         && (snapshot.model_step_id.as_ref() == Some(model_step_id)
                             || snapshot
                                 .model_ledger
@@ -327,4 +333,75 @@ pub(crate) fn validate_application_chain(
         }
     }
     Ok(())
+}
+
+/// Rebuild the exact historical source input of one logical Hook step. Active
+/// slots may now refer to later steps; only the matching saved batch is accepted.
+pub(crate) fn source_context_for_step(
+    snapshot: &RunSnapshot,
+    records: &[ProtectedRecord],
+    step: &Id,
+) -> Result<Vec<ContextItem>, ContractError> {
+    let Some(reference) = &snapshot.source_plan_ref else {
+        if snapshot
+            .profile
+            .profile()
+            .context_sources
+            .as_ref()
+            .is_some_and(|sources| !sources.is_empty())
+        {
+            return Err(hook_error(ErrorCode::InvalidSnapshot, "hooks.source_plan"));
+        }
+        return Ok(vec![]);
+    };
+    let record = records
+        .iter()
+        .find(|record| record.reference() == reference)
+        .ok_or_else(|| hook_error(ErrorCode::InvalidSnapshot, "hooks.source_plan"))?;
+    let plan = ContextSourcePlan::restore(
+        &serde_json::to_string(record.value())
+            .map_err(|_| hook_error(ErrorCode::InvalidJson, "hooks.source_plan"))?,
+        &snapshot.scope,
+        &reference.digest,
+    )?;
+    plan.validate(snapshot.profile.profile())?;
+    let mut batches = vec![];
+    for reference in &snapshot.context_batches {
+        let record = records
+            .iter()
+            .find(|record| record.reference() == reference)
+            .ok_or_else(|| hook_error(ErrorCode::InvalidSnapshot, "hooks.source_batch"))?;
+        batches.push(ContextBatch::restore(
+            record,
+            &plan,
+            &snapshot.scope,
+            &snapshot.run_id,
+        )?);
+    }
+    let mut items = vec![];
+    for planned in plan.bindings() {
+        let candidates: Vec<_> = batches
+            .iter()
+            .filter(|batch| {
+                batch.request().binding == planned.binding
+                    && batch.request().definition == planned.definition
+                    && (planned.binding.trigger == ContextTrigger::RunStart
+                        || batch.request().model_step_id.as_ref() == Some(step))
+            })
+            .collect();
+        if candidates.len() != 1 {
+            return Err(hook_error(
+                ErrorCode::InvalidSnapshot,
+                "hooks.source_generation",
+            ));
+        }
+        let batch = candidates[0];
+        if batch.request().session_id != snapshot.request.session_id
+            || batch.request().user_input != snapshot.request.input
+        {
+            return Err(hook_error(ErrorCode::InvalidSnapshot, "hooks.source_input"));
+        }
+        items.extend_from_slice(batch.items());
+    }
+    Ok(items)
 }

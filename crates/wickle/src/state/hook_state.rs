@@ -38,7 +38,7 @@ pub(super) fn validate_hook_snapshot(
     let Some(plan) = load_plan(state, additions, snapshot)? else {
         return Ok(());
     };
-    let records = snapshot
+    let mut records = snapshot
         .hook_applications
         .iter()
         .map(|application| {
@@ -50,6 +50,19 @@ pub(super) fn validate_hook_snapshot(
             ))
         })
         .collect::<Result<Vec<_>, ContractError>>()?;
+    let hook_record_count = records.len();
+    for reference in snapshot
+        .source_plan_ref
+        .iter()
+        .chain(&snapshot.context_batches)
+    {
+        let value = record_value(state, additions, reference)?;
+        records.push(ProtectedRecord::new(
+            reference.record_id.clone(),
+            reference.revision,
+            value.clone(),
+        ));
+    }
     crate::hooks::validate_application_chain(&plan, snapshot, &records)?;
     let expected = |position| {
         plan.definitions()
@@ -112,7 +125,7 @@ pub(super) fn validate_hook_snapshot(
             }
         }
     }
-    if !records.is_empty() {
+    if hook_record_count > 0 {
         let session = state
             .sessions
             .get(&snapshot.request.session_id)
@@ -125,7 +138,7 @@ pub(super) fn validate_hook_snapshot(
             &snapshot.profile,
             &snapshot.scope,
         )?;
-        for record in &records {
+        for record in records.iter().take(hook_record_count) {
             let application: crate::HookApplicationRecord =
                 serde_json::from_value(record.value().clone())
                     .map_err(|_| error(ErrorCode::InvalidSnapshot, "hooks.application"))?;

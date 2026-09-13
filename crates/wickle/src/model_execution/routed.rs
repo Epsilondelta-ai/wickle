@@ -48,6 +48,62 @@ pub trait ModelRequestProjector: Send + Sync {
         input: &'a RoutedModelInput,
         context: &'a ModelProjectionContext,
     ) -> PortFuture<'a, ProjectedModelRequest>;
+    /// Recheck access to already projected context without fetching or changing
+    /// its contents. Called for every physical attempt, including same-route
+    /// retries, and before a saved model response is reused.
+    fn authorize_use<'a>(
+        &'a self,
+        _selection: &'a RouteSelection,
+        _input: &'a RoutedModelInput,
+        _context: &'a ModelProjectionContext,
+    ) -> PortFuture<'a, ()> {
+        Box::pin(async { Ok(()) })
+    }
+}
+
+pub(super) struct ContextUseGate<'a> {
+    pub projector: &'a dyn ModelRequestProjector,
+    pub selection: &'a RouteSelection,
+    pub input: &'a RoutedModelInput,
+}
+impl ContextUseGate<'_> {
+    pub(super) async fn check(
+        &self,
+        context: &ExecutionContext,
+        budget: &RunBudget,
+    ) -> Result<(), ContractError> {
+        let controls = ModelProjectionContext {
+            scope: budget.scope().clone(),
+            principal_ref: context.data.principal_ref.clone(),
+            capability_grant_ref: context.data.capability_grant_ref.clone(),
+            cancellation: budget.cancellation().child_token(),
+            deadline: budget.call_deadline()?,
+        };
+        let _cancel = controls.cancellation.clone().drop_guard();
+        external(
+            async {
+                self.projector
+                    .authorize_use(self.selection, self.input, &controls)
+                    .await
+            },
+            context,
+            budget,
+            ErrorCode::InvalidContext,
+        )
+        .await
+        .map_err(|error| {
+            // Only model inspection failures can request target fallback. A
+            // context provider must not turn its failed use check into routing.
+            if matches!(
+                error.code,
+                ErrorCode::ModelUnavailable | ErrorCode::ModelVersionDrift
+            ) {
+                failure(ErrorCode::InvalidContext, "model.context_use")
+            } else {
+                error
+            }
+        })
+    }
 }
 
 impl ModelExchange {
@@ -230,6 +286,13 @@ impl ModelExchange {
                     .await?;
                 let response: StoredModelResponse = serde_json::from_value(record.value().clone())
                     .map_err(|_| failure(ErrorCode::InvalidSnapshot, "routing.response"))?;
+                ContextUseGate {
+                    projector,
+                    selection: &selection,
+                    input,
+                }
+                .check(context, budget)
+                .await?;
                 budget.check_boundary().await?;
                 if context.cancellation.is_cancelled() {
                     return Err(cancelled());
@@ -259,6 +322,11 @@ impl ModelExchange {
                     context,
                     budget,
                     Some((&selection, version_policy)),
+                    Some(ContextUseGate {
+                        projector,
+                        selection: &selection,
+                        input,
+                    }),
                 )
                 .await;
             let cause = match result {

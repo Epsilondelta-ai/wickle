@@ -361,6 +361,39 @@ impl Agent {
                 ))
             })
             .transpose()?;
+        let source_plan = if let Some(assembly) = &assembly {
+            if assembly.sources().is_empty() {
+                None
+            } else {
+                let estimator = bindings.context_token_estimator.as_ref().ok_or_else(|| {
+                    fail(ErrorCode::InvalidConfiguration, "agent.source_estimator")
+                })?;
+                Some(
+                    ContextSourceRegistry::metadata(
+                        bindings.scope.clone(),
+                        assembly.sources().to_vec(),
+                    )?
+                    .plan(profile.profile(), &estimator.version())?,
+                )
+            }
+        } else {
+            bindings
+                .context_sources
+                .as_ref()
+                .map(|sources| sources.plan(profile.profile()))
+                .transpose()?
+        };
+        let source_record = source_plan
+            .as_ref()
+            .map(|plan| {
+                Ok::<_, ContractError>(ProtectedRecord::new(
+                    bindings.ids.next_id()?,
+                    1,
+                    serde_json::to_value(plan)
+                        .map_err(|_| fail(ErrorCode::InvalidJson, "agent.sources"))?,
+                ))
+            })
+            .transpose()?;
         let now = bindings.clock.now()?.utc_ms;
         let snapshot = RunSnapshot {
             schema_version: RunSnapshotSchemaVersion::V1,
@@ -387,6 +420,9 @@ impl Agent {
             routing_snapshot_ref: Some(routing_record.reference().clone()),
             context_batches: vec![],
             source_states: vec![],
+            source_plan_ref: source_record
+                .as_ref()
+                .map(|record| record.reference().clone()),
             revision: 0,
             resume_receipts: vec![],
             hook_plan_ref: hook_record
@@ -434,6 +470,7 @@ impl Agent {
                     vec![request_record, prompt_record, inputs_record, routing_record],
                     hook_record.into_iter().collect(),
                     assembly_record.into_iter().collect(),
+                    source_record.into_iter().collect(),
                 ]
                 .concat(),
             },

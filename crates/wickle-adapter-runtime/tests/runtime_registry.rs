@@ -228,7 +228,7 @@ async fn binding_state_is_selected_by_scope_session_and_binding_without_creating
 }
 
 #[tokio::test]
-async fn missing_system_input_definitions_and_explicit_unsupported_sources_fail_resolution() {
+async fn missing_system_inputs_fail_but_declared_sources_resolve_without_opening_factories() {
     let fixture = Fixture::new();
     let registry = fixture.registry().unwrap();
     let selected = profile();
@@ -246,7 +246,21 @@ async fn missing_system_input_definitions_and_explicit_unsupported_sources_fail_
         .validate(&with_source, &scope())
         .await
         .unwrap();
-    assert!(registry.resolve(&resolved, &resolve_context()).is_err());
+    let assembly = registry.resolve(&resolved, &resolve_context()).unwrap();
+    assert_eq!(assembly.sources().len(), 1);
+    assert_eq!(
+        assembly.sources()[0].binding,
+        with_source.context_sources.unwrap()[0]
+    );
+    assert_eq!(assembly.sources()[0].definition.source.id, id("recall"));
+    assert_eq!(
+        assembly.adapters()[0]
+            .selected_exports
+            .iter()
+            .map(|selection| selection.export_id.clone())
+            .collect::<Vec<_>>(),
+        vec![id("search"), id("recall")]
+    );
     assert_eq!(fixture.factories[0].opens.load(Ordering::SeqCst), 0);
 }
 

@@ -612,6 +612,8 @@ fn agent(
                 tools: None,
                 hooks: None,
                 components: Some(runtime),
+                context_sources: None,
+                context_token_estimator: None,
                 system_input_resolver: Some(resolver),
                 external_receipt_verifier: None,
                 clock,

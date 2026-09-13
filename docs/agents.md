@@ -38,7 +38,8 @@ SQLite and synthetic ports; they make no provider network calls. Run them with
 `ProfileResolver`, pinned `ModelRouter`, configured `ModelExchange`, trusted Host
 instructions, `SystemInputRegistry`, optional `ToolRegistry`,
 `SystemInputResolver`, `ExternalReceiptVerifier`, `HookRuntime`, optional
-`ComponentRuntime`, clock, ID source, token
+`ComponentRuntime`, optional `ContextSourceRuntime` and context token estimator,
+clock, ID source, model token
 estimator, and `AgentSettings`.
 A single Agent instance owns one scope; use separately configured instances for
 other scopes.
@@ -55,8 +56,8 @@ request/response/context sizes, admission preparation, lease renewal, and observ
 polling. Run-wide model, tool, recovery, and elapsed limits come from the profile.
 
 The driver supports text instructions, text output, the bounded context strategy,
-registered catalog tools and lifecycle Hooks, adapter Tool/Hook exports, and
-`turn_end` completion. Skills, automatic context sources, asset loading, and verified
+registered catalog tools, lifecycle Hooks and context sources, adapter
+Tool/Hook/ContextSource exports, and `turn_end` completion. Skills, asset loading, and verified
 completion are not connected to this driver. Profiles requiring these components
 are rejected explicitly.
 
@@ -67,12 +68,17 @@ See [lifecycle Hooks](hooks.md) for registration, permission, timeout, and failu
 contracts. Hooks do not patch model options or replace completion verification.
 
 Set `AgentBindings.components` to use the [adapter runtime](adapters.md) for all
-selected catalog and adapter-export tools and hooks. In that mode, direct
-`tools` and `hooks` must be `None`. The Agent saves assembly metadata with
+selected catalog and adapter-export tools, hooks, and context sources. In that mode, direct
+`tools`, `hooks`, and `context_sources` must be `None`. The Agent saves assembly metadata with
 admission and opens scoped instances only after acquiring an execution lease.
 Each segment owns its resources; Waiting closes them and resume opens a new
 binding set using the original assembly. `handle.component_release(&context)`
 reports local cleanup separately from the stored outcome.
+
+Automatic [context sources](context-sources.md) collect read-only data once per Run
+or logical model step. Saved batches survive retries and resume; current access
+is checked before local Hooks receive the data and before each physical model
+attempt. Set `context_token_estimator` when component mode selects sources.
 
 ## Register tools and separate their inputs
 

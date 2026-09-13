@@ -86,6 +86,76 @@ impl HookHandler for ScopedHook {
     }
 }
 
+pub(crate) struct ScopedSource {
+    pub lifetime: Arc<SegmentLifetime>,
+    pub selection: ContextSourceRef,
+    pub definition: ContextSourceDefinition,
+    pub source: Arc<dyn ContextSource>,
+}
+impl ScopedSource {
+    fn check(
+        &self,
+        request: &ContextRequest,
+        context: &ContextCallContext,
+    ) -> Result<(), ContractError> {
+        self.lifetime
+            .check(&context.scope, context.binding_set_id.as_ref())?;
+        if context.run_id != self.lifetime.run_id
+            || request.run_id != context.run_id
+            || request.scope != context.scope
+            || request.session_id != context.session_id
+            || context.source != self.selection
+            || request.binding.source != self.selection
+            || request.definition != self.definition
+            || request.context_request_id != context.context_request_id
+        {
+            return Err(ContractError::new(
+                ErrorCode::AccessDenied,
+                "adapter.source",
+            ));
+        }
+        Ok(())
+    }
+}
+impl ContextSource for ScopedSource {
+    fn provide<'a>(
+        &'a self,
+        request: &'a ContextRequest,
+        context: &'a ContextCallContext,
+    ) -> PortFuture<'a, ContextResult> {
+        Box::pin(async move {
+            self.check(request, context)?;
+            let mut controlled = context.clone();
+            controlled.cancellation = CancellationToken::new();
+            let _cancel = controlled.cancellation.clone().drop_guard();
+            tokio::select! { biased;
+                _ = self.lifetime.stopped.cancelled() => Err(ContractError::new(ErrorCode::Cancelled, "adapter.released")),
+                _ = context.cancellation.cancelled() => Err(ContractError::new(ErrorCode::Cancelled, "adapter.source")),
+                _ = tokio::time::sleep_until(context.deadline) => Err(ContractError::new(ErrorCode::DeadlineExceeded, "adapter.source")),
+                result = self.source.provide(request, &controlled) => result,
+            }
+        })
+    }
+    fn authorize_use<'a>(
+        &'a self,
+        request: &'a ContextUseRequest,
+        context: &'a ContextCallContext,
+    ) -> PortFuture<'a, ()> {
+        Box::pin(async move {
+            self.check(&request.request, context)?;
+            let mut controlled = context.clone();
+            controlled.cancellation = CancellationToken::new();
+            let _cancel = controlled.cancellation.clone().drop_guard();
+            tokio::select! { biased;
+                _ = self.lifetime.stopped.cancelled() => Err(ContractError::new(ErrorCode::Cancelled, "adapter.released")),
+                _ = context.cancellation.cancelled() => Err(ContractError::new(ErrorCode::Cancelled, "adapter.source")),
+                _ = tokio::time::sleep_until(context.deadline) => Err(ContractError::new(ErrorCode::DeadlineExceeded, "adapter.source")),
+                result = self.source.authorize_use(request, &controlled) => result,
+            }
+        })
+    }
+}
+
 struct ReleaseState {
     pending: Vec<(Id, Arc<dyn AdapterInstance>)>,
     report: ComponentReleaseReport,

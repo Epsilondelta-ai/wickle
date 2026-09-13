@@ -141,7 +141,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         timing: RunTiming::new(1000, profile.profile().limits.max_elapsed_ms.get()).unwrap(),
         reservations: vec![],
         resume_receipts: vec![],
-        hook_plan_ref: None,
+        hook_plan_ref: None, source_plan_ref: None,
         hook_applications: vec![],
         limits: profile.profile().limits.clone(),
         profile,

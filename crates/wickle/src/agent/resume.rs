@@ -562,6 +562,42 @@ impl Agent {
                 _ => return Err(fail(ErrorCode::ContextMismatch, "agent.pinned_hooks")),
             }
         }
+        let expected_sources = if let Some(assembly) = self.saved_assembly(saved).await? {
+            if assembly.sources().is_empty() {
+                None
+            } else {
+                let estimator = bindings.context_token_estimator.as_ref().ok_or_else(|| {
+                    fail(ErrorCode::InvalidConfiguration, "agent.source_estimator")
+                })?;
+                Some(
+                    ContextSourceRegistry::metadata(
+                        bindings.scope.clone(),
+                        assembly.sources().to_vec(),
+                    )?
+                    .plan(saved.snapshot.profile.profile(), &estimator.version())?
+                    .digest(),
+                )
+            }
+        } else {
+            bindings
+                .context_sources
+                .as_ref()
+                .map(|sources| {
+                    sources
+                        .plan(saved.snapshot.profile.profile())
+                        .map(|plan| plan.digest())
+                })
+                .transpose()?
+        };
+        if saved
+            .snapshot
+            .source_plan_ref
+            .as_ref()
+            .map(|reference| &reference.digest)
+            != expected_sources.as_ref()
+        {
+            return Err(fail(ErrorCode::ContextMismatch, "agent.pinned_sources"));
+        }
         Ok(prompt)
     }
     async fn resume_bound(

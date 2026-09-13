@@ -82,6 +82,11 @@ Opaque provider continuation requires a typed `ScopedOpaque` value with matching
 scope, record digest, provider, and exact route. A record reference alone does not
 make unrelated protected data eligible for model replay.
 
+For automatic memory or retrieval, configure a [ContextSource](context-sources.md).
+Its immutable batches retain original data and revisions separately from this
+projection. The Agent rechecks current access before using cached batches,
+including physical model retries and resumed execution.
+
 ## Apply finite selection limits
 
 `ProjectionLimits.max_bytes` bounds the serialized internal ModelRequest, and

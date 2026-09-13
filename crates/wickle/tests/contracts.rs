@@ -737,6 +737,7 @@ async fn checkpoint() -> RunSnapshot {
         timing: RunTiming::new(0, p.profile().limits.max_elapsed_ms.get()).unwrap(),
         resume_receipts: vec![],
         hook_plan_ref: None,
+        source_plan_ref: None,
         hook_applications: vec![],
         reservations: vec![AttemptReservation {
             attempt_id: id("first-model-attempt"),

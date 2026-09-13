@@ -18,6 +18,7 @@ mod components;
 mod driver;
 mod hooks;
 mod resume;
+mod sources;
 mod tools;
 use components::SegmentBindings;
 
@@ -137,9 +138,13 @@ pub struct AgentBindings {
     pub external_receipt_verifier: Option<Arc<dyn ExternalReceiptVerifier>>,
     /// Optional scope-bound lifecycle runtime; selected definitions are pinned at admission.
     pub hooks: Option<Arc<HookRuntime>>,
-    /// Optional component assembly/runtime. It owns all catalog and exported Tool/Hook selections.
-    /// Direct tools/hooks cannot also be supplied when this is configured.
+    /// Optional component assembly/runtime. It owns all catalog and exported Tool/Hook/Source selections.
+    /// Direct tools/hooks/context_sources cannot also be supplied when this is configured.
     pub components: Option<Arc<dyn ComponentRuntime>>,
+    /// Directly supplied scoped context sources, used when components is None.
+    pub context_sources: Option<Arc<ContextSourceRuntime>>,
+    /// Versioned Host estimate for source items in component mode; never byte-as-token usage.
+    pub context_token_estimator: Option<Arc<dyn ContextTokenEstimator>>,
     /// Time source and timers.
     pub clock: Arc<dyn Clock>,
     /// New internal run/message/event identities, never business foreign keys.
@@ -212,22 +217,38 @@ pub fn create_agent(
         || (bindings.components.is_none()
             && (!profile.connectors.is_empty()
                 || profile.adapters.as_ref().is_some_and(|v| !v.is_empty())))
-        || profile
-            .context_sources
-            .as_ref()
-            .is_some_and(|v| !v.is_empty())
         || profile.extensions.as_ref().is_some_and(|v| !v.is_empty())
         || profile.context_policy.strategy.as_str() != "bounded"
     {
         return Err(fail(ErrorCode::CapabilityUnsupported, "agent.profile"));
     }
-    if bindings.components.is_some() && (bindings.tools.is_some() || bindings.hooks.is_some()) {
+    if bindings.components.is_some()
+        && (bindings.tools.is_some()
+            || bindings.hooks.is_some()
+            || bindings.context_sources.is_some())
+    {
         return Err(fail(
             ErrorCode::InvalidConfiguration,
             "agent.component_authority",
         ));
     }
     if bindings.components.is_none() {
+        match &bindings.context_sources {
+            Some(sources) => {
+                if sources.scope() != &bindings.scope {
+                    return Err(fail(ErrorCode::AccessDenied, "agent.sources_scope"));
+                }
+                sources.plan(&profile)?;
+            }
+            None if profile
+                .context_sources
+                .as_ref()
+                .is_some_and(|sources| !sources.is_empty()) =>
+            {
+                return Err(fail(ErrorCode::CapabilityUnsupported, "agent.sources"));
+            }
+            None => {}
+        }
         match &bindings.hooks {
             Some(hooks) => {
                 if hooks.scope() != &bindings.scope {
@@ -256,6 +277,18 @@ pub fn create_agent(
             }
             None => {}
         }
+    }
+    if bindings.components.is_some()
+        && profile
+            .context_sources
+            .as_ref()
+            .is_some_and(|sources| !sources.is_empty())
+        && bindings.context_token_estimator.is_none()
+    {
+        return Err(fail(
+            ErrorCode::InvalidConfiguration,
+            "agent.source_estimator",
+        ));
     }
     Ok(Agent {
         inner: Arc::new(Inner {

@@ -566,7 +566,18 @@ impl HookRuntime {
             ) if user_input == &saved.snapshot.request.input
                 && saved.snapshot.model_step_id.as_ref() == Some(model_step_id) =>
             {
-                let mut expected = Vec::new();
+                let mut source_records = Vec::new();
+                if let Some(reference) = &saved.snapshot.source_plan_ref {
+                    source_records.push(store.read_record(&saved.snapshot.scope, reference).await?);
+                }
+                for reference in &saved.snapshot.context_batches {
+                    source_records.push(store.read_record(&saved.snapshot.scope, reference).await?);
+                }
+                let mut expected = records::source_context_for_step(
+                    &saved.snapshot,
+                    &source_records,
+                    model_step_id,
+                )?;
                 for application in saved
                     .snapshot
                     .hook_applications
