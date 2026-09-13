@@ -25,3 +25,5 @@ Agent Profile でエージェントの振る舞いを設定し、アダプター
 [モデルプロバイダーガイド](docs/model-providers.md)では、OpenAI、Azure OpenAI、Anthropic、AWS Bedrock、Gemini API、Vertex AI、xAI アダプターの共通接続方法を説明しています。認証、API バージョン、各プロバイダーの動作の違いは個別に扱います。
 
 [MCP ツール接続](docs/mcp.md)では、確認済みのツールを stdio で接続する方法を説明します。
+
+[イベントコンシューマー](docs/event-consumers.md)では、Host が実行記録をメモリやグラフサービスに渡す方法を説明します。
