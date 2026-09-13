@@ -1,4 +1,4 @@
-use crate::{OpenAiConnection, error};
+use crate::{AzureAudience, AzureCredentialContext, AzureOpenAiConnection, auth, error};
 use futures_util::stream;
 use reqwest::Response;
 use serde_json::Value;
@@ -6,19 +6,19 @@ use std::collections::VecDeque;
 use wickle::*;
 use wickle_model_responses::{ResponsesDecoder, SseDecoder, encode_request};
 
-/// One OpenAI Responses POST per invocation, streamed into Wickle model events.
+/// One Azure OpenAI Responses POST per invocation, streamed into Wickle model events.
 /// The adapter does not retry, run Tool handlers, or load environment variables.
 #[derive(Debug, Clone)]
-pub struct OpenAiModel {
-    connection: OpenAiConnection,
+pub struct AzureOpenAiModel {
+    connection: AzureOpenAiConnection,
 }
-impl OpenAiModel {
+impl AzureOpenAiModel {
     /// Bind an already configured connection without making a network request.
-    pub fn new(connection: OpenAiConnection) -> Self {
+    pub fn new(connection: AzureOpenAiConnection) -> Self {
         Self { connection }
     }
 }
-impl ModelPort for OpenAiModel {
+impl ModelPort for AzureOpenAiModel {
     fn binding(&self) -> ModelPortBinding {
         self.connection.binding()
     }
@@ -106,7 +106,7 @@ impl ModelPort for OpenAiModel {
     }
 }
 struct State<'a> {
-    connection: &'a OpenAiConnection,
+    connection: &'a AzureOpenAiConnection,
     request: &'a ModelRequest,
     context: &'a ModelCallContext,
     response: Option<Response>,
@@ -124,7 +124,10 @@ impl State<'_> {
             return Err(error(ErrorCode::RequestConflict, "attempt"));
         }
         self.request.validate()?;
-        let value = encode_request(self.request)?;
+        let mut value = encode_request(self.request)?;
+        // The wire selects a deployment; the core route retains its underlying
+        // model/release and the original route-bound opaque continuation.
+        value["model"] = serde_json::json!(self.connection.0.options.deployment);
         let body =
             serde_json::to_vec(&value).map_err(|_| error(ErrorCode::InvalidJson, "request"))?;
         if body.len() > self.request.limits.max_input_bytes {
@@ -136,11 +139,35 @@ impl State<'_> {
             .base
             .join("responses")
             .map_err(|_| error(ErrorCode::InvalidConfiguration, "responses_url"))?;
+        let headers = match auth::authorize(
+            self.connection.0.credentials.as_ref(),
+            AzureCredentialContext {
+                scope: &self.context.scope,
+                audience: AzureAudience::Inference,
+                cancellation: &self.context.cancellation,
+                deadline: self.context.deadline,
+            },
+        )
+        .await
+        {
+            Ok(headers) => headers,
+            Err(failure) if failure.code == ErrorCode::AccessDenied => {
+                self.queue.push_back(Ok(ModelEvent::ResponseError {
+                    kind: ModelFailureKind::Authentication,
+                    metadata: self.decoder.metadata.clone(),
+                }));
+                self.finished = true;
+                return Ok(());
+            }
+            Err(failure) => return Err(failure),
+        };
         let operation = self
             .connection
             .0
             .client
             .post(url)
+            .headers(headers)
+            .header("content-type", "application/json")
             .header("accept", "text/event-stream")
             .header("accept-encoding", "identity")
             .body(body)
@@ -152,7 +179,8 @@ impl State<'_> {
         };
         self.decoder.metadata.provider_request_id = response
             .headers()
-            .get("x-request-id")
+            .get("apim-request-id")
+            .or_else(|| response.headers().get("x-request-id"))
             .map(|value| {
                 value
                     .to_str()

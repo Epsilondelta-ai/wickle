@@ -1,13 +1,16 @@
 use crate::error;
 use wickle::{ContractError, ErrorCode};
 
-pub(crate) struct Event {
+/// A complete SSE data record.
+pub struct Event {
+    /// Optional SSE event name.
     pub name: Option<String>,
+    /// UTF-8 data with multiline fields joined by newlines.
     pub data: String,
 }
 
 /// Incremental SSE framing; JSON and UTF-8 may be split across network chunks.
-pub(crate) struct Decoder {
+pub struct Decoder {
     line: Vec<u8>,
     data: Vec<u8>,
     name: Option<String>,
@@ -20,6 +23,7 @@ pub(crate) struct Decoder {
     max_frames: usize,
 }
 impl Decoder {
+    /// Set finite limits on total bytes, one event, and event count.
     pub fn new(max_bytes: usize, max_frame: usize, max_frames: usize) -> Self {
         Self {
             line: vec![],
@@ -34,6 +38,7 @@ impl Decoder {
             max_frames,
         }
     }
+    /// Frame arbitrary network chunks without assuming UTF-8 or line boundaries.
     pub fn push(&mut self, bytes: &[u8]) -> Result<Vec<Event>, ContractError> {
         self.bytes = self
             .bytes
@@ -103,6 +108,7 @@ impl Decoder {
         self.line.clear();
         Ok(())
     }
+    /// Reject a truncated final record.
     pub fn finish(&self) -> Result<(), ContractError> {
         if !self.line.is_empty() || !self.data.is_empty() || self.name.is_some() {
             return Err(invalid());

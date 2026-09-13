@@ -6,7 +6,8 @@ fn failure(code: ErrorCode) -> ContractError {
     crate::error(code, "codec")
 }
 
-pub(crate) fn encode_request(request: &ModelRequest) -> Result<Value, ContractError> {
+/// Encode a Responses request, preserving exact route-bound replay and model schemas.
+pub fn encode_request(request: &ModelRequest) -> Result<Value, ContractError> {
     request.validate()?;
     if request.options.keys().any(|key| {
         !["reasoning_effort", "temperature", "top_p", "verbosity"].contains(&key.as_str())

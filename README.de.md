@@ -23,3 +23,5 @@ Die [Kontextauswahl und -komprimierung](docs/context-compaction.md) bewahrt den 
 Die [Ausgabeprüfung](docs/verification.md) unterstützt JSON-Schemas, versionierte Kriterien, begrenzte Überarbeitungen und die Genehmigung eines festgelegten Kandidaten. Modellbasierte Prüfungen nutzen dasselbe Run-Budget.
 
 Der [OpenAI-Responses-Adapter](docs/openai.md) unterstützt begrenzte HTTP/SSE-Generierung, Funktionsaufrufe, strukturierte Ausgaben und Modellversionsprüfungen mit von der Anwendung bereitgestellten Zugangsdaten.
+
+Informationen zu Azure-Bereitstellungen und vom Host verwalteten API-Schlüsseln oder Entra-Token stehen im [Leitfaden zum Azure-OpenAI-Adapter](docs/azure-openai.md).

@@ -1,6 +1,7 @@
 use serde_json::{Value, json};
+use std::sync::Arc;
 use wickle::*;
-use wickle_model_openai::*;
+use wickle_model_azure_openai::*;
 
 pub fn id(value: &str) -> Id {
     Id::new(value).unwrap()
@@ -18,19 +19,25 @@ pub fn scope() -> Scope {
         user_id: None,
     }
 }
-pub fn connection(server: &Server) -> OpenAiConnection {
-    OpenAiConnection::new(
+pub const ACCOUNT: &str = "/subscriptions/sub/resourceGroups/group/providers/Microsoft.CognitiveServices/accounts/account";
+pub fn origin(server: &Server) -> String {
+    server.base.trim_end_matches("v1/").into()
+}
+pub fn options(server: &Server) -> AzureOpenAiOptions {
+    let mut options = AzureOpenAiOptions::new(origin(server), "finance-deployment");
+    options.resource_id = Some(ACCOUNT.into());
+    options
+}
+pub fn connection(server: &Server) -> AzureOpenAiConnection {
+    AzureOpenAiConnection::new(
         scope(),
         reference("account"),
-        "fixture-key-not-a-secret",
-        OpenAiOptions {
-            base_url: server.base.clone(),
-            ..Default::default()
-        },
+        Arc::new(AzureCredential::ApiKey("fixture-key".into())),
+        options(server),
     )
     .unwrap()
 }
-pub fn request(connection: &OpenAiConnection, model: &str) -> ModelRequest {
+pub fn request(connection: &AzureOpenAiConnection, model: &str) -> ModelRequest {
     let binding = connection.binding();
     ModelRequest {
         request_id: id("attempt"),
@@ -42,11 +49,11 @@ pub fn request(connection: &OpenAiConnection, model: &str) -> ModelRequest {
             requested_model: id(model),
             model_id: id(model),
             model_version: id("release"),
-            version_semantics: VersionSemantics::Pinned,
+            version_semantics: VersionSemantics::MutableDeployment,
             provider: binding.provider,
             target: connection.target().clone(),
             deployment_revision: None,
-            api_contract: OpenAiConnection::api_contract(),
+            api_contract: AzureOpenAiConnection::api_contract(),
             adapter: binding.adapter,
             capability_revision: id("capabilities"),
             connection_ref: binding.connection_ref,

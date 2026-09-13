@@ -1,16 +1,16 @@
 [package]
-name = "wickle-model-openai"
+name = "wickle-model-azure-openai"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 repository.workspace = true
-description = "OpenAI Responses model and metadata adapters for Wickle"
+description = "Azure OpenAI Responses and deployment metadata adapters for Wickle"
 publish = false
 include = ["Cargo.toml", "src/**"]
 
 [dependencies]
-wickle-model-responses = { path = "../wickle-model-responses", version = "=0.1.0" }
 wickle = { path = "../wickle", version = "=0.1.0" }
+wickle-model-responses = { path = "../wickle-model-responses", version = "=0.1.0" }
 reqwest.workspace = true
 serde_json.workspace = true
 futures-util.workspace = true

@@ -23,3 +23,5 @@ La [sélection et compression du contexte](docs/context-compaction.md) conserve 
 La [vérification des résultats](docs/verification.md) prend en charge les schémas JSON, les critères versionnés, les révisions limitées et l’approbation d’un candidat figé. Les vérifications par modèle partagent le budget du Run.
 
 L’[adaptateur OpenAI Responses](docs/openai.md) propose la génération HTTP/SSE avec limites, les appels de fonctions, les sorties structurées et la vérification des versions, avec les identifiants fournis par l’application.
+
+Pour les déploiements Azure et l’authentification par clé API ou Entra gérée par le Host, consultez le [guide de l’adaptateur Azure OpenAI](docs/azure-openai.md).
