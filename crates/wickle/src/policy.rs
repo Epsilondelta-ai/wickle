@@ -161,6 +161,13 @@ pub enum PolicyAction {
     ReadRecord {},
     /// Use scoped data in model context.
     UseContext {},
+    /// Evaluate a fixed candidate under current authorization.
+    VerifyCandidate {
+        /// Protected candidate identity.
+        candidate_ref: crate::RecordRef,
+        /// Exact selected verifier, absent for local output validation.
+        verifier_ref: Option<crate::VersionedRef>,
+    },
     /// Rewrite only an authorized conversation projection, never the original transcript.
     RewriteContext {
         /// Exact read-only strategy identity.

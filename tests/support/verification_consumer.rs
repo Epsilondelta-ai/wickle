@@ -1,4 +1,4 @@
-// Real SQLite and budgeted context compaction with synthetic model and inspector.
+// Real SQLite, structured output, and deterministic candidate verification.
 // This consumer makes no provider network calls and does not test a production data service.
 use futures_util::{TryStreamExt, stream};
 use serde_json::json;
@@ -63,7 +63,7 @@ impl ModelTokenEstimator for Estimate {
 fn routing(scope: &Scope) -> Result<RoutingSnapshot, ContractError> {
     let capabilities = ModelCapabilities {
         revision: id("features"),
-        features: BTreeSet::from([id("text"), id("tool_calling")]),
+        features: BTreeSet::from([id("text"), id("json_output")]),
         options_schema: json!({"type":"object","additionalProperties":false}),
         context_window: 4096.try_into().unwrap(),
         max_output_tokens: 512.try_into().unwrap(),
@@ -165,45 +165,8 @@ impl PolicyPort for Policy {
         Box::pin(async { Ok(PolicyDecision::Allow {}) })
     }
 }
-struct Reader(AtomicUsize);
-impl ToolExecutor for Reader {
-    fn execute<'a>(
-        &'a self,
-        _: &'a JsonObject,
-        _: &'a ToolExecutionContext,
-    ) -> PortFuture<'a, ToolExecutionResult> {
-        Box::pin(async move {
-            let index = self.0.fetch_add(1, Ordering::SeqCst);
-            Ok(ToolExecutionResult {
-                outcome: ToolExecutionOutcome::Succeeded {
-                    value: json!(format!("record-{index}: {}", "detail ".repeat(500))),
-                },
-                effect: ToolEffect::NotApplied,
-                receipt: None,
-            })
-        })
-    }
-}
-struct Metadata;
-impl ProfileResolver for Metadata {
-    fn resolve<'a>(
-        &'a self,
-        reference: &'a ComponentRef,
-        scope: &'a Scope,
-    ) -> PortFuture<'a, ComponentMetadata> {
-        Box::pin(async move {
-            let mut metadata = Catalog.resolve(reference, scope).await?;
-            if reference.kind == ComponentKind::Tool {
-                metadata.model_name = Some(id("read_record"));
-            }
-            Ok(metadata)
-        })
-    }
-}
-struct Model {
-    agent: AtomicUsize,
-    compaction: AtomicUsize,
-}
+
+struct Model(AtomicUsize);
 impl ModelPort for Model {
     fn binding(&self) -> ModelPortBinding {
         ModelPortBinding {
@@ -214,72 +177,48 @@ impl ModelPort for Model {
     }
     fn generate<'a>(
         &'a self,
-        request: &'a ModelRequest,
+        _: &'a ModelRequest,
         _: &'a ModelCallContext,
     ) -> PortStream<'a, ModelEvent> {
-        let events = if request.purpose == ModelPurpose::Compaction {
-            self.compaction.fetch_add(1, Ordering::SeqCst);
-            vec![ModelEvent::TextDelta{text:"Earlier complete record reads are summarized; original records remain in storage.".into()},ModelEvent::ResponseCompleted{finish:ModelFinish::Stop,metadata:Default::default(),continuation:vec![]}]
-        } else {
-            let index = self.agent.fetch_add(1, Ordering::SeqCst);
-            if index < 3 {
-                vec![
-                    ModelEvent::ToolArgumentsDelta {
-                        index: 0,
-                        provider_call_id: Some(format!("read-{index}")),
-                        name: Some("read_record".into()),
-                        delta: "{}".into(),
-                    },
-                    ModelEvent::ResponseCompleted {
-                        finish: ModelFinish::ToolCalls,
-                        metadata: Default::default(),
-                        continuation: vec![],
-                    },
-                ]
-            } else {
-                vec![
-                    ModelEvent::TextDelta {
-                        text: "Records processed".into(),
-                    },
-                    ModelEvent::ResponseCompleted {
-                        finish: ModelFinish::Stop,
-                        metadata: Default::default(),
-                        continuation: vec![],
-                    },
-                ]
-            }
-        };
-        Box::pin(stream::iter(events.into_iter().map(Ok)))
+        let index = self.0.fetch_add(1, Ordering::SeqCst);
+        assert!(index < 2, "unexpected extra model call");
+        let text = json!({"amount":if index==0{5}else{11}}).to_string();
+        Box::pin(stream::iter([
+            Ok(ModelEvent::TextDelta { text }),
+            Ok(ModelEvent::ResponseCompleted {
+                finish: ModelFinish::Stop,
+                metadata: Default::default(),
+                continuation: vec![],
+            }),
+        ]))
     }
 }
 fn make_agent(
     profile: AgentProfile,
     context: &ExecutionContext,
     store: Arc<SqliteStateStore>,
-    reader: Arc<Reader>,
     model: Arc<Model>,
     policy: Arc<PolicyGate>,
 ) -> Result<Agent, ContractError> {
-    let snapshot = routing(&context.data.scope)?;
-    let mut routes = snapshot.policy().clone();
-    let mut auxiliary = routes.rules[0].clone();
-    auxiliary.purpose = ModelPurpose::Compaction;
-    routes.rules.push(auxiliary);
-    let router = Arc::new(PolicyModelRouter::new(RoutingSnapshot::new(
-        snapshot.catalog().clone(),
-        routes,
-    )?)?);
-    let inputs = SystemInputRegistry::new(vec![])?;
-    let compiled=SchemaCompiler::new().compile(ToolDescriptor{tool:reference("read"),name:id("read_record"),description:"Read the next synthetic record".into(),input_schema:json!({"type":"object","properties":{},"required":[],"additionalProperties":false}),agent_parameters:vec![],system_bindings:None,output_schema:json!({"type":"string"}),side_effect:ToolSideEffect::ReadOnly,concurrency:ToolConcurrency::Serial,retry:ToolRetryPolicy::Never,reconcile:false,max_output_bytes:16384.try_into().unwrap()},&inputs)?;
-    let runtime = Arc::new(ContextRuntime::new(
+    let format = json!({"type":"object","properties":{"amount":{"type":"integer"}},"required":["amount"],"additionalProperties":false});
+    let criteria = json!({"type":"object","properties":{"amount":{"type":"integer","minimum":10}},"required":["amount"],"additionalProperties":false});
+    let verifier = SchemaVerifier::new(
+        VerifierDefinition {
+            verifier_ref: reference("quality"),
+            criteria_ref: reference("minimum-amount"),
+            criteria: "Amount must be an integer at least ten.".into(),
+            configuration: Default::default(),
+        },
+        criteria,
+    )?;
+    let verification = Arc::new(VerificationRuntime::new(
         context.data.scope.clone(),
-        Arc::new(BoundedContextStrategy),
-        Some(ContextCompactor::Model(ModelCompactorConfig {
-            model_binding: id("primary"),
-            options: None,
-            max_output_tokens: 128.try_into().unwrap(),
-        })),
-        ContextRewriteLimits::default(),
+        vec![OutputSchemaDefinition {
+            schema_ref: reference("output"),
+            schema: format,
+        }],
+        vec![Arc::new(verifier)],
+        VerificationLimits::default(),
     )?);
     create_agent(
         profile,
@@ -287,30 +226,25 @@ fn make_agent(
             scope: context.data.scope.clone(),
             state: store,
             policy: policy.clone(),
-            profile_resolver: Arc::new(Metadata),
+            profile_resolver: Arc::new(Catalog),
             model_exchange: Arc::new(
                 ModelExchange::new(model, policy)
                     .with_route_inspector(Arc::new(Inspector), Duration::from_secs(1))?,
             ),
-            router,
+            router: Arc::new(PolicyModelRouter::new(routing(&context.data.scope)?)?),
             host_instructions: vec![
-                "Preserve the current request and complete Tool observations.".into(),
+                "Use the configured output contract and review feedback.".into(),
             ],
-            system_inputs: inputs,
-            tools: Some(Arc::new(ToolRegistry::new(
-                context.data.scope.clone(),
-                vec![ToolRegistration {
-                    compiled,
-                    executor: reader,
-                }],
-            )?)),
+            system_inputs: SystemInputRegistry::new(vec![])?,
+            tools: None,
             system_input_resolver: None,
             external_receipt_verifier: None,
             hooks: None,
             components: None,
             context_sources: None,
             context_token_estimator: None,
-            context_runtime: Some(runtime), verification: None,
+            context_runtime: None,
+            verification: Some(verification),
             skills: None,
             artifacts: None,
             clock: Arc::new(SystemClock::new()),
@@ -319,10 +253,6 @@ fn make_agent(
             settings: AgentSettings {
                 require_durable: true,
                 max_output_tokens: 128.try_into().unwrap(),
-                projection_limits: ProjectionLimits {
-                    max_bytes: 6500,
-                    max_items: 1024,
-                },
                 ..Default::default()
             },
         },
@@ -338,7 +268,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let context = ExecutionContext::new(
         ExecutionContextData {
             scope: scope.clone(),
-            principal_ref: id("reader"),
+            principal_ref: id("reviewer"),
             capability_grant_ref: id("grant"),
             trace_context: None,
             system_inputs: None,
@@ -346,105 +276,80 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Default::default(),
     );
     let policy = Arc::new(PolicyGate::new(Arc::new(Policy), Duration::from_secs(1))?);
+    let model = Arc::new(Model(AtomicUsize::new(0)));
     let path = std::env::temp_dir().join(format!(
-        "wickle-compaction-consumer-{}.sqlite3",
+        "wickle-verification-consumer-{}.sqlite3",
         RandomIdSource.next_id()?
     ));
     let store = Arc::new(SqliteStateStore::open(&path)?);
     let profile = AgentProfile::from_json(
-        r#"{"schema_version":"wickle.agent-profile.v1","agent_id":"example","version":"1","name":"Context example","description":"Bounded conversation compaction","instructions":{"text":"Read the requested records."},"model_binding":"primary","tools":[{"tool_id":"read","version":"1"}],"skills":[],"connectors":[],"context_policy":{"strategy":"bounded"},"output_contract":{"type":"text"},"limits":{"max_model_calls":8,"max_tool_attempts":3,"max_repair_attempts":0,"max_recovery_attempts":0,"max_elapsed_ms":30000}}"#,
-    )?;
-    let reader = Arc::new(Reader(AtomicUsize::new(0)));
-    let model = Arc::new(Model {
-        agent: AtomicUsize::new(0),
-        compaction: AtomicUsize::new(0),
-    });
-    let agent = make_agent(
-        profile.clone(),
-        &context,
-        store.clone(),
-        reader.clone(),
-        model.clone(),
-        policy.clone(),
+        r#"{"schema_version":"wickle.agent-profile.v1","agent_id":"example","version":"1","name":"Verification example","description":"Structured candidate repair","instructions":{"text":"Return a valid amount."},"model_binding":"primary","tools":[],"skills":[],"connectors":[],"context_policy":{"strategy":"bounded"},"completion_policy":{"mode":"verified","verifier_ref":{"id":"quality","version":"1"}},"output_contract":{"type":"json_schema","schema_ref":{"id":"output","version":"1"}},"limits":{"max_model_calls":3,"max_tool_attempts":0,"max_repair_attempts":1,"max_recovery_attempts":0,"max_elapsed_ms":30000}}"#,
     )?;
     let request = RunRequest {
         request_id: id("request"),
         session_id: id("session"),
         input: vec![InputContent::Text {
-            text: "Read three records and retain their context.".into(),
+            text: "Supply an amount of at least ten.".into(),
         }],
         trigger: RunTrigger::User {},
         model_options: Default::default(),
         output_contract: None,
     };
+    let agent = make_agent(
+        profile.clone(),
+        &context,
+        store.clone(),
+        model.clone(),
+        policy.clone(),
+    )?;
     let handle = completed(agent.start(request.clone(), context.clone()).await?)?;
     let outcome = completed(handle.outcome(&context).await?)?;
-    assert_eq!(outcome.result.status(), RunStatus::Succeeded);
-    assert_eq!(reader.0.load(Ordering::SeqCst), 3);
-    assert_eq!(model.agent.load(Ordering::SeqCst), 4);
-    assert!(model.compaction.load(Ordering::SeqCst) > 0);
-    let saved = store.load(&scope, handle.run_id()).await?;
-    assert_eq!(saved.messages.len(), 8);
     assert_eq!(
-        saved.snapshot.usage.model_calls,
-        (model.agent.load(Ordering::SeqCst) + model.compaction.load(Ordering::SeqCst)) as u64
+        outcome.result,
+        OutcomeResult::Succeeded {
+            completion_basis: CompletionBasis::Verified
+        }
     );
-    let reference = saved
-        .snapshot
-        .context_revision_ref
-        .as_ref()
-        .expect("saved context revision");
-    assert_eq!(saved.session.context_revision_ref.as_ref(), Some(reference));
-    let plan = ContextPlan::restore(
-        &store
-            .read_record(&scope, saved.snapshot.context_plan_ref.as_ref().unwrap())
-            .await?,
-        &saved.snapshot.profile,
-    )?;
-    let revision = ContextRevision::restore(
-        &store.read_record(&scope, reference).await?,
-        &plan,
-        &scope,
-        &request.session_id,
-        &saved.messages,
-    )?;
-    assert!(revision.summary().is_some());
-    assert!(!revision.covered_message_ids().is_empty());
+    assert_eq!(
+        outcome.output,
+        vec![InputContent::Json {
+            value: json!({"amount":11})
+        }]
+    );
+    assert_eq!(outcome.usage.model_calls, 2);
+    assert_eq!(outcome.usage.repair_attempts, 1);
+    assert_eq!(
+        outcome.verification.as_ref().unwrap().criteria_ref,
+        reference("minimum-amount")
+    );
+    let saved = store.load(&scope, handle.run_id()).await?;
+    assert_eq!(
+        saved
+            .messages
+            .iter()
+            .filter(|message| message.origin == MessageOrigin::Verification)
+            .count(),
+        1
+    );
+    assert_eq!(saved.snapshot.verification_records.len(), 3);
     let events: Vec<_> = handle.events(0, context.clone()).try_collect().await?;
-    assert!(
+    assert_eq!(
         events
             .iter()
-            .any(|event| event.event_type == "context.rewritten")
-    );
-    let counts = (
-        reader.0.load(Ordering::SeqCst),
-        model.agent.load(Ordering::SeqCst),
-        model.compaction.load(Ordering::SeqCst),
+            .filter(|event| event.event_type == "verification.completed")
+            .count(),
+        2
     );
     drop(agent);
     drop(store);
     let reopened = Arc::new(SqliteStateStore::open(&path)?);
     assert_eq!(reopened.load(&scope, handle.run_id()).await?, saved);
-    let restored = make_agent(
-        profile,
-        &context,
-        reopened,
-        reader.clone(),
-        model.clone(),
-        policy,
-    )?;
+    let restored = make_agent(profile, &context, reopened, model.clone(), policy)?;
     let replay = completed(restored.start(request, context.clone()).await?)?;
     assert_eq!(completed(replay.outcome(&context).await?)?, outcome);
-    assert_eq!(
-        (
-            reader.0.load(Ordering::SeqCst),
-            model.agent.load(Ordering::SeqCst),
-            model.compaction.load(Ordering::SeqCst)
-        ),
-        counts
-    );
+    assert_eq!(model.0.load(Ordering::SeqCst), 2);
     println!(
-        "compaction consumer: complete past rounds summarized; latest round and original transcript retained; auxiliary model calls charged; real SQLite revision/event restoration; fresh Host replay made no additional calls (synthetic model, no network)"
+        "verification consumer: JSON output and separate criteria enforced; one repair charged; feedback provenance preserved; real SQLite candidate/verdict restoration; fresh Host replay made no additional calls (synthetic model, no network)"
     );
     Ok(())
 }

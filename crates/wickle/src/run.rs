@@ -692,6 +692,23 @@ pub struct RunSnapshot {
     /// Completed compression decisions, including rejected inputs that must not repeat.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub context_decisions: Vec<RecordRef>,
+    /// Pinned output format and verifier criteria.
+    #[serde(
+        default,
+        deserialize_with = "optional",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub verification_plan_ref: Option<RecordRef>,
+    /// Candidate awaiting a quality decision or completion.
+    #[serde(
+        default,
+        deserialize_with = "optional",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub candidate_ref: Option<RecordRef>,
+    /// Append-only candidate decisions and format/transport failures.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub verification_records: Vec<RecordRef>,
     /// Physical model attempt records.
     pub model_ledger: Vec<ModelInvocationRecord>,
     /// Saved tool plans and states.

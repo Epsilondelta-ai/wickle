@@ -710,6 +710,9 @@ async fn snapshot() -> RunSnapshot {
         context_plan_ref: None,
         context_revision_ref: None,
         context_decisions: vec![],
+        verification_plan_ref: None,
+        candidate_ref: None,
+        verification_records: vec![],
         hook_applications: vec![],
         reservations: vec![AttemptReservation {
             attempt_id: id("first-model-attempt"),

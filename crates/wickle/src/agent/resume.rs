@@ -8,18 +8,7 @@ impl Agent {
         context: ExecutionContext,
     ) -> Result<Guarded<RunHandle>, ContractError> {
         self.check_scope(&context)?;
-        if matches!(
-            command.action,
-            ResumeAction::Recover { .. }
-                | ResumeAction::Approve {
-                    target: ApprovalTarget::Candidate { .. },
-                    ..
-                }
-                | ResumeAction::Deny {
-                    target: ApprovalTarget::Candidate { .. },
-                    ..
-                }
-        ) {
+        if matches!(command.action, ResumeAction::Recover { .. }) {
             return Err(fail(
                 ErrorCode::CapabilityUnsupported,
                 "agent.resume_action",
@@ -153,7 +142,13 @@ impl Agent {
             .min(wait.expires_at_ms.unwrap_or(i64::MAX));
         let expired = now >= expires_at_ms;
         let mut fixed_binding_digest = saved_binding_digest(&saved.snapshot, command);
-        let prepared = if expired {
+        let candidate_review = matches!(
+            wait.target,
+            WaitTarget::Approval {
+                target: ApprovalTarget::Candidate { .. }
+            }
+        );
+        let prepared = if expired || candidate_review {
             None
         } else {
             let (call, bound) = self.resume_bound(&saved, context).await?;
@@ -397,7 +392,11 @@ impl Agent {
         receipt.expired = now >= expires_at_ms;
         snapshot.revision = receipt.accepted_revision;
         snapshot.status = RunStatus::Running;
-        snapshot.phase = RunPhase::Tool;
+        snapshot.phase = if candidate_review {
+            RunPhase::Verify
+        } else {
+            RunPhase::Tool
+        };
         snapshot.wait = None;
         snapshot.outcome = None;
         snapshot.usage.elapsed_ms = elapsed;
@@ -643,6 +642,7 @@ impl Agent {
             (None, _) if saved.snapshot.profile.profile().skills.is_empty() => {}
             _ => return Err(fail(ErrorCode::ContextMismatch, "agent.pinned_skills")),
         }
+        self.verification_plan(&saved.snapshot).await?;
         if let Some(reference) = &saved.snapshot.context_plan_ref {
             let record = bindings
                 .state

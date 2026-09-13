@@ -171,3 +171,12 @@ pub use run::{
 pub use serialization::{
     Id, JsonDigest, JsonObject, canonical_digest, canonical_digest_json, parse_json,
 };
+
+mod verification;
+pub use verification::{
+    OutputSchemaDefinition, VerificationCandidate, VerificationDecision, VerificationInput,
+    VerificationLimits, VerificationModel, VerificationModelRequest, VerificationPlan,
+    VerificationRuntime, Verifier, VerifierContext, VerifierDefinition,
+};
+
+pub use verification::SchemaVerifier;

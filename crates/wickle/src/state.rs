@@ -13,6 +13,7 @@ mod context_state;
 mod hook_state;
 mod skill_state;
 mod source_state;
+mod verification_state;
 pub use checkpoint::{STATE_STORE_CHECKPOINT_VERSION, StateStoreCheckpoint};
 use hook_state::{validate_hook_observation, validate_hook_snapshot, validate_hook_transition};
 use source_state::{validate_source_snapshot, validate_source_transition};
@@ -678,6 +679,14 @@ impl StateStore for MemoryStateStore {
             let additions = validate_records(state, &input.records)?;
             validate_snapshot_refs(state, &additions, &input.snapshot)?;
             context_state::validate_update(&run.snapshot, &input.snapshot, &input.events)?;
+            verification_state::transition(
+                state,
+                &additions,
+                &run.snapshot,
+                &input.snapshot,
+                &input.messages,
+                &input.events,
+            )?;
             validate_events(
                 state,
                 &additions,
@@ -967,6 +976,7 @@ fn validate_snapshot_refs(
     validate_source_snapshot(state, additions, snapshot)?;
     skill_state::validate_skill_snapshot(state, additions, snapshot)?;
     context_state::validate_snapshot(state, additions, snapshot)?;
+    verification_state::validate(state, additions, snapshot)?;
     validate_hook_snapshot(state, additions, snapshot)?;
     let mut references = Vec::new();
     for receipt in &snapshot.resume_receipts {
@@ -1457,21 +1467,7 @@ fn validate_events(
                 result_ref
             }
             RunEventPayload::VerificationCompleted { verification_ref } => {
-                // Additional verification history needs an explicit checkpoint contract.
-                // A standalone event cannot substitute for the saved verification record.
-                let verification: VerificationSummary =
-                    event_record(state, additions, verification_ref)?;
-                if snapshot
-                    .outcome
-                    .as_ref()
-                    .and_then(|outcome| outcome.verification.as_ref())
-                    != Some(&verification)
-                {
-                    return Err(error(
-                        ErrorCode::InvalidEvent,
-                        "events.verification_completed",
-                    ));
-                }
+                verification_state::event(state, additions, snapshot, verification_ref)?;
                 verification_ref
             }
             RunEventPayload::RunWaiting { wait_ref } => {
