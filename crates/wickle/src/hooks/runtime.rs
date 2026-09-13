@@ -573,7 +573,10 @@ impl HookRuntime {
                 for reference in &saved.snapshot.context_batches {
                     source_records.push(store.read_record(&saved.snapshot.scope, reference).await?);
                 }
-                let mut expected = records::source_context_for_step(
+                for reference in crate::skills::records::references(&saved.snapshot) {
+                    source_records.push(store.read_record(&saved.snapshot.scope, reference).await?);
+                }
+                let mut expected = records::extension_context_for_step(
                     &saved.snapshot,
                     &source_records,
                     model_step_id,

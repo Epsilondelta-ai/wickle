@@ -290,7 +290,7 @@ pub(crate) fn validate_application_chain(
                         && context_items
                             == &{
                                 let mut expected =
-                                    source_context_for_step(snapshot, records, model_step_id)?;
+                                    extension_context_for_step(snapshot, records, model_step_id)?;
                                 expected.extend(run_context.clone());
                                 expected
                             }
@@ -337,7 +337,18 @@ pub(crate) fn validate_application_chain(
 
 /// Rebuild the exact historical source input of one logical Hook step. Active
 /// slots may now refer to later steps; only the matching saved batch is accepted.
-pub(crate) fn source_context_for_step(
+pub(crate) fn extension_context_for_step(
+    snapshot: &RunSnapshot,
+    records: &[ProtectedRecord],
+    step: &Id,
+) -> Result<Vec<ContextItem>, ContractError> {
+    let mut items = source_context_for_step(snapshot, records, step)?;
+    items.extend(crate::skills::records::context_for_step(
+        snapshot, records, step,
+    )?);
+    Ok(items)
+}
+fn source_context_for_step(
     snapshot: &RunSnapshot,
     records: &[ProtectedRecord],
     step: &Id,

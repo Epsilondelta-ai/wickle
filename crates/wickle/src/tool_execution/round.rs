@@ -361,17 +361,27 @@ impl SerialToolRound {
                     return Ok(ToolRoundOutcome::InputRequired { request });
                 }
             }
-            let (result, records) = self.validate_output(
+            let (mut result, records) = self.validate_output(
                 &call,
                 call_message_id,
                 AttemptIdentity {
                     scope: &execution.scope,
+                    run_id: &execution.run_id,
                     attempt_id: &execution.attempt_id,
                     idempotency_key: &execution.idempotency_key,
                 },
                 &registered.compiled,
+                &bound.input,
                 completion,
             )?;
+            self.validate_artifact_result(
+                &mut result,
+                context,
+                budget
+                    .call_deadline()
+                    .unwrap_or_else(|_| tokio::time::Instant::now()),
+            )
+            .await;
             let unresolved = result.effect == ToolEffect::Unknown;
             let state = if unresolved {
                 ToolCallState::Unknown {
@@ -572,6 +582,7 @@ impl SerialToolRound {
             effect: ToolEffect::NotApplied,
             content: vec![],
             effect_receipt_ref: None,
+            skill_ref: None,
             error: Some(Failure {
                 code: Id::new(code)?,
                 diagnostic_ref: None,
@@ -597,6 +608,7 @@ impl SerialToolRound {
         call_message_id: Id,
         attempt: AttemptIdentity<'_>,
         compiled: &CompiledTool,
+        bound: &BoundToolInput,
         completion: ToolExecutionResult,
     ) -> Result<(ToolResult, Vec<ProtectedRecord>), ContractError> {
         let effect = completion.effect;
@@ -616,18 +628,75 @@ impl SerialToolRound {
         let mut status = ToolResultStatus::Succeeded;
         let mut code = None;
         let mut content = vec![];
+        let mut skill_record = None;
+        let configured_loader = self.skill_plan.as_ref().is_some_and(|plan| {
+            plan.loader_digest() == compiled.descriptor_digest()
+                && self.registry.selection(&call.tool_name) == Some(plan.loader())
+        });
         let raw_output = match &completion.outcome {
-            ToolExecutionOutcome::Succeeded { value } => {
+            ToolExecutionOutcome::Succeeded { .. }
+            | ToolExecutionOutcome::SucceededWithContent { .. }
+                if configured_loader =>
+            {
+                status = ToolResultStatus::Failed;
+                code = Some(Id::new("skill_loader_contract")?);
+                Value::Null
+            }
+            ToolExecutionOutcome::LoadedSkill { loaded } => {
+                let valid = self.skill_plan.as_ref().is_some_and(|plan| {
+                    plan.loader_digest() == compiled.descriptor_digest()
+                        && self.registry.selection(&call.tool_name) == Some(plan.loader())
+                        && loaded.validate(plan, attempt.run_id, &call.call_id).is_ok()
+                        && loaded.matches_input(bound)
+                });
+                if !valid || effect != ToolEffect::NotApplied || completion.receipt.is_some() {
+                    status = ToolResultStatus::Failed;
+                    code = Some(Id::new("invalid_skill_result")?);
+                    Value::Null
+                } else {
+                    let stored = serde_json::to_value(loaded)
+                        .map_err(|_| error(ErrorCode::InvalidJson, "skill.result"))?;
+                    let bytes = serde_json::to_vec(&stored)
+                        .map_err(|_| error(ErrorCode::InvalidJson, "skill.result"))?
+                        .len();
+                    if bytes as u64 > compiled.descriptor().max_output_bytes.get() {
+                        status = ToolResultStatus::Failed;
+                        code = Some(Id::new("tool_output_too_large")?);
+                        serde_json::json!({"omitted":true,"bytes":bytes,"digest":canonical_digest(&stored)})
+                    } else {
+                        let value = loaded.summary();
+                        content.push(InputContent::Json {
+                            value: value.clone(),
+                        });
+                        skill_record = Some(ProtectedRecord::new(self.ids.next_id()?, 1, stored));
+                        value
+                    }
+                }
+            }
+            ToolExecutionOutcome::Succeeded { value }
+            | ToolExecutionOutcome::SucceededWithContent { value, .. } => {
+                let extra = match &completion.outcome {
+                    ToolExecutionOutcome::SucceededWithContent { content, .. } => {
+                        content.as_slice()
+                    }
+                    _ => &[],
+                };
                 let bytes = serde_json::to_vec(value)
                     .map_err(|_| error(ErrorCode::InvalidJson, "tool.output"))?
-                    .len();
+                    .len()
+                    .saturating_add(if extra.is_empty() {
+                        0
+                    } else {
+                        serde_json::to_vec(extra)
+                            .map_err(|_| error(ErrorCode::InvalidJson, "tool.content"))?
+                            .len()
+                    });
                 if bytes as u64 > compiled.descriptor().max_output_bytes.get() {
                     status = ToolResultStatus::Failed;
                     code = Some(Id::new("tool_output_too_large")?);
                     serde_json::json!({"omitted":true,"bytes":bytes,"digest":canonical_digest(value)})
                 } else {
-                    if !crate::tool_schema::compile_validator(&compiled.descriptor().output_schema)?
-                        .is_valid(value)
+                    if !crate::tool_schema::compile_validator(&compiled.descriptor().output_schema)?.is_valid(value) || extra.iter().any(|item|matches!(item,InputContent::Artifact {reference} if &reference.scope!=attempt.scope))
                     {
                         status = ToolResultStatus::Failed;
                         code = Some(Id::new("invalid_tool_output")?);
@@ -635,6 +704,7 @@ impl SerialToolRound {
                         content.push(InputContent::Json {
                             value: value.clone(),
                         });
+                        content.extend_from_slice(extra);
                     }
                     value.clone()
                 }
@@ -684,6 +754,14 @@ impl SerialToolRound {
             }),
         );
         let reference = record.reference().clone();
+        if status != ToolResultStatus::Succeeded {
+            skill_record = None;
+        }
+        let skill_ref = skill_record
+            .as_ref()
+            .map(|record| record.reference().clone());
+        let mut records = vec![record];
+        records.extend(skill_record);
         Ok((
             ToolResult {
                 call_id: call.call_id.clone(),
@@ -694,12 +772,13 @@ impl SerialToolRound {
                 effect_receipt_ref: (effect != ToolEffect::NotApplied
                     || completion.receipt.is_some())
                 .then(|| reference.clone()),
+                skill_ref,
                 error: code.map(|code| Failure {
                     code,
                     diagnostic_ref: Some(reference),
                 }),
             },
-            vec![record],
+            records,
         ))
     }
 

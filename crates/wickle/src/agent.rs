@@ -14,6 +14,7 @@ use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
 mod admission;
+mod artifacts;
 mod components;
 mod driver;
 mod hooks;
@@ -145,6 +146,10 @@ pub struct AgentBindings {
     pub context_sources: Option<Arc<ContextSourceRuntime>>,
     /// Versioned Host estimate for source items in component mode; never byte-as-token usage.
     pub context_token_estimator: Option<Arc<dyn ContextTokenEstimator>>,
+    /// Exact Skill manifests and explicitly registered instruction loader.
+    pub skills: Option<Arc<SkillRuntime>>,
+    /// Scoped artifact access for Tool results and model-visible references.
+    pub artifacts: Option<Arc<ArtifactRuntime>>,
     /// Time source and timers.
     pub clock: Arc<dyn Clock>,
     /// New internal run/message/event identities, never business foreign keys.
@@ -213,7 +218,7 @@ pub fn create_agent(
     if !matches!(profile.instructions, Instructions::Text(_))
         || !matches!(profile.output_contract, OutputContract::Text {})
         || !matches!(profile.completion_policy, CompletionPolicy::TurnEnd {})
-        || !profile.skills.is_empty()
+        || (!profile.skills.is_empty() && bindings.skills.is_none())
         || (bindings.components.is_none()
             && (!profile.connectors.is_empty()
                 || profile.adapters.as_ref().is_some_and(|v| !v.is_empty())))
@@ -221,6 +226,13 @@ pub fn create_agent(
         || profile.context_policy.strategy.as_str() != "bounded"
     {
         return Err(fail(ErrorCode::CapabilityUnsupported, "agent.profile"));
+    }
+    if bindings
+        .skills
+        .as_ref()
+        .is_some_and(|skills| skills.scope() != &bindings.scope)
+    {
+        return Err(fail(ErrorCode::AccessDenied, "agent.skills_scope"));
     }
     if bindings.components.is_some()
         && (bindings.tools.is_some()

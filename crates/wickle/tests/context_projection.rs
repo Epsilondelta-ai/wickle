@@ -354,6 +354,7 @@ fn round(run: &str, sequence: u64, label: &str, body: &str, tool: &CompiledTool)
         effect: ToolEffect::NotApplied,
         content: vec![InputContent::Text { text: body.into() }],
         effect_receipt_ref: Some(record("private-effect-receipt")),
+        skill_ref: None,
         error: Some(Failure {
             code: id("unavailable"),
             diagnostic_ref: Some(record("private-diagnostic")),

@@ -538,7 +538,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 system_inputs,
                 tools: Some(Arc::new(tools)),
                 system_input_resolver: None,
-                external_receipt_verifier: None, components: None, context_sources: None, context_token_estimator: None,
+                external_receipt_verifier: None, components: None, context_sources: None, context_token_estimator: None, skills: None, artifacts: None,
                 hooks: Some(runtime),
                 clock: Arc::new(SystemClock::new()),
                 ids: Arc::new(RandomIdSource),

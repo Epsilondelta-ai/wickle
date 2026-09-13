@@ -145,3 +145,8 @@ crate contracts with synthetic factories. [Context-source exports](context-sourc
 support read-only collection and fresh authorization of saved batches. Event-consumer
 exports remain metadata-only; this runtime does not deliver events. Close callbacks must not hide required business
 writes, and in-process Rust callbacks are trusted code rather than a sandbox.
+
+The [Skill runtime](skills.md) is supplied by the Host. Its loader participates in
+this registry as a catalog Tool or a Tool export, including the normal selection,
+policy and segment-lifetime checks. Resolve Skill metadata through the Skill
+runtime in the Host's `ProfileResolver`.

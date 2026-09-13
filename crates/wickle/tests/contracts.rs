@@ -738,6 +738,7 @@ async fn checkpoint() -> RunSnapshot {
         resume_receipts: vec![],
         hook_plan_ref: None,
         source_plan_ref: None,
+        skill_plan_ref: None,
         hook_applications: vec![],
         reservations: vec![AttemptReservation {
             attempt_id: id("first-model-attempt"),
@@ -966,6 +967,7 @@ async fn an_unregistered_tool_can_only_be_planned_or_settled_without_an_effect()
         content: vec![],
         error: None,
         effect_receipt_ref: None,
+        skill_ref: None,
     };
     snapshot.tool_ledger[0].state = ToolCallState::Settled {
         result: result.clone(),
@@ -1028,6 +1030,7 @@ async fn success_requires_a_matching_completion_basis_and_verified_success_requi
                 text: "Evidence found".into(),
             }],
             effect_receipt_ref: None,
+            skill_ref: None,
             error: None,
         },
     };

@@ -780,6 +780,7 @@ async fn a_saved_failed_result_with_unknown_effect_still_blocks_following_tools(
         effect: ToolEffect::Unknown,
         content: vec![],
         effect_receipt_ref: None,
+        skill_ref: None,
         error: Some(Failure {
             code: id("historical_unknown"),
             diagnostic_ref: None,

@@ -13,6 +13,7 @@
 //! ```
 
 mod agent;
+mod artifacts;
 mod budget;
 mod clock;
 mod component_runtime;
@@ -34,6 +35,7 @@ mod profile;
 mod resolution;
 mod run;
 mod serialization;
+mod skills;
 mod state;
 mod tool_execution;
 mod tool_schema;
@@ -42,6 +44,10 @@ mod views;
 pub use agent::{
     Agent, AgentBindings, AgentSettings, CancelReceipt, ComponentReleaseView, HookObservationView,
     ModelTokenEstimator, RunHandle, create_agent,
+};
+pub use artifacts::{
+    ArtifactCallContext, ArtifactData, ArtifactInput, ArtifactLimits, ArtifactMetadata,
+    ArtifactPreview, ArtifactRuntime, ArtifactStore, MemoryArtifactStore,
 };
 pub use budget::{AttemptReservation, ReservationKind, RunBudget, RunTiming};
 pub use clock::{Clock, ClockReading, IdSource, RandomIdSource, SystemClock};
@@ -92,6 +98,10 @@ pub use model_routing::{
 pub use policy::{
     ApprovalChallenge, Guarded, PolicyAction, PolicyContext, PolicyDecision, PolicyGate,
     PolicyPort, PolicyRequest, ToolApproval, ToolPolicyInput,
+};
+pub use skills::{
+    LoadedSkill, PlannedSkill, SkillBindings, SkillCallContext, SkillDefinition, SkillLimits,
+    SkillPlan, SkillResolver, SkillRuntime,
 };
 pub use state::{
     AdmissionInput, AdmissionResult, CommitInput, EventPage, MAX_EVENT_PAGE_SIZE, MemoryStateStore,

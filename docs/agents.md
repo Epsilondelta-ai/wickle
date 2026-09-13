@@ -39,6 +39,7 @@ SQLite and synthetic ports; they make no provider network calls. Run them with
 instructions, `SystemInputRegistry`, optional `ToolRegistry`,
 `SystemInputResolver`, `ExternalReceiptVerifier`, `HookRuntime`, optional
 `ComponentRuntime`, optional `ContextSourceRuntime` and context token estimator,
+optional `SkillRuntime` and `ArtifactRuntime`,
 clock, ID source, model token
 estimator, and `AgentSettings`.
 A single Agent instance owns one scope; use separately configured instances for
@@ -57,7 +58,8 @@ polling. Run-wide model, tool, recovery, and elapsed limits come from the profil
 
 The driver supports text instructions, text output, the bounded context strategy,
 registered catalog tools, lifecycle Hooks and context sources, adapter
-Tool/Hook/ContextSource exports, and `turn_end` completion. Skills, asset loading, and verified
+Tool/Hook/ContextSource exports, versioned Skill loading, artifact references, and
+`turn_end` completion. Profile instruction-asset loading and verified
 completion are not connected to this driver. Profiles requiring these components
 are rejected explicitly.
 
@@ -81,6 +83,11 @@ is checked before local Hooks receive the data and before each physical model
 attempt. Set `context_token_estimator` when component mode selects sources.
 
 ## Register tools and separate their inputs
+
+Use [Skills](skills.md) to advertise fixed instruction listings and load complete
+bodies through a registered Tool. [Artifacts](artifacts.md) hold original bytes
+with bounded previews and source evidence. Both use current scoped authorization;
+neither grants additional Tool permissions.
 
 The Host implements `ToolExecutor` and registers it with a compiled
 `ToolDescriptor`. `AgentProfile.tools` selects the exact catalog tool ID and

@@ -66,6 +66,7 @@ impl SerialToolRound {
             effect: ToolEffect::NotApplied,
             content: vec![],
             effect_receipt_ref: None,
+            skill_ref: None,
             error: Some(Failure {
                 code,
                 diagnostic_ref: None,
@@ -115,10 +116,12 @@ impl SerialToolRound {
             round::call_message(saved, &entry.call)?,
             AttemptIdentity {
                 scope: &saved.snapshot.scope,
+                run_id: &saved.snapshot.run_id,
                 attempt_id,
                 idempotency_key,
             },
             compiled,
+            bound,
             ToolExecutionResult {
                 outcome: ToolExecutionOutcome::Succeeded { value: answer },
                 effect: ToolEffect::NotApplied,
@@ -188,10 +191,12 @@ impl SerialToolRound {
             call_message_id,
             AttemptIdentity {
                 scope: &saved.snapshot.scope,
+                run_id: &saved.snapshot.run_id,
                 attempt_id,
                 idempotency_key,
             },
             compiled,
+            bound,
             verified,
         )?;
         self.prepared_resolution(

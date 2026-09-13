@@ -650,6 +650,7 @@ pub fn unknown_tool_result() -> ToolCallState {
             effect: ToolEffect::Unknown,
             content: vec![],
             effect_receipt_ref: None,
+            skill_ref: None,
             error: None,
         },
     }

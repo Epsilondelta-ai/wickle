@@ -706,6 +706,7 @@ async fn snapshot() -> RunSnapshot {
         resume_receipts: vec![],
         hook_plan_ref: None,
         source_plan_ref: None,
+        skill_plan_ref: None,
         hook_applications: vec![],
         reservations: vec![AttemptReservation {
             attempt_id: id("first-model-attempt"),

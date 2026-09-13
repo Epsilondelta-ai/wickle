@@ -35,6 +35,16 @@ impl Agent {
         if let Some(hooks) = &segment.hooks {
             round = round.with_hooks(hooks.clone());
         }
+        if let Some(artifacts) = &bindings.artifacts {
+            round = round.with_artifacts(artifacts.clone());
+        }
+        if saved.snapshot.skill_plan_ref.is_some() {
+            let skills = bindings
+                .skills
+                .as_ref()
+                .ok_or_else(|| fail(ErrorCode::ComponentUnavailable, "agent.skills"))?;
+            round = round.with_skill_plan(skills.saved_plan(&saved.snapshot).await?);
+        }
         if let Some(binding_set_id) = segment.binding_set_id() {
             round = round.with_binding_set_id(binding_set_id.clone());
         }

@@ -15,3 +15,5 @@ Agent Profile로 에이전트의 동작을 구성하고, 어댑터를 통해 다
 **개발 상태:** 모델·도구의 순차 호출, 시스템 입력 분리, 결과 저장, 이벤트 재조회, 취소와 승인·입력·외부 효과 확인 대기의 재개를 지원합니다. 같은 재개 명령은 중복 소비하지 않으며, 외부 효과는 Host의 검증을 거쳐 확정합니다. Lifecycle Hook으로 제한된 문맥·인자 변환과 저장 완료 후 관찰을 지원합니다. 어댑터의 Tool·Hook·ContextSource export를 고정된 조립 정보와 구간별 인스턴스로 연결하며, 실행 구간이 끝나면 자원을 해제합니다. [어댑터 런타임](docs/adapters.md). 일반적인 실행 중단 복구와 후보 결과 검증은 아직 지원하지 않습니다. [에이전트 실행](docs/agents.md) · [데이터 계약](docs/contracts.md).
 
 읽기 전용 [ContextSource](docs/context-sources.md)는 Run·모델 단계별 조회, 자료 묶음 저장, 재사용 시 현재 접근 권한 검사를 지원합니다.
+
+[Skills](docs/skills.md)는 등록된 도구를 통해 고정 버전의 지침 전체를 로드합니다. [Artifacts](docs/artifacts.md)는 scope가 적용된 원문, 제한된 preview와 원천 근거를 보존합니다.

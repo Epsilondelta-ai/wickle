@@ -7,6 +7,14 @@ use serde::{Deserialize, Serialize};
 pub enum ErrorCode {
     /// Current policy or exact owner scope denies access.
     AccessDenied,
+    /// Artifact identity, content, metadata, or size violates its immutable contract.
+    InvalidArtifact,
+    /// Artifact policy requires an explicit Host approval before storage access.
+    ArtifactApprovalRequired,
+    /// A Skill manifest, body, dependency or loader result violates its pinned contract.
+    InvalidSkill,
+    /// Current Skill policy requires explicit Host approval before loading or use.
+    SkillApprovalRequired,
     /// The trusted policy failed or panicked; no permission was granted.
     PolicyUnavailable,
     /// The call's finite deadline elapsed.

@@ -315,6 +315,7 @@ pub async fn populate_protected_run(store: Arc<dyn StateStore>) -> Value {
             text: "Observed reports".into(),
         }],
         effect_receipt_ref: Some(receipt.reference().clone()),
+        skill_ref: None,
         error: None,
     };
     let result_record = ProtectedRecord::new(
