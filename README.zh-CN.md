@@ -33,3 +33,5 @@ AWS 签名、推理配置文件和 Bedrock 流协议请参阅 [Bedrock 适配器
 Gemini API 版本、函数模式和思考签名重放请参阅 [Gemini 适配器指南](docs/gemini.md)。
 
 Google Cloud 身份验证及全球和区域连接请参阅 [Vertex AI 适配器指南](docs/vertex.md)。
+
+Grok Responses、加密状态重放和用量格式请参阅 [xAI 适配器指南](docs/xai.md)。

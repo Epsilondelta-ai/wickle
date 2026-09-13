@@ -46,7 +46,8 @@ def main():
     bedrock = next(p for p in workspace["packages"] if p["name"] == "wickle-model-bedrock")
     gemini = next(p for p in workspace["packages"] if p["name"] == "wickle-model-gemini")
     vertex = next(p for p in workspace["packages"] if p["name"] == "wickle-model-vertex")
-    libraries = [core, catalog, sqlite, adapters, responses, openai, azure, anthropic, bedrock, gemini, vertex]
+    xai = next(p for p in workspace["packages"] if p["name"] == "wickle-model-xai")
+    libraries = [core, catalog, sqlite, adapters, responses, openai, azure, anthropic, bedrock, gemini, vertex, xai]
     versions = {d["name"]: d["req"] for d in core["dependencies"] if d["kind"] is None}
     for dep in core["dependencies"]:
         if dep["kind"] != "dev":
@@ -145,7 +146,7 @@ def main():
         for example in examples:
             subprocess.run(["cargo", "run", "--locked", "--offline", "--bin", example.stem],
                            cwd=consumer, env=env, check=True)
-    print("Independent package consumers: passed (core, model catalog, SQLite store, adapter runtime, Responses codec, OpenAI, Azure, Anthropic, Bedrock, Gemini and Vertex adapters)", flush=True)
+    print("Independent package consumers: passed (core, model catalog, SQLite store, adapter runtime, Responses codec, OpenAI, Azure, Anthropic, Bedrock, Gemini, Vertex and xAI adapters)", flush=True)
 
 
 if __name__ == "__main__":

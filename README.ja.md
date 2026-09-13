@@ -33,3 +33,5 @@ AWS 署名、推論プロファイル、Bedrock ストリームについては�
 Gemini API のバージョン、関数スキーマ、思考署名の再送については、[Gemini アダプターガイド](docs/gemini.md)を参照してください。
 
 Google Cloud 認証とグローバル・リージョン別接続については、[Vertex AI アダプターガイド](docs/vertex.md)を参照してください。
+
+Grok Responses、暗号化状態の再送、usage 形式については、[xAI アダプターガイド](docs/xai.md)を参照してください。

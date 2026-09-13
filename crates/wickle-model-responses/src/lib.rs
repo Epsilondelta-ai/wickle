@@ -4,7 +4,7 @@
 mod codec;
 mod response;
 mod sse;
-pub use codec::encode_request;
+pub use codec::{encode_request, encode_xai_request};
 pub use response::Decoder as ResponsesDecoder;
 pub use sse::{Decoder as SseDecoder, Event as SseEvent};
 use wickle::{ContractError, ErrorCode};
