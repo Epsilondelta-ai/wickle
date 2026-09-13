@@ -22,16 +22,4 @@ Agent Profile でエージェントの振る舞いを設定し、アダプター
 
 [出力検証](docs/verification.md)は JSON Schema、バージョンを固定した評価基準、上限付きの修正、固定された候補の承認に対応します。モデルによる検証も同じ Run 予算を使います。
 
-[OpenAI Responses アダプター](docs/openai.md)は、アプリケーションが渡す認証情報を使い、制限付き HTTP/SSE 生成、関数呼び出し、構造化出力、モデルバージョンの確認に対応します。
-
-Azure リソースのデプロイと Host が管理する API キー・Entra 認証については、[Azure OpenAI アダプターガイド](docs/azure-openai.md)を参照してください。
-
-Claude Messages、thinking の署名保持、workspace ごとの認証については、[Anthropic アダプターガイド](docs/anthropic.md)を参照してください。
-
-AWS 署名、推論プロファイル、Bedrock ストリームについては、[Bedrock アダプターガイド](docs/bedrock.md)を参照してください。
-
-Gemini API のバージョン、関数スキーマ、思考署名の再送については、[Gemini アダプターガイド](docs/gemini.md)を参照してください。
-
-Google Cloud 認証とグローバル・リージョン別接続については、[Vertex AI アダプターガイド](docs/vertex.md)を参照してください。
-
-Grok Responses、暗号化状態の再送、usage 形式については、[xAI アダプターガイド](docs/xai.md)を参照してください。
+[モデルプロバイダーガイド](docs/model-providers.md)では、OpenAI、Azure OpenAI、Anthropic、AWS Bedrock、Gemini API、Vertex AI、xAI アダプターの共通接続方法を説明しています。認証、API バージョン、各プロバイダーの動作の違いは個別に扱います。

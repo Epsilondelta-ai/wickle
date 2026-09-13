@@ -22,16 +22,4 @@ Read-only [context sources](docs/context-sources.md) support Run and model-step 
 
 [Output verification](docs/verification.md) supports JSON schemas, versioned criteria, bounded repair, and approval of a fixed candidate. Model-based reviews share the Run budget.
 
-The [OpenAI Responses adapter](docs/openai.md) provides bounded HTTP/SSE generation, function calling, structured output, and explicit model-version inspection with application-supplied credentials.
-
-For resource-scoped Azure deployments and Host-managed API-key/Entra authentication, see the [Azure OpenAI adapter guide](docs/azure-openai.md).
-
-For Claude Messages, signed thinking replay and workspace-scoped credentials, see the [Anthropic adapter guide](docs/anthropic.md).
-
-For AWS signing, inference profiles and both Bedrock stream protocols, see the [Bedrock adapter guide](docs/bedrock.md).
-
-For Gemini API versions, function schemas and thought-signature replay, see the [Gemini adapter guide](docs/gemini.md).
-
-For Google Cloud OAuth, global and regional targets, see the [Vertex AI adapter guide](docs/vertex.md).
-
-For Grok Responses, encrypted replay and xAI usage formats, see the [xAI adapter guide](docs/xai.md).
+The [model provider guide](docs/model-providers.md) covers OpenAI, Azure OpenAI, Anthropic, AWS Bedrock, Gemini API, Vertex AI and xAI adapters. They use the same core contracts while retaining explicit credentials, API versions and provider-specific behavior.

@@ -8,7 +8,8 @@ Azure OpenAI, Anthropic, Bedrock, Gemini API, Vertex AI, and xAI.
 and the first numbered model slot for each provider. Add further slots for more
 models or versions. No provider enable-list variable is required.
 
-Provider adapters and model-specific live tests are still being implemented.
+[Provider adapters](model-providers.md) implement the seven documented inference paths.
+Model-specific live verification is separate from local transport-contract checks.
 These files and numbered model variables are test-harness conventions only.
 Wickle core accepts configured adapters and does not load `.env` or depend on
 these variables. The `.env` files and template are excluded from its `.crate`
