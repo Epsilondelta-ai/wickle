@@ -21,3 +21,5 @@ Las [fuentes de contexto](docs/context-sources.md) de solo lectura permiten cons
 La [selección y compresión de contexto](docs/context-compaction.md) conserva la conversación original y aplica vistas previas limitadas y resúmenes validados. La compresión con modelos utiliza el mismo presupuesto del Run.
 
 La [verificación de resultados](docs/verification.md) admite esquemas JSON, criterios con versión fija, revisiones limitadas y aprobación de un candidato fijo. Las revisiones mediante modelos comparten el presupuesto del Run.
+
+El [adaptador OpenAI Responses](docs/openai.md) ofrece generación HTTP/SSE con límites, llamadas a funciones, salida estructurada y comprobación de versiones, con credenciales proporcionadas por la aplicación.

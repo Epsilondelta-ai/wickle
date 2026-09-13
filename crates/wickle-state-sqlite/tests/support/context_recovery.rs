@@ -105,7 +105,7 @@ pub fn run_worker(directory: &Path, mode: &str) {
             } else {
                 store.clone()
             };
-            bindings.clock = Arc::new(SystemClock::new());
+            bindings.clock = Arc::new(ProcessClock::new(!interrupt));
             bindings.ids = Arc::new(RandomIdSource);
             bindings.settings.projection_limits.max_bytes = 8000;
             if !interrupt {

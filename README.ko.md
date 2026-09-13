@@ -21,3 +21,5 @@ Agent Profile로 에이전트의 동작을 구성하고, 어댑터를 통해 다
 [문맥 선택·압축](docs/context-compaction.md)은 원본 대화를 보존하면서 제한된 preview와 검증된 요약을 적용합니다. 모델 기반 압축도 같은 Run 예산을 사용합니다.
 
 [출력 검증](docs/verification.md)은 JSON 스키마, 버전이 고정된 검증 기준, 한도 내 보완과 고정된 후보의 승인을 지원합니다. 모델 기반 검증도 같은 Run 예산을 사용합니다.
+
+[OpenAI Responses 어댑터](docs/openai.md)는 애플리케이션이 제공한 인증 정보로 제한된 HTTP/SSE 생성, 함수 호출, 구조화 출력, 모델 버전 확인을 지원합니다.

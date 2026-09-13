@@ -21,3 +21,5 @@ Wickle 是 EpsilonDelta 正在使用 Rust 开发的智能体引擎，旨在以�
 [上下文选择与压缩](docs/context-compaction.md) 保留原始对话，并应用有大小限制的预览和经过验证的摘要。模型压缩也使用同一 Run 的预算。
 
 [输出验证](docs/verification.md)支持 JSON Schema、固定版本的验证标准、限定次数的修正和固定候选结果的审批。模型验证也使用同一 Run 预算。
+
+[OpenAI Responses 适配器](docs/openai.md)使用应用程序提供的凭据，支持有界 HTTP/SSE 生成、函数调用、结构化输出和明确的模型版本检查。
