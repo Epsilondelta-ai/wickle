@@ -2,7 +2,7 @@
 
 [환경변수 안내](README.md) · [전체 예제](../../.env.example)
 
-Google AI Studio에서 발급한 Gemini API 키와 해당 키로 사용할 모델을 준비합니다. 아래는 모델별 실제 연결 테스트 전용 설정 규약이며, Wickle의 Gemini 어댑터와 실제 연결 검사 runner는 아직 완성되지 않았습니다.
+Google AI Studio에서 발급한 Gemini API 키와 해당 키로 사용할 모델을 준비합니다. 아래는 모델별 실제 연결 테스트 전용 설정 규약입니다. [Gemini 어댑터](../gemini.md)에 Host가 명시적으로 설정을 전달하며, 실제 계정 연결 검증은 별도로 진행합니다.
 
 ```dotenv
 GEMINI_API_KEY=
@@ -34,7 +34,7 @@ curl --fail-with-body --silent --show-error \
 
 `GEMINI_MODEL_1_THINKING_LEVEL`은 논리 옵션 `thinking_level`이며, generateContent의 `generationConfig.thinkingConfig.thinkingLevel`에 대응합니다. 구형 모델에서 토큰 예산 방식을 사용할 때는 `THINKING_BUDGET_TOKENS`를 `thinking_budget_tokens`로 전달하고 어댑터가 `thinkingBudget`에 매핑합니다. 지원 수준·정수 범위·두 설정의 동시 사용 가능 여부는 선택한 모델·API schema를 확인합니다. [generateContent ThinkingConfig](https://ai.google.dev/api/generate-content#ThinkingConfig).
 
-옵션이 비어 있으면 전송하지 않습니다. 모든 Gemini 모델에 공통된 수준 목록을 가정하지 않으며, 지원되지 않는 설정이나 조합을 명시적으로 거부합니다. 실제 SDK 요청으로 변환하는 어댑터는 아직 구현 전입니다.
+옵션이 비어 있으면 전송하지 않습니다. 모든 Gemini 모델에 공통된 수준 목록을 가정하지 않으며, 지원되지 않는 설정이나 조합을 명시적으로 거부합니다. 어댑터가 선택한 API의 wire 필드로 변환합니다.
 
 `MAX_OUTPUT_TOKENS=4096`은 한 번의 응답에 대한 출력 예산 예시입니다. 모델의 요건과 thinking·도구 호출에 필요한 토큰을 고려해 조정합니다. 긴 tool loop 전체의 예산을 이 값 하나로 보장하지 않습니다.
 
@@ -50,6 +50,8 @@ GEMINI_MODEL_2_MAX_OUTPUT_TOKENS=4096
 번호는 양의 정수이며 ID를 채운 각 번호가 독립된 모델·옵션 검사 대상입니다. 같은 모델을 비교할 때는 ID를 동일하게 넣고 thinking 설정에 각각 다른 허용값을 입력합니다. 프로젝트·키·endpoint 또는 필요한 API 버전이 다르면 별도의 `.env` 파일을 사용합니다.
 
 `GEMINI_API_VERSION=v1`은 안정 API 경로를 뜻합니다. 선택한 기능이 `v1beta`를 요구한다면 그 기능을 지원하는 어댑터와 함께 설정해야 합니다. 모델 release와 API 버전은 별개입니다. [API 버전](https://ai.google.dev/gemini-api/docs/api-versions). 이 경로의 인증은 AI Studio 키이며, ADC로 준비하는 [Vertex AI 경로](vertex-ai.md)는 별도 설정입니다.
+
+`v1`의 함수 선언은 OpenAPI `parameters`를 사용하며 `additionalProperties: false`를 표현하지 못합니다. Wickle의 일반적인 닫힌 Tool 스키마는 `v1beta`의 `parametersJsonSchema` 경로가 필요합니다. 어댑터는 지원하지 않는 제약을 제거하거나 API 버전을 자동으로 바꾸지 않고 호출 전에 오류를 반환합니다. 텍스트·thinking 지원과 Tool 스키마 지원은 별도로 확인합니다. [버전별 지원 범위](../gemini.md#api-versions-and-schemas).
 
 ## 확인한 현재 모델 계약
 

@@ -29,3 +29,5 @@ For resource-scoped Azure deployments and Host-managed API-key/Entra authenticat
 For Claude Messages, signed thinking replay and workspace-scoped credentials, see the [Anthropic adapter guide](docs/anthropic.md).
 
 For AWS signing, inference profiles and both Bedrock stream protocols, see the [Bedrock adapter guide](docs/bedrock.md).
+
+For Gemini API versions, function schemas and thought-signature replay, see the [Gemini adapter guide](docs/gemini.md).

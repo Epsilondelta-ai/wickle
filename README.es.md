@@ -29,3 +29,5 @@ Para despliegues de Azure y autenticación con claves API o Entra gestionada por
 Consulta la [guía del adaptador Anthropic](docs/anthropic.md) para Claude Messages, conservación de firmas de thinking y credenciales por workspace.
 
 Consulta la [guía del adaptador Bedrock](docs/bedrock.md) para firmas AWS, perfiles de inferencia y protocolos de streaming.
+
+Consulta la [guía del adaptador Gemini](docs/gemini.md) para versiones de API, esquemas de funciones y conservación de firmas de pensamiento.

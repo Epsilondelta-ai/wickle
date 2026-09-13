@@ -29,3 +29,5 @@ Azure 资源部署及由 Host 管理的 API 密钥和 Entra 身份验证，请�
 Claude Messages、thinking 签名保留及 workspace 身份验证请参阅 [Anthropic 适配器指南](docs/anthropic.md)。
 
 AWS 签名、推理配置文件和 Bedrock 流协议请参阅 [Bedrock 适配器指南](docs/bedrock.md)。
+
+Gemini API 版本、函数模式和思考签名重放请参阅 [Gemini 适配器指南](docs/gemini.md)。
