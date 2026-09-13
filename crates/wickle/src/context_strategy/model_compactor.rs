@@ -102,13 +102,15 @@ impl ContextRuntime {
             limits,
         };
         // Keep the nested exchange Future off the parent agent loop's stack.
-        match Box::pin(services.bindings.model_exchange.generate_routed(
-            router,
-            &input,
-            &projector,
-            services.context,
-            services.budget,
-        ))
+        match crate::future::boxed(|| {
+            services.bindings.model_exchange.generate_routed(
+                router,
+                &input,
+                &projector,
+                services.context,
+                services.budget,
+            )
+        })
         .await?
         {
             Guarded::Completed(ModelExchangeOutcome::Completed { response })

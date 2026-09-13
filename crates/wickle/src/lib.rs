@@ -180,3 +180,5 @@ pub use verification::{
 };
 
 pub use verification::SchemaVerifier;
+
+mod future;

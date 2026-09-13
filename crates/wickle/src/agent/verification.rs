@@ -636,13 +636,15 @@ impl VerificationModel for ReviewModels<'_> {
                 bindings: self.bindings,
                 messages: request.messages,
             };
-            match Box::pin(self.bindings.model_exchange.generate_routed(
-                router,
-                &input,
-                &projector,
-                self.context,
-                self.budget,
-            ))
+            match crate::future::boxed(|| {
+                self.bindings.model_exchange.generate_routed(
+                    router,
+                    &input,
+                    &projector,
+                    self.context,
+                    self.budget,
+                )
+            })
             .await?
             {
                 Guarded::Completed(ModelExchangeOutcome::Completed { response })

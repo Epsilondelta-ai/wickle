@@ -358,7 +358,13 @@ async fn actual_tools_and_json_output_require_capabilities_even_when_the_host_re
 async fn routed_invocations_need_valid_inspection_records_in_both_commits_and_restored_checkpoints()
 {
     // The valid branch prevents unrelated checkpoint-shape errors from satisfying the rejection cases.
-    for corruption in ["valid", "missing", "unverified"] {
+    for corruption in [
+        "valid",
+        "missing",
+        "unverified",
+        "missing-step",
+        "foreign-step",
+    ] {
         let fixture = Fixture::new(vec![Reply::Complete], vec![]).await;
         fixture
             .exchange(0)
@@ -390,6 +396,13 @@ async fn routed_invocations_need_valid_inspection_records_in_both_commits_and_re
         invocation.reported_model_version = None;
         invocation.usage = None;
         let mut records = vec![];
+        if corruption != "missing-step" {
+            let mut input = fixture.input("new-step");
+            if corruption == "foreign-step" {
+                input.routing.scope.tenant_id = id("another-tenant");
+            }
+            records.push(ProtectedRecord::new(id(&format!("model-step-{}",canonical_digest(&json!([saved.run_id,"new-step"])))),1,json!({"schema_version":"wickle.model-step.v1","run_id":saved.run_id,"input":input})));
+        }
         if corruption == "missing" {
             invocation.inspection_ref = None;
         }
@@ -422,6 +435,18 @@ async fn routed_invocations_need_valid_inspection_records_in_both_commits_and_re
                 .unwrap()
                 .push(json!({"reference":record.reference(),"value":record.value()}));
         }
+        value["records"]
+            .as_array_mut()
+            .unwrap()
+            .sort_by_key(|record| {
+                (
+                    record["reference"]["record_id"]
+                        .as_str()
+                        .unwrap()
+                        .to_owned(),
+                    record["reference"]["revision"].as_u64().unwrap(),
+                )
+            });
         let restored = StateStoreCheckpoint::from_json(
             &value.to_string(),
             &scope(),
@@ -431,12 +456,12 @@ async fn routed_invocations_need_valid_inspection_records_in_both_commits_and_re
         assert_eq!(
             restored.is_ok(),
             corruption == "valid",
-            "checkpoint inspection contract: {corruption}"
+            "checkpoint inspection contract: {corruption}: {restored:?}"
         );
         assert_eq!(
             committed.is_ok(),
             corruption == "valid",
-            "commit inspection contract: {corruption}"
+            "commit inspection contract: {corruption}: {committed:?}"
         );
     }
 }
@@ -717,4 +742,25 @@ async fn an_interrupted_physical_attempt_cannot_be_silently_reissued_on_resume()
         ErrorCode::ModelAttemptUnresolved
     );
     assert_eq!(fixture.call_counts(), (1, 0));
+}
+
+#[tokio::test]
+async fn agent_calls_cannot_substitute_the_profile_logical_binding() {
+    let fixture = Fixture::new(vec![Reply::Complete], vec![]).await;
+    let mut input = fixture.input("agent");
+    input.routing.model_binding = id("another-slot");
+    let error = fixture
+        .exchange(0)
+        .generate_routed(
+            &fixture.router,
+            &input,
+            &fixture.projector,
+            &fixture.context(),
+            &fixture.budget().await,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, ErrorCode::ModelRouteDenied);
+    assert_eq!(fixture.call_counts(), (0, 0));
+    assert_eq!(fixture.saved().await.usage.model_calls, 0);
 }

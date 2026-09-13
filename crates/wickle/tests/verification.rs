@@ -457,13 +457,15 @@ async fn json_format_and_deterministic_quality_checks_repair_different_failures(
         ModelOutput::JsonSchema { schema: format }
     );
 }
-struct ModelReview;
+struct ModelReview {
+    binding: Id,
+}
 impl Verifier for ModelReview {
     fn definition(&self) -> VerifierDefinition {
         VerifierDefinition {
             verifier_ref: reference("quality"),
             criteria_ref: reference("model-criteria"),
-            configuration: Default::default(),
+            configuration: serde_json::from_value(json!({"model_binding":self.binding})).unwrap(),
             criteria: "Ask the configured reviewer to check the candidate.".into(),
         }
     }
@@ -477,7 +479,7 @@ impl Verifier for ModelReview {
                 .models
                 .generate(VerificationModelRequest {
                     stage: id("review"),
-                    model_binding: id("primary"),
+                    model_binding: self.binding.clone(),
                     messages: vec![ModelMessage {
                         role: ModelRole::User,
                         content: vec![ModelContent::Json {
@@ -504,7 +506,9 @@ async fn model_review_shares_budget_and_does_not_replace_the_agent_step() {
             VerificationRuntime::new(
                 scope(),
                 vec![],
-                vec![Arc::new(ModelReview)],
+                vec![Arc::new(ModelReview {
+                    binding: id("primary"),
+                })],
                 VerificationLimits::default(),
             )
             .unwrap(),
@@ -886,4 +890,42 @@ async fn restored_feedback_cannot_be_promoted_to_a_new_user_request() {
         StateStoreCheckpoint::from_json(&image.to_string(), &scope(), &canonical_digest(&image))
             .is_err()
     );
+}
+
+#[tokio::test]
+async fn a_verifier_can_use_its_own_explicit_logical_model_binding() {
+    let (fixture, profile, mut bindings, model, _) =
+        setup(&["candidate", r#"{"verdict":"pass"}"#], vec![]);
+    let mut policy = bindings.router.snapshot().policy().clone();
+    let mut review = policy.rules[0].clone();
+    review.model_binding = id("review-model");
+    review.purpose = ModelPurpose::Verification;
+    policy.rules.push(review);
+    bindings.router = Arc::new(Router {
+        snapshot: RoutingSnapshot::new(bindings.router.snapshot().catalog().clone(), policy)
+            .unwrap(),
+        queries: AtomicUsize::new(0),
+        snapshots: AtomicUsize::new(0),
+    });
+    bindings.verification = Some(Arc::new(
+        VerificationRuntime::new(
+            scope(),
+            vec![],
+            vec![Arc::new(ModelReview {
+                binding: id("review-model"),
+            })],
+            VerificationLimits::default(),
+        )
+        .unwrap(),
+    ));
+    let agent = create_agent(profile, bindings).unwrap();
+    let handle = fixture.started(&agent, "request").await;
+    let outcome = completed(handle.outcome(&context()).await.unwrap());
+    assert_eq!(
+        outcome.result,
+        OutcomeResult::Succeeded {
+            completion_basis: CompletionBasis::Verified
+        }
+    );
+    assert_eq!(model.calls.load(Ordering::SeqCst), 2);
 }

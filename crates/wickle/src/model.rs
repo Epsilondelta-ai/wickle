@@ -127,7 +127,7 @@ pub enum ModelFailureKind {
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RouteRequest {
-    /// Profile's Host binding/routing configuration name.
+    /// Host logical binding for this purpose; Agent calls use the profile selection.
     pub model_binding: Id,
     /// Purpose of this call.
     pub purpose: ModelPurpose,
