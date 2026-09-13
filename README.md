@@ -27,3 +27,5 @@ The [OpenAI Responses adapter](docs/openai.md) provides bounded HTTP/SSE generat
 For resource-scoped Azure deployments and Host-managed API-key/Entra authentication, see the [Azure OpenAI adapter guide](docs/azure-openai.md).
 
 For Claude Messages, signed thinking replay and workspace-scoped credentials, see the [Anthropic adapter guide](docs/anthropic.md).
+
+For AWS signing, inference profiles and both Bedrock stream protocols, see the [Bedrock adapter guide](docs/bedrock.md).

@@ -12,3 +12,9 @@ use wickle::{ContractError, ErrorCode};
 fn error(code: ErrorCode, location: &str) -> ContractError {
     ContractError::new(code, format!("anthropic.{location}"))
 }
+
+/// Messages wire primitives for platform adapters with independent authentication.
+pub mod protocol {
+    pub use crate::codec::encode_request;
+    pub use crate::response::Decoder as MessagesDecoder;
+}

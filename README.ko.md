@@ -27,3 +27,5 @@ Agent Profile로 에이전트의 동작을 구성하고, 어댑터를 통해 다
 Azure 리소스별 배포와 Host가 관리하는 API key·Entra 인증은 [Azure OpenAI 어댑터 가이드](docs/azure-openai.md)를 참고하세요.
 
 Claude Messages, thinking 서명 보존, workspace별 인증은 [Anthropic 어댑터 가이드](docs/anthropic.md)를 참고하세요.
+
+AWS 서명, inference profile과 Bedrock 스트림은 [Bedrock 어댑터 가이드](docs/bedrock.md)를 참고하세요.

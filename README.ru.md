@@ -27,3 +27,5 @@ Wickle — движок агентов, который EpsilonDelta разраб
 Развёртывания Azure и аутентификация через ключ API или Entra, управляемая Host, описаны в [руководстве по адаптеру Azure OpenAI](docs/azure-openai.md).
 
 Claude Messages, сохранение подписей thinking и учётные данные workspace описаны в [руководстве по адаптеру Anthropic](docs/anthropic.md).
+
+Подпись AWS, профили вывода и потоковые протоколы описаны в [руководстве по адаптеру Bedrock](docs/bedrock.md).

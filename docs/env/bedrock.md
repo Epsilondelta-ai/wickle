@@ -2,7 +2,7 @@
 
 [환경변수 안내](README.md) · [전체 예제](../../.env.example)
 
-AWS 계정의 인증 정보, 호출을 시작할 리전, 해당 리전에서 사용할 Claude 모델을 준비합니다. Host가 AWS credential provider chain 또는 Bedrock bearer token을 준비하고 어댑터에 명시적으로 전달합니다. 라이브러리가 환경변수나 profile을 암묵적으로 읽는다는 뜻은 아닙니다. 아래는 설정 준비용이며 Wickle의 Bedrock 어댑터와 실제 연결 검사 runner는 아직 완성되지 않았습니다.
+AWS 계정의 인증 정보, 호출을 시작할 리전, 해당 리전에서 사용할 Claude 모델을 준비합니다. Host가 AWS credential provider chain 또는 Bedrock bearer token을 준비하고 어댑터에 명시적으로 전달합니다. 라이브러리가 환경변수나 profile을 암묵적으로 읽는다는 뜻은 아닙니다. Bedrock 어댑터는 명시적 설정으로 사용할 수 있습니다. 아래 환경변수는 테스트 Host의 설정 준비용이며, 실제 연결 검사 runner와 계정별 검증은 별도로 진행합니다.
 
 ```dotenv
 AWS_REGION=
@@ -67,7 +67,7 @@ aws bedrock get-inference-profile \
 
 `THINKING_MODE`와 `THINKING_BUDGET_TOKENS`는 각각 `thinking_mode`, `thinking_budget_tokens` 논리 옵션입니다. `adaptive`는 모드이고 effort 값이 아닙니다. 수동 thinking 예산을 지원하는 모델에서만 해당 토큰 설정을 사용합니다. [Adaptive thinking](https://platform.claude.com/docs/en/build-with-claude/adaptive-thinking), [수동 thinking](https://platform.claude.com/docs/en/build-with-claude/extended-thinking).
 
-빈 옵션은 전송하지 않습니다. 선택한 모델·API의 schema에 없는 값이나 조합은 명시적으로 거부하며, 직접 Claude API 설정을 Bedrock 요청에 그대로 복사하거나 지원하지 않는 옵션을 조용히 무시하지 않습니다. 실제 wire 필드 매핑은 Bedrock 어댑터가 담당하며 SDK 연결은 아직 구현 전입니다.
+빈 옵션은 전송하지 않습니다. 선택한 모델·API의 schema에 없는 값이나 조합은 명시적으로 거부하며, 직접 Claude API 설정을 Bedrock 요청에 그대로 복사하거나 지원하지 않는 옵션을 조용히 무시하지 않습니다. 실제 wire 필드 매핑과 SigV4 서명은 Bedrock 어댑터가 담당합니다. AWS profile·role에서 인증 정보를 얻고 갱신하는 책임은 Host에 있습니다.
 
 `MAX_OUTPUT_TOKENS=4096`은 응답 한 번의 출력 예산 예시입니다. 모델의 요건과 thinking·도구 호출을 포함한 작업량에 맞춰 조정합니다. 긴 tool loop에 충분한 예산을 보장하는 값은 아닙니다.
 

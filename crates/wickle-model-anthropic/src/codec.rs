@@ -6,7 +6,8 @@ pub(crate) const REPLAY_KIND: &str = "wickle.anthropic.messages.v1";
 pub(crate) fn invalid() -> ContractError {
     error(ErrorCode::InvalidContract, "content")
 }
-pub(crate) fn encode_request(request: &ModelRequest) -> Result<Value, ContractError> {
+/// Encode the Messages wire contract while preserving route-bound content.
+pub fn encode_request(request: &ModelRequest) -> Result<Value, ContractError> {
     request.validate()?;
     if request.options.keys().any(|key| {
         !matches!(
@@ -186,7 +187,12 @@ pub(crate) fn encode_request(request: &ModelRequest) -> Result<Value, ContractEr
                 .filter(|n| *n >= 1024 && *n < request.max_output_tokens.get())
                 .ok_or_else(|| error(ErrorCode::ModelOptionUnsupported, "thinking_budget"))?;
             if matches!(
-                request.route.model_id.as_str(),
+                request
+                    .route
+                    .model_id
+                    .as_str()
+                    .strip_prefix("anthropic.")
+                    .unwrap_or(request.route.model_id.as_str()),
                 "claude-opus-5" | "claude-sonnet-5" | "claude-opus-4-7" | "claude-opus-4-8"
             ) {
                 return Err(error(ErrorCode::ModelOptionUnsupported, "manual_thinking"));
@@ -198,7 +204,13 @@ pub(crate) fn encode_request(request: &ModelRequest) -> Result<Value, ContractEr
                 return Err(error(ErrorCode::ModelOptionUnsupported, "thinking_budget"));
             }
             if mode == Some("disabled")
-                && request.route.model_id.as_str() == "claude-opus-5"
+                && request
+                    .route
+                    .model_id
+                    .as_str()
+                    .strip_prefix("anthropic.")
+                    .unwrap_or(request.route.model_id.as_str())
+                    == "claude-opus-5"
                 && matches!(
                     request.options.get("effort").and_then(Value::as_str),
                     Some("xhigh" | "max")
