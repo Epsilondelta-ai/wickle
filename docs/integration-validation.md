@@ -3,9 +3,9 @@
 `python3 scripts/check-package.py --allow-dirty` packages the libraries and builds
 consumers outside the checkout. In addition to the focused examples, it builds two
 separate application workspaces from the same extracted core archive. Their
-manifests select different adapter dependencies. Before and after each execution,
-the script checks the core archive digest, extracted source digest and resolved
-core dependency path.
+manifests select different adapter dependencies. Before each application runs,
+the script checks its resolved core dependency path. After each execution, it
+checks that the core archive and extracted source digests remain unchanged.
 
 ## Retrieval and aggregation
 
@@ -49,7 +49,7 @@ instance references after handles are dropped, no increase in pending Tokio
 tasks after cleanup, and bounded event pages. Duplicate resume commands do not
 add model calls.
 
-The consumer prints actual per-Run wall times, synthetic-model construction CPU
+The consumer prints actual per-Run wall times, synthetic-model construction
 time and local non-model time. There are no provider network calls. The local
 measurement includes core execution, SQLite and Host callbacks; it is neither an
 isolated engine CPU measurement nor a latency guarantee for real models. Timing
