@@ -29,3 +29,5 @@ See [MCP tools](docs/mcp.md) for connecting reviewed tools over stdio.
 See [event consumers](docs/event-consumers.md) for Host-managed delivery to memory and graph services.
 
 The [model-version evidence matrix](docs/model-support.md) distinguishes local contract checks from live smoke results.
+
+See [independent Host validation](docs/integration-validation.md) for package isolation, adapter replacement and recovery across processes.

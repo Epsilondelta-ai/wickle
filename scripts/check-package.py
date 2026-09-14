@@ -19,6 +19,15 @@ CORE_DEPENDENCIES = {
 }
 
 
+def source_digest(directory):
+    digest = hashlib.sha256()
+    for path in sorted(directory.rglob("*")):
+        if path.is_file():
+            digest.update(path.relative_to(directory).as_posix().encode() + b"\0")
+            digest.update(hashlib.sha256(path.read_bytes()).digest())
+    return digest.hexdigest()
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--allow-dirty", action="store_true")
@@ -63,7 +72,8 @@ def main():
     subprocess.run(command, cwd=ROOT, env=env, check=True)
     package_name = f"wickle-{core['version']}"
     archive = Path(workspace["target_directory"]) / "package" / f"{package_name}.crate"
-    print(f"Package SHA-256: {hashlib.sha256(archive.read_bytes()).hexdigest()}", flush=True)
+    core_archive_digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+    print(f"Package SHA-256: {core_archive_digest}", flush=True)
 
     with tempfile.TemporaryDirectory(prefix="wickle-consumer-") as temporary:
         base = Path(temporary).resolve()
@@ -85,6 +95,7 @@ def main():
             shutil.copyfile(manifest, destination / "Cargo.toml")
             shutil.copytree(manifest.parent / "src", destination / "src")
         package_paths = {core["name"]: base / package_name}
+        core_source_digest = source_digest(package_paths["wickle"])
         for package in libraries[1:]:
             patches = [argument for name, path in package_paths.items()
                        for argument in ["--config", f'patch.crates-io.{name}.path={json.dumps(str(path))}']]
@@ -118,7 +129,9 @@ def main():
         shutil.copyfile(ROOT / "tests/support/consumer.rs", consumer / "src/main.rs")
         shutil.copyfile(ROOT / "tests/support/mcp_fixture.rs", consumer / "src/mcp_fixture.rs")
         shutil.copyfile(ROOT / "tests/host_contract/delivery.rs", consumer / "src/host_delivery.rs")
-        examples = sorted((ROOT / "tests/support").glob("*_consumer.rs"))
+        business_entries = {"gather_consumer.rs", "report_process_consumer.rs"}
+        examples = sorted(path for path in (ROOT / "tests/support").glob("*_consumer.rs")
+                          if path.name not in business_entries)
         if examples:
             (consumer / "src/bin").mkdir()
             for example in examples:
@@ -132,26 +145,70 @@ def main():
         shutil.copyfile(ROOT / "Cargo.lock", consumer / "Cargo.lock")
         subprocess.run(["cargo", "metadata", "--format-version", "1", "--offline"],
                        cwd=consumer, env=env, stdout=subprocess.DEVNULL, check=True)
-        resolved = metadata(consumer)
         allowed_registry = {(p["name"], p["version"], p["source"])
                             for p in workspace["packages"] if p["source"] is not None}
-        for package in resolved["packages"]:
-            if package["name"] in package_paths:
-                expected = package_paths[package["name"]] / "Cargo.toml"
-                if Path(package["manifest_path"]).resolve() != expected:
-                    raise RuntimeError(f"Consumer substituted a package: {package['name']}")
-            if package["source"] is None:
-                manifest = Path(package["manifest_path"]).resolve()
-                if not manifest.is_relative_to(base):
-                    raise RuntimeError(f"Consumer depends on an external path: {manifest}")
-            elif (package["name"], package["version"], package["source"]) not in allowed_registry:
-                raise RuntimeError(f"Consumer resolved an unpinned dependency: {package['name']} {package['version']}")
+
+        def check_resolution(directory, expected_paths):
+            for package in metadata(directory)["packages"]:
+                if package["name"] in expected_paths:
+                    expected = expected_paths[package["name"]] / "Cargo.toml"
+                    if Path(package["manifest_path"]).resolve() != expected:
+                        raise RuntimeError(f"Consumer substituted a package: {package['name']}")
+                if package["source"] is None:
+                    manifest = Path(package["manifest_path"]).resolve()
+                    if not manifest.is_relative_to(base):
+                        raise RuntimeError(f"Consumer depends on an external path: {manifest}")
+                elif (package["name"], package["version"], package["source"]) not in allowed_registry:
+                    raise RuntimeError(f"Consumer resolved an unpinned dependency: {package['name']} {package['version']}")
+
+        check_resolution(consumer, package_paths)
         subprocess.run(["cargo", "run", "--locked", "--offline", "--bin", "wickle-package-consumer"],
                        cwd=consumer, env=env, check=True)
         for example in examples:
             subprocess.run(["cargo", "run", "--locked", "--offline", "--bin", example.stem],
                            cwd=consumer, env=env, check=True)
-    print("Independent package consumers: passed (core, model catalog, SQLite store, adapter runtime, Responses codec, OpenAI, Azure, Anthropic, Bedrock, Gemini, Vertex, xAI and MCP adapters)", flush=True)
+        # Two independent application manifests consume the same immutable core
+        # archive. Their own business code and selected adapter sets differ.
+        if source_digest(package_paths["wickle"]) != core_source_digest:
+            raise RuntimeError("Package verification modified the extracted core")
+        for scenario, entry, helper, selected in [
+            ("gather", "gather_consumer.rs", "source_consumer.rs",
+             ["wickle", "wickle-model-router", "wickle-state-sqlite"]),
+            ("report", "report_process_consumer.rs", "adapter_consumer.rs",
+             ["wickle", "wickle-model-router", "wickle-state-sqlite", "wickle-adapter-runtime"]),
+        ]:
+            host = base / f"business-{scenario}"
+            (host / "src").mkdir(parents=True)
+            selected_paths = {name: package_paths[name] for name in selected}
+            dependencies = ''.join(f'{name} = {{ path = "../{path.name}" }}\n'
+                                   for name, path in selected_paths.items())
+            (host / "Cargo.toml").write_text(
+                f'[package]\nname = "wickle-{scenario}-host"\nversion = "0.0.0"\n'
+                'edition = "2024"\npublish = false\n[workspace]\n[dependencies]\n'
+                + dependencies
+                + f'serde_json = "{versions["serde_json"]}"\n'
+                + f'futures-util = {{ version = "{versions["futures-util"]}", default-features = false, features = ["std", "async-await"] }}\n'
+                + f'tokio = {{ version = "{versions["tokio"]}", features = ["rt", "macros", "net", "io-util", "fs"] }}\n'
+                + '[patch.crates-io]\n' + dependencies,
+                encoding="utf-8",
+            )
+            shutil.copyfile(ROOT / "tests/support" / entry, host / "src/main.rs")
+            shutil.copyfile(ROOT / "tests/support" / helper, host / "src" / helper)
+            shutil.copyfile(ROOT / "Cargo.lock", host / "Cargo.lock")
+            if source_digest(package_paths["wickle"]) != core_source_digest:
+                raise RuntimeError("Business setup modified the extracted core")
+            subprocess.run(["cargo", "metadata", "--format-version", "1", "--offline"],
+                           cwd=host, env=env, stdout=subprocess.DEVNULL, check=True)
+            check_resolution(host, selected_paths)
+            subprocess.run(["cargo", "run", "--locked", "--offline"], cwd=host, env=env, check=True)
+            if (source_digest(package_paths["wickle"]) != core_source_digest
+                    or hashlib.sha256(archive.read_bytes()).hexdigest() != core_archive_digest):
+                raise RuntimeError("Business execution modified the core package")
+            print(json.dumps({"business_consumer": scenario,
+                              "core_archive_sha256": core_archive_digest,
+                              "core_source_sha256": core_source_digest,
+                              "independent_workspace": True}), flush=True)
+    print("Independent package and business consumers: passed (13 libraries; two separate business workspaces using identical core sources)", flush=True)
 
 
 if __name__ == "__main__":

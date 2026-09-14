@@ -29,3 +29,5 @@ Die Anleitung für [MCP-Werkzeuge](docs/mcp.md) beschreibt die Verbindung geprü
 Die Anleitung für [Ereigniskonsumenten](docs/event-consumers.md) beschreibt die Übermittlung von Ausführungsdaten an Speicher- und Graphdienste durch den Host.
 
 Die [Versionsmatrix](docs/model-support.md) unterscheidet lokale Vertragstests von Prüfungen mit realen Diensten.
+
+Die [Validierung unabhängiger Hosts](docs/integration-validation.md) prüft Paketgrenzen, Adapterwechsel und Wiederaufnahme über Prozessgrenzen hinweg.

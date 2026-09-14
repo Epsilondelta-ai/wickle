@@ -29,3 +29,5 @@ Agent Profile でエージェントの振る舞いを設定し、アダプター
 [イベントコンシューマー](docs/event-consumers.md)では、Host が実行記録をメモリやグラフサービスに渡す方法を説明します。
 
 [モデルバージョン別の検証表](docs/model-support.md)で、ローカル契約テストと実接続の結果を区別しています。
+
+[独立 Host の統合検証](docs/integration-validation.md)では、パッケージの分離、アダプター交換、プロセスをまたぐ再開を確認します。

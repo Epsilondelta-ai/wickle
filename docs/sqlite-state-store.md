@@ -25,6 +25,14 @@ successful only after SQLite commits. Failed candidate validation rolls back the
 transaction, including associated records and events. Reads use a consistent
 transaction snapshot.
 
+Each store and its clones can retain one validated checkpoint whose serialized
+JSON is at most 32 MiB; the decoded graph also consumes memory. Every operation
+still reads the current row and checks the database identity. Reuse requires the
+exact same scope, JSON bytes and checksum. Changed data is fully validated, and
+new cached state is published only after a successful transaction commit. This
+avoids repeating whole-checkpoint validation for unchanged data while preserving
+cross-connection updates and rollback isolation.
+
 The adapter uses WAL and `synchronous=FULL`. Its bundled SQLite version includes
 the WAL-reset fix. Use a local file on the same computer as the processes sharing
 it; SQLite WAL relies on shared memory between those processes.
