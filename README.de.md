@@ -27,3 +27,5 @@ Der [Leitfaden für Modellanbieter](docs/model-providers.md) beschreibt die Anbi
 Die Anleitung für [MCP-Werkzeuge](docs/mcp.md) beschreibt die Verbindung geprüfter Werkzeuge über stdio.
 
 Die Anleitung für [Ereigniskonsumenten](docs/event-consumers.md) beschreibt die Übermittlung von Ausführungsdaten an Speicher- und Graphdienste durch den Host.
+
+Die [Versionsmatrix](docs/model-support.md) unterscheidet lokale Vertragstests von Prüfungen mit realen Diensten.

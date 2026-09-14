@@ -221,8 +221,10 @@ fn encode(
                     .as_str()
                     .filter(|s| matches!(*s, "minimal" | "low" | "medium" | "high"))
                     .ok_or_else(|| error(ErrorCode::ModelOptionUnsupported, "thinking_level"))?;
-                if model_name(request.route.model_id.as_str())? == "gemini-3.8-flash"
-                    && level == "minimal"
+                if matches!(
+                    model_name(request.route.model_id.as_str())?,
+                    "gemini-3.7-flash" | "gemini-3.8-flash"
+                ) && level == "minimal"
                 {
                     return Err(error(ErrorCode::ModelOptionUnsupported, "thinking_level"));
                 }

@@ -27,3 +27,5 @@ The [model provider guide](docs/model-providers.md) covers OpenAI, Azure OpenAI,
 See [MCP tools](docs/mcp.md) for connecting reviewed tools over stdio.
 
 See [event consumers](docs/event-consumers.md) for Host-managed delivery to memory and graph services.
+
+The [model-version evidence matrix](docs/model-support.md) distinguishes local contract checks from live smoke results.
