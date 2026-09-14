@@ -2,32 +2,91 @@
 
 **English** | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md) | [Español](README.es.md) | [Français](README.fr.md) | [Deutsch](README.de.md) | [Русский](README.ru.md)
 
-**An extensible agent engine by EpsilonDelta.**
+**An extensible Rust agent engine.**
+
+Embed agents in your application with configurable profiles, model providers and tools. Wickle runs the model/tool loop inside your process; your application supplies data access, credentials and authorization.
 
 <p align="center">
-  <img src="assets/mascot/wickle.png" alt="Wickle's hedgehog mascot running on an exercise wheel" width="420" />
+  <img src="assets/mascot/wickle.png" alt="Wickle" width="320" />
 </p>
 
-Wickle is an agent engine being developed in Rust by EpsilonDelta. It aims to provide an embeddable library that runs the loop of model decisions and tool calls.
+## Installation
 
-Its design uses Agent Profiles to configure agent behavior and adapters to connect different models and tools.
+Requires Rust 1.85 or later and a Tokio runtime. Use the same Git tag for the core and optional adapters. v0.1.0 is distributed through GitHub Releases.
 
-**Status:** In development. Agents support serial model/tool loops, separate system inputs, persisted outcomes, event replay, cancellation, and resuming saved approval, input, or external-effect waits. Resume commands are deduplicated; external effects require Host verification. Lifecycle hooks support bounded context and argument transformations plus observations after commit. Adapter Tool/Hook/ContextSource exports support pinned assemblies and scoped instances that close when each execution segment ends. [Adapter runtime](docs/adapters.md). Interrupted runs support explicit recovery with fenced ownership, preserved inputs, and external-effect reconciliation. [Recovery](docs/recovery.md). [Run an agent](docs/agents.md) · [Data contracts](docs/contracts.md).
+```toml
+[dependencies]
+wickle = { git = "https://github.com/Epsilondelta-ai/wickle", tag = "v0.1.0" }
+wickle-model-openai = { git = "https://github.com/Epsilondelta-ai/wickle", tag = "v0.1.0" }
+wickle-model-router = { git = "https://github.com/Epsilondelta-ai/wickle", tag = "v0.1.0" }
+```
 
-Read-only [context sources](docs/context-sources.md) support Run and model-step collection, saved batches, and current access checks on reuse.
+## Run an agent
 
-[Skills](docs/skills.md) load complete, versioned instructions through a registered Tool. [Artifacts](docs/artifacts.md) preserve scoped originals, bounded previews, and source evidence.
+Create an `AgentProfile` for instructions, selected tools, model binding and execution limits. Configure `AgentBindings` with your model, state store, policy and other Host components, then submit a `RunRequest` with an authenticated `ExecutionContext`.
 
-[Context rewriting](docs/context-compaction.md) preserves the original conversation while applying bounded previews and validated summaries. Model-based compression shares the Run budget.
+```rust
+use wickle::*;
 
-[Output verification](docs/verification.md) supports JSON schemas, versioned criteria, bounded repair, and approval of a fixed candidate. Model-based reviews share the Run budget.
+pub async fn run_once(
+    profile: AgentProfile,
+    bindings: AgentBindings,
+    request: RunRequest,
+    context: ExecutionContext,
+) -> Result<Guarded<RunOutcome>, ContractError> {
+    let agent = create_agent(profile, bindings)?;
+    match agent.start(request, context.clone()).await? {
+        Guarded::Completed(handle) => handle.outcome(&context).await,
+        Guarded::ApprovalRequired(challenge) => {
+            Ok(Guarded::ApprovalRequired(challenge))
+        }
+    }
+}
+```
 
-The [model provider guide](docs/model-providers.md) covers OpenAI, Azure OpenAI, Anthropic, AWS Bedrock, Gemini API, Vertex AI and xAI adapters. They use the same core contracts while retaining explicit credentials, API versions and provider-specific behavior.
+`start` returns a handle to the Run; `outcome` returns its saved result. `Guarded::ApprovalRequired` means the application must obtain approval. The example accepts components configured by your application; see the agent guide for binding setup.
 
-See [MCP tools](docs/mcp.md) for connecting reviewed tools over stdio.
+## Features
 
-See [event consumers](docs/event-consumers.md) for Host-managed delivery to memory and graph services.
+- **Tool input ownership:** expose only model-owned arguments; inject workspace IDs, user IDs and other trusted values through registered system inputs.
+- **Persistent execution:** store outcomes and events, wait for approvals or input, and explicitly resume or recover interrupted Runs.
+- **Extensibility:** connect tools, read-only context sources, Skills, lifecycle hooks and MCP stdio tools.
+- **Bounded execution:** limit model calls, tool attempts, repairs and elapsed time; use shared budgets for compression and verification.
+- **Scoped access:** separate organizations and workspaces through Host policy and scoped bindings.
+- **Context and output:** preserve artifacts and evidence, compact context, and validate structured outputs or verifier criteria.
 
-The [model-version evidence matrix](docs/model-support.md) distinguishes local contract checks from live smoke results.
+## Model providers and adapters
 
-See [independent Host validation](docs/integration-validation.md) for package isolation, adapter replacement and recovery across processes.
+Optional crates connect the core to the following services. Model versions, deployment names, API contracts and provider options remain explicit. Consult the provider guide for supported operations and model-specific limitations.
+
+| Provider | Crate |
+| --- | --- |
+| OpenAI GPT | `wickle-model-openai` |
+| Azure OpenAI / Microsoft Foundry | `wickle-model-azure-openai` |
+| Anthropic Claude | `wickle-model-anthropic` |
+| AWS Bedrock Claude | `wickle-model-bedrock` |
+| Google Gemini API / AI Studio | `wickle-model-gemini` |
+| Google Vertex AI Gemini | `wickle-model-vertex` |
+| xAI Grok | `wickle-model-xai` |
+
+Use `wickle-state-sqlite` for local persistence and `wickle-adapter-runtime` to assemble scoped extensions. Memory and graph services can implement `ContextSource` or tools; post-run writes belong to an external event consumer.
+
+## Documentation
+
+- [Install and configure dependencies](docs/installation.md)
+- [Agent bindings, requests and results](docs/agents.md)
+- [Tools and system inputs](docs/tool-inputs.md)
+- [Context sources and memory](docs/context-sources.md)
+- [Skills](docs/skills.md)
+- [Hooks](docs/hooks.md)
+- [Model routing](docs/model-routing.md)
+- [Provider configuration and support](docs/model-providers.md)
+- [SQLite persistence and recovery](docs/sqlite-state-store.md)
+- [MCP tools](docs/mcp.md)
+- [Artifacts](docs/artifacts.md)
+- [Context compaction](docs/context-compaction.md)
+- [Output verification](docs/verification.md)
+
+## License
+
+[MIT](LICENSE) · MIT © EpsilonDelta. The 0.1 series is an initial API and may change.

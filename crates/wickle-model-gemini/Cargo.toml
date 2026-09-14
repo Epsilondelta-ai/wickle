@@ -1,12 +1,13 @@
 [package]
 name = "wickle-model-gemini"
 version.workspace = true
+license.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 repository.workspace = true
 description = "Google Gemini generateContent model and metadata adapters for Wickle"
 publish = false
-include = ["Cargo.toml", "src/**"]
+include = ["Cargo.toml", "LICENSE", "src/**"]
 
 [dependencies]
 wickle-model-responses = { path = "../wickle-model-responses", version = "=0.1.0" }

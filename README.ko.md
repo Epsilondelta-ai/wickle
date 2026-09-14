@@ -2,32 +2,91 @@
 
 [English](README.md) | **한국어** | [日本語](README.ja.md) | [简体中文](README.zh-CN.md) | [Español](README.es.md) | [Français](README.fr.md) | [Deutsch](README.de.md) | [Русский](README.ru.md)
 
-**엡실론델타가 만드는 확장 가능한 에이전트 엔진.**
+**Rust 애플리케이션에 내장하는 확장형 에이전트 엔진.**
+
+프로필, 모델, 도구를 조합해 애플리케이션 안에서 에이전트를 실행합니다. Wickle은 같은 프로세스에서 모델 판단과 도구 호출을 반복하며, 데이터 접근·인증 정보·권한 정책은 애플리케이션이 제공합니다.
 
 <p align="center">
-  <img src="assets/mascot/wickle.png" alt="쳇바퀴를 달리는 귀여운 고슴도치, Wickle 마스코트" width="420" />
+  <img src="assets/mascot/wickle.png" alt="Wickle" width="320" />
 </p>
 
-Wickle은 엡실론델타가 Rust로 개발하는 에이전트 엔진입니다. 모델의 판단과 도구 호출을 반복하는 실행 루프를 애플리케이션에서 사용하는 라이브러리로 제공하는 것을 목표로 합니다.
+## 설치
 
-Agent Profile로 에이전트의 동작을 구성하고, 어댑터를 통해 다양한 모델과 도구를 연결하는 구조로 설계하고 있습니다.
+Rust 1.85 이상과 Tokio 런타임이 필요합니다. 코어와 선택한 어댑터는 같은 Git 태그로 설치합니다. v0.1.0은 GitHub Release로 배포합니다.
 
-**개발 상태:** 모델·도구의 순차 호출, 시스템 입력 분리, 결과 저장, 이벤트 재조회, 취소와 승인·입력·외부 효과 확인 대기의 재개를 지원합니다. 같은 재개 명령은 중복 소비하지 않으며, 외부 효과는 Host의 검증을 거쳐 확정합니다. Lifecycle Hook으로 제한된 문맥·인자 변환과 저장 완료 후 관찰을 지원합니다. 어댑터의 Tool·Hook·ContextSource export를 고정된 조립 정보와 구간별 인스턴스로 연결하며, 실행 구간이 끝나면 자원을 해제합니다. [어댑터 런타임](docs/adapters.md). 실행 소유권과 저장된 입력을 확인하고 외부 효과를 조회하여 중단된 실행을 복구할 수 있습니다. [실행 복구](docs/recovery.md). [에이전트 실행](docs/agents.md) · [데이터 계약](docs/contracts.md).
+```toml
+[dependencies]
+wickle = { git = "https://github.com/Epsilondelta-ai/wickle", tag = "v0.1.0" }
+wickle-model-openai = { git = "https://github.com/Epsilondelta-ai/wickle", tag = "v0.1.0" }
+wickle-model-router = { git = "https://github.com/Epsilondelta-ai/wickle", tag = "v0.1.0" }
+```
 
-읽기 전용 [ContextSource](docs/context-sources.md)는 Run·모델 단계별 조회, 자료 묶음 저장, 재사용 시 현재 접근 권한 검사를 지원합니다.
+## 에이전트 실행
 
-[Skills](docs/skills.md)는 등록된 도구를 통해 고정 버전의 지침 전체를 로드합니다. [Artifacts](docs/artifacts.md)는 scope가 적용된 원문, 제한된 preview와 원천 근거를 보존합니다.
+`AgentProfile`에 지시문, 사용할 도구, 모델 바인딩, 실행 한도를 지정합니다. 모델·상태 저장소·권한 정책 등 애플리케이션 구성요소로 `AgentBindings`를 만든 뒤, 인증된 `ExecutionContext`와 함께 `RunRequest`를 전달합니다.
 
-[문맥 선택·압축](docs/context-compaction.md)은 원본 대화를 보존하면서 제한된 preview와 검증된 요약을 적용합니다. 모델 기반 압축도 같은 Run 예산을 사용합니다.
+```rust
+use wickle::*;
 
-[출력 검증](docs/verification.md)은 JSON 스키마, 버전이 고정된 검증 기준, 한도 내 보완과 고정된 후보의 승인을 지원합니다. 모델 기반 검증도 같은 Run 예산을 사용합니다.
+pub async fn run_once(
+    profile: AgentProfile,
+    bindings: AgentBindings,
+    request: RunRequest,
+    context: ExecutionContext,
+) -> Result<Guarded<RunOutcome>, ContractError> {
+    let agent = create_agent(profile, bindings)?;
+    match agent.start(request, context.clone()).await? {
+        Guarded::Completed(handle) => handle.outcome(&context).await,
+        Guarded::ApprovalRequired(challenge) => {
+            Ok(Guarded::ApprovalRequired(challenge))
+        }
+    }
+}
+```
 
-[모델 제공자 가이드](docs/model-providers.md)에서 OpenAI, Azure OpenAI, Anthropic, AWS Bedrock, Gemini API, Vertex AI, xAI 어댑터와 공통 연결 방법을 확인할 수 있습니다. 각 제공자의 인증, API 버전과 동작 차이는 별도로 처리합니다.
+`start`는 실행 핸들을 반환하고, `outcome`은 저장된 결과를 반환합니다. `Guarded::ApprovalRequired`이면 애플리케이션에서 승인을 받아야 합니다. 아래 예제의 구성요소는 호출하는 애플리케이션에서 준비하며, 바인딩 설정은 에이전트 실행 가이드를 참고하세요.
 
-[MCP 도구 연결](docs/mcp.md)은 검토한 도구를 stdio로 연결하는 방법을 설명합니다.
+## 주요 기능
 
-[이벤트 소비자](docs/event-consumers.md) 가이드는 Host가 실행 기록을 기억·그래프 서비스에 전달하는 방법을 설명합니다.
+- **도구 입력 분리:** 모델이 작성할 인자만 노출하고, workspace ID·user ID 등 신뢰할 값은 등록된 시스템 입력으로 주입합니다.
+- **실행 상태 저장:** 결과와 이벤트를 저장하고 승인·입력 대기, 명시적 재개, 중단된 실행 복구를 지원합니다.
+- **확장 기능:** 도구, 읽기 전용 ContextSource, Skills, lifecycle hook, MCP stdio 도구를 연결합니다.
+- **실행 한도:** 모델 호출·도구 시도·보완·경과 시간을 제한하며 압축과 검증에도 같은 실행 예산을 적용합니다.
+- **범위별 접근 제어:** Host 정책과 바인딩으로 조직·워크스페이스의 접근 범위를 구분합니다.
+- **문맥과 결과 처리:** 원본 artifact와 근거를 유지하고 문맥 압축, 구조화 출력 검사, verifier 기반 검증을 수행합니다.
 
-[모델 버전별 검증 행렬](docs/model-support.md)에서 로컬 계약 검증과 실제 연결 결과를 구분해 확인할 수 있습니다.
+## 모델 제공자와 어댑터
 
-[독립 Host 통합 검증](docs/integration-validation.md)에서 패키지 분리, 어댑터 교체, 프로세스 재개 검사를 확인할 수 있습니다.
+다음 서비스를 선택형 crate로 연결할 수 있습니다. 모델 버전, 배포 이름, API 계약, 제공자별 옵션을 명시적으로 설정합니다. 지원 작업과 모델별 제약은 제공자 가이드를 확인하세요.
+
+| Provider | Crate |
+| --- | --- |
+| OpenAI GPT | `wickle-model-openai` |
+| Azure OpenAI / Microsoft Foundry | `wickle-model-azure-openai` |
+| Anthropic Claude | `wickle-model-anthropic` |
+| AWS Bedrock Claude | `wickle-model-bedrock` |
+| Google Gemini API / AI Studio | `wickle-model-gemini` |
+| Google Vertex AI Gemini | `wickle-model-vertex` |
+| xAI Grok | `wickle-model-xai` |
+
+로컬 영속 저장에는 `wickle-state-sqlite`, 범위별 확장 구성에는 `wickle-adapter-runtime`을 사용합니다. 메모리·그래프 서비스는 ContextSource나 도구로 연결하며, 실행 후 기록 갱신은 외부 이벤트 소비자가 담당합니다.
+
+## 사용 문서
+
+- [설치와 의존성 구성](docs/installation.md)
+- [에이전트 바인딩·요청·결과](docs/agents.md)
+- [도구와 시스템 입력](docs/tool-inputs.md)
+- [문맥 조회와 메모리](docs/context-sources.md)
+- [Skills](docs/skills.md)
+- [Hooks](docs/hooks.md)
+- [모델 라우팅](docs/model-routing.md)
+- [모델 제공자 설정과 지원 범위](docs/model-providers.md)
+- [SQLite 저장과 복구](docs/sqlite-state-store.md)
+- [MCP 도구](docs/mcp.md)
+- [Artifacts](docs/artifacts.md)
+- [문맥 압축](docs/context-compaction.md)
+- [출력 검증](docs/verification.md)
+
+## 라이선스
+
+[MIT](LICENSE) · MIT © EpsilonDelta. 0.1 계열은 초기 API로, 이후 버전에서 변경될 수 있습니다.

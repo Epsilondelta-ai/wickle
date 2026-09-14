@@ -2,32 +2,91 @@
 
 [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md) | [Español](README.es.md) | [Français](README.fr.md) | **Deutsch** | [Русский](README.ru.md)
 
-**Eine erweiterbare Agenten-Engine von EpsilonDelta.**
+**Eine erweiterbare Agenten-Engine für Rust.**
+
+Bette Agenten mit konfigurierbaren Profilen, Modellen und Werkzeugen in deine Anwendung ein. Wickle führt Modellentscheidungen und Werkzeugaufrufe im selben Prozess aus. Datenzugriff, Zugangsdaten und Berechtigungen stellt die Anwendung bereit.
 
 <p align="center">
-  <img src="assets/mascot/wickle.png" alt="Das Wickle-Maskottchen, ein Igel, der in einem Laufrad läuft" width="420" />
+  <img src="assets/mascot/wickle.png" alt="Wickle" width="320" />
 </p>
 
-Wickle ist eine Agenten-Engine, die EpsilonDelta in Rust entwickelt. Ziel ist eine in Anwendungen einbettbare Bibliothek, die den Zyklus aus Modellentscheidungen und Werkzeugaufrufen ausführt.
+## Installation
 
-Der Entwurf verwendet Agentenprofile (Agent Profiles) zur Konfiguration des Agentenverhaltens und Adapter zur Anbindung verschiedener Modelle und Werkzeuge.
+Benötigt Rust 1.85 oder neuer und Tokio. Verwende denselben Git-Tag für den Kern und die Adapter. v0.1.0 wird über GitHub Releases verteilt.
 
-**Status:** In Entwicklung. Agenten unterstützen sequenzielle Modell- und Werkzeugaufrufe, getrennte Systemeingaben, gespeicherte Ergebnisse, Ereigniswiedergabe, Abbruch und die Fortsetzung gespeicherter Wartezustände für Genehmigungen, Eingaben oder externe Wirkungen. Fortsetzungsbefehle werden dedupliziert; externe Wirkungen müssen vom Host geprüft werden. Lifecycle-Hooks unterstützen begrenzte Kontext- und Argumenttransformationen sowie die Beobachtung gespeicherter Ergebnisse. Tool-/Hook-/ContextSource-Exporte von Adaptern verwenden festgelegte Konfigurationen und segmentgebundene Instanzen, deren Ressourcen am Segmentende freigegeben werden. [Adapter-Laufzeit](docs/adapters.md). Unterbrochene Läufe können mit geprüfter Ausführungsberechtigung, gespeicherten Eingaben und Abgleich externer Wirkungen wiederhergestellt werden. [Wiederherstellung](docs/recovery.md). [Agenten ausführen](docs/agents.md) · [Datenverträge](docs/contracts.md).
+```toml
+[dependencies]
+wickle = { git = "https://github.com/Epsilondelta-ai/wickle", tag = "v0.1.0" }
+wickle-model-openai = { git = "https://github.com/Epsilondelta-ai/wickle", tag = "v0.1.0" }
+wickle-model-router = { git = "https://github.com/Epsilondelta-ai/wickle", tag = "v0.1.0" }
+```
 
-Schreibgeschützte [Kontextquellen](docs/context-sources.md) unterstützen Abrufe pro Run oder Modellschritt, gespeicherte Datenpakete und die Prüfung aktueller Zugriffsrechte bei erneuter Nutzung.
+## Einen Agenten ausführen
 
-[Skills](docs/skills.md) lädt vollständige Anweisungen einer festgelegten Version über registrierte Tools. [Artifacts](docs/artifacts.md) bewahrt Originale innerhalb ihres Geltungsbereichs, begrenzte Vorschauen und Quellenbelege auf.
+Lege Anweisungen, Werkzeuge, Modellbindung und Grenzen im `AgentProfile` fest. Konfiguriere `AgentBindings` mit Modell, Zustandsspeicher und Richtlinien und übergib einen `RunRequest` mit authentifiziertem `ExecutionContext`.
 
-Die [Kontextauswahl und -komprimierung](docs/context-compaction.md) bewahrt den ursprünglichen Gesprächsverlauf und verwendet begrenzte Vorschauen sowie geprüfte Zusammenfassungen. Modellbasierte Komprimierung nutzt dasselbe Run-Budget.
+```rust
+use wickle::*;
 
-Die [Ausgabeprüfung](docs/verification.md) unterstützt JSON-Schemas, versionierte Kriterien, begrenzte Überarbeitungen und die Genehmigung eines festgelegten Kandidaten. Modellbasierte Prüfungen nutzen dasselbe Run-Budget.
+pub async fn run_once(
+    profile: AgentProfile,
+    bindings: AgentBindings,
+    request: RunRequest,
+    context: ExecutionContext,
+) -> Result<Guarded<RunOutcome>, ContractError> {
+    let agent = create_agent(profile, bindings)?;
+    match agent.start(request, context.clone()).await? {
+        Guarded::Completed(handle) => handle.outcome(&context).await,
+        Guarded::ApprovalRequired(challenge) => {
+            Ok(Guarded::ApprovalRequired(challenge))
+        }
+    }
+}
+```
 
-Der [Leitfaden für Modellanbieter](docs/model-providers.md) beschreibt die Anbindung von OpenAI, Azure OpenAI, Anthropic, AWS Bedrock, Gemini API, Vertex AI und xAI. Die Adapter nutzen gemeinsame Kernverträge und behalten eigene Zugangsdaten, API-Versionen und Verhaltensweisen.
+`start` liefert ein Ausführungshandle, `outcome` das gespeicherte Ergebnis. `Guarded::ApprovalRequired` erfordert eine Freigabe durch die Anwendung. Das Beispiel nimmt bereits konfigurierte Komponenten entgegen; deren Einrichtung erklärt die Agentenanleitung.
 
-Die Anleitung für [MCP-Werkzeuge](docs/mcp.md) beschreibt die Verbindung geprüfter Werkzeuge über stdio.
+## Funktionen
 
-Die Anleitung für [Ereigniskonsumenten](docs/event-consumers.md) beschreibt die Übermittlung von Ausführungsdaten an Speicher- und Graphdienste durch den Host.
+- **Getrennte Eingaben:** Das Modell liefert seine Argumente; vertrauenswürdige IDs werden aus Systemeingaben ergänzt.
+- **Persistenz:** Ergebnisse, Ereignisse, Freigabe- und Eingabewartezustände sowie explizite Wiederaufnahme und Wiederherstellung.
+- **Erweiterungen:** Werkzeuge, ContextSource, Skills, Hooks und MCP stdio.
+- **Ausführungsgrenzen:** Modellaufrufe, Werkzeugversuche, Korrekturen und Laufzeit.
+- **Zugriffskontrolle:** Host-Richtlinien und getrennte Organisations- und Arbeitsbereichsgrenzen.
+- **Kontext und Ausgabe:** Artefakte, Belege, Kontextkomprimierung und Ergebnisvalidierung.
 
-Die [Versionsmatrix](docs/model-support.md) unterscheidet lokale Vertragstests von Prüfungen mit realen Diensten.
+## Modellanbieter und Adapter
 
-Die [Validierung unabhängiger Hosts](docs/integration-validation.md) prüft Paketgrenzen, Adapterwechsel und Wiederaufnahme über Prozessgrenzen hinweg.
+Diese Dienste lassen sich über optionale Crates anbinden. Modellversionen, Deployments, API-Verträge und Optionen werden explizit konfiguriert. Die Anleitungen beschreiben unterstützte Operationen und Einschränkungen.
+
+| Provider | Crate |
+| --- | --- |
+| OpenAI GPT | `wickle-model-openai` |
+| Azure OpenAI / Microsoft Foundry | `wickle-model-azure-openai` |
+| Anthropic Claude | `wickle-model-anthropic` |
+| AWS Bedrock Claude | `wickle-model-bedrock` |
+| Google Gemini API / AI Studio | `wickle-model-gemini` |
+| Google Vertex AI Gemini | `wickle-model-vertex` |
+| xAI Grok | `wickle-model-xai` |
+
+Verwende `wickle-state-sqlite` für lokale Persistenz und `wickle-adapter-runtime` zum Zusammenstellen von Erweiterungen. Speicher- und Graphdienste können ContextSource oder Werkzeuge implementieren; nachgelagerte Schreibvorgänge übernimmt ein externer Ereigniskonsument.
+
+## Dokumentation
+
+- [Installation](docs/installation.md)
+- [Agenten, Anfragen und Ergebnisse](docs/agents.md)
+- [Werkzeuge und Systemeingaben](docs/tool-inputs.md)
+- [Kontext und Speicher](docs/context-sources.md)
+- [Skills](docs/skills.md)
+- [Hooks](docs/hooks.md)
+- [Modellrouting](docs/model-routing.md)
+- [Anbieterkonfiguration und Unterstützung](docs/model-providers.md)
+- [SQLite und Wiederherstellung](docs/sqlite-state-store.md)
+- [MCP](docs/mcp.md)
+- [Artefakte](docs/artifacts.md)
+- [Kontextkomprimierung](docs/context-compaction.md)
+- [Ausgabevalidierung](docs/verification.md)
+
+## Lizenz
+
+[MIT](LICENSE) · MIT © EpsilonDelta. Die 0.1-Reihe ist eine erste API und kann sich ändern.
