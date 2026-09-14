@@ -989,3 +989,102 @@ async fn an_open_handle_does_not_silently_replace_a_deleted_or_different_databas
 fn process_worker() {
     workers::run();
 }
+
+#[tokio::test]
+async fn warmed_checkpoints_observe_external_updates_and_revalidate_changed_bytes() {
+    let database = Database::new();
+    let store = SqliteStateStore::open(database.path()).unwrap();
+    let initial = store
+        .admit(
+            &scope(),
+            durable_admission("run", "request", "session").await,
+        )
+        .await
+        .unwrap()
+        .state;
+    let cloned = store.clone();
+    assert_eq!(cloned.load(&scope(), &id("run")).await.unwrap(), initial);
+    let other = SqliteStateStore::open(database.path()).unwrap();
+    other
+        .admit(
+            &scope(),
+            durable_admission("other", "request-2", "session-2").await,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .find_request(&scope(), &id("session-2"), &id("request-2"))
+            .await
+            .unwrap()
+            .unwrap()
+            .snapshot
+            .run_id,
+        id("other")
+    );
+    let connection = Connection::open(database.path()).unwrap();
+    let (original, checksum): (String, String) = connection
+        .query_row(
+            "SELECT checkpoint_json,checksum FROM wickle_scope_checkpoints",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    let mut corrupted: Value = serde_json::from_str(&original).unwrap();
+    corrupted["schema_version"] = json!("unknown-checkpoint-format");
+    // Even a correctly recomputed outer digest cannot skip full validation.
+    connection
+        .execute(
+            "UPDATE wickle_scope_checkpoints SET checkpoint_json=?1,checksum=?2",
+            rusqlite::params![corrupted.to_string(), canonical_digest(&corrupted).as_str()],
+        )
+        .unwrap();
+    assert!(store.load(&scope(), &id("run")).await.is_err());
+    assert!(cloned.load(&scope(), &id("run")).await.is_err());
+    connection
+        .execute(
+            "UPDATE wickle_scope_checkpoints SET checkpoint_json=?1,checksum=?2",
+            rusqlite::params![original, checksum],
+        )
+        .unwrap();
+    assert_eq!(store.load(&scope(), &id("run")).await.unwrap(), initial);
+    let mut foreign = scope();
+    foreign.workspace_id = id("foreign");
+    assert!(store.load(&foreign, &id("run")).await.is_err());
+}
+
+#[tokio::test]
+async fn a_failed_sql_write_never_publishes_mutated_cached_lease_state() {
+    let database = Database::new();
+    let store = SqliteStateStore::open(database.path()).unwrap();
+    let initial = store
+        .admit(
+            &scope(),
+            durable_admission("run", "request", "session").await,
+        )
+        .await
+        .unwrap()
+        .state;
+    assert_eq!(store.load(&scope(), &id("run")).await.unwrap(), initial);
+    let connection = Connection::open(database.path()).unwrap();
+    connection.execute_batch("CREATE TRIGGER reject_write BEFORE UPDATE ON wickle_scope_checkpoints BEGIN SELECT RAISE(ABORT,'injected commit failure'); END;").unwrap();
+    assert!(
+        store
+            .acquire_lease(&scope(), &id("run"), &id("failed-owner"), 0, 10_000)
+            .await
+            .is_err()
+    );
+    connection
+        .execute_batch("DROP TRIGGER reject_write;")
+        .unwrap();
+    // An uncommitted lease must not survive under the previous row's cache key.
+    let lease = store
+        .acquire_lease(&scope(), &id("run"), &id("next-owner"), 1, 10_000)
+        .await
+        .unwrap();
+    store
+        .check_lease(&scope(), &id("run"), &lease, 2)
+        .await
+        .unwrap();
+    assert_eq!(store.load(&scope(), &id("run")).await.unwrap(), initial);
+}

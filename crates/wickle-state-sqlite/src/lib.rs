@@ -12,6 +12,7 @@ use std::{
     fmt,
     fs::OpenOptions,
     path::{Path, PathBuf},
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 use tokio::runtime::Handle;
@@ -27,6 +28,7 @@ const SCHEMA_VERSION: i64 = 1;
 const DEFAULT_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_BUSY_TIMEOUT: Duration = Duration::from_secs(30);
 const MIN_SQLITE_VERSION: i32 = 3_053_002;
+const MAX_CACHED_CHECKPOINT_BYTES: usize = 32 * 1024 * 1024;
 const METADATA_SCHEMA: &str = "CREATE TABLE wickle_metadata (
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
     schema_version INTEGER NOT NULL,
@@ -42,7 +44,10 @@ const CHECKPOINT_SCHEMA: &str = "CREATE TABLE wickle_scope_checkpoints (
 ///
 /// Every connection uses WAL and synchronous=FULL. Writes serialize through
 /// BEGIN IMMEDIATE, then reuse the core's admission, revision and fencing checks.
-/// Reads use a consistent deferred transaction. A successful write is returned
+/// Reads use a consistent deferred transaction. Clones share a single validated
+/// checkpoint cache, used only when current scope, JSON bytes and checksum match.
+/// Checkpoints above 32 MiB of serialized JSON are not cached; decoded graph
+/// memory is additional to those bytes. A successful write is returned
 /// only after SQLite commits. The Host must provide a filesystem suitable for
 /// SQLite WAL and retain the database file and its related WAL state.
 /// Lease operations advance the supplied logical time by monotonic time spent
@@ -56,6 +61,15 @@ pub struct SqliteStateStore {
     path: PathBuf,
     busy_timeout: Duration,
     store_id: String,
+    validated: Arc<Mutex<Option<Arc<ValidatedCheckpoint>>>>,
+}
+
+// Immutable core-validated data only. Never cache mutable transaction state.
+struct ValidatedCheckpoint {
+    scope: Scope,
+    json: String,
+    checksum: String,
+    checkpoint: StateStoreCheckpoint,
 }
 
 impl fmt::Debug for SqliteStateStore {
@@ -136,6 +150,7 @@ impl SqliteStateStore {
             path,
             busy_timeout,
             store_id,
+            validated: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -199,12 +214,29 @@ impl SqliteStateStore {
             )
             .optional()
             .map_err(storage_error)?;
+        let mut cache_update = None;
         let state = match row {
             None => MemoryStateStore::new(),
             Some((json, checksum)) => {
-                let digest = JsonDigest::try_from(checksum)
-                    .map_err(|_| error(ErrorCode::InvalidSnapshot, "sqlite.checksum"))?;
-                let checkpoint = StateStoreCheckpoint::from_json(&json, scope, &digest)?;
+                let cached = self.validated.lock().ok().and_then(|entry| entry.clone());
+                let checkpoint = if let Some(cached) = cached.filter(|entry| {
+                    entry.scope == *scope && entry.json == json && entry.checksum == checksum
+                }) {
+                    cached.checkpoint.clone()
+                } else {
+                    let digest = JsonDigest::try_from(checksum.clone())
+                        .map_err(|_| error(ErrorCode::InvalidSnapshot, "sqlite.checksum"))?;
+                    let checkpoint = StateStoreCheckpoint::from_json(&json, scope, &digest)?;
+                    if json.len() <= MAX_CACHED_CHECKPOINT_BYTES {
+                        cache_update = Some(ValidatedCheckpoint {
+                            scope: scope.clone(),
+                            json,
+                            checksum,
+                            checkpoint: checkpoint.clone(),
+                        });
+                    }
+                    checkpoint
+                };
                 MemoryStateStore::from_checkpoint(checkpoint)
             }
         };
@@ -218,8 +250,22 @@ impl SqliteStateStore {
                  ON CONFLICT(scope_key) DO UPDATE SET checkpoint_json=excluded.checkpoint_json,checksum=excluded.checksum",
                 params![key,json,digest.as_str()],
             ).map_err(storage_error)?;
+            cache_update =
+                (json.len() <= MAX_CACHED_CHECKPOINT_BYTES).then(|| ValidatedCheckpoint {
+                    scope: scope.clone(),
+                    json,
+                    checksum: digest.as_str().to_owned(),
+                    checkpoint,
+                });
         }
         transaction.commit().map_err(storage_error)?;
+        // Publish only after commit. A failed operation/commit cannot put mutated
+        // state under the previous database bytes, including after an ACK loss.
+        if let Some(checkpoint) = cache_update {
+            if let Ok(mut entry) = self.validated.lock() {
+                *entry = Some(Arc::new(checkpoint));
+            }
+        }
         Ok(result)
     }
 }

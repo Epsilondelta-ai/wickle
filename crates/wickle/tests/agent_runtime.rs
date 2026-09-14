@@ -977,3 +977,111 @@ async fn exhausting_a_retry_budget_preserves_the_partial_response_already_saved_
     assert_eq!(saved.outcome, Some(outcome));
     assert!(saved.model_ledger[0].response_ref.is_some());
 }
+
+#[tokio::test]
+async fn another_session_finishes_while_the_first_run_waits_on_model_io() {
+    use std::sync::{Arc, atomic::AtomicUsize};
+    use std::time::Duration;
+    struct Lanes {
+        slow: Arc<support::Model>,
+        fast: Arc<support::Model>,
+        calls: AtomicUsize,
+    }
+    impl ModelPort for Lanes {
+        fn binding(&self) -> ModelPortBinding {
+            self.slow.binding()
+        }
+        fn generate<'a>(
+            &'a self,
+            request: &'a ModelRequest,
+            context: &'a ModelCallContext,
+        ) -> PortStream<'a, ModelEvent> {
+            if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                self.slow.generate(request, context)
+            } else {
+                self.fast.generate(request, context)
+            }
+        }
+    }
+    let fixture = Fixture::new(Response::Text, false);
+    let lanes = Arc::new(Lanes {
+        slow: Arc::new(support::Model::new(Response::Text, true)),
+        fast: Arc::new(support::Model::new(Response::Text, false)),
+        calls: AtomicUsize::new(0),
+    });
+    let mut bindings = fixture.bindings();
+    bindings.model_exchange = Arc::new(
+        ModelExchange::new(lanes.clone(), bindings.policy.clone())
+            .with_route_inspector(fixture.inspector.clone(), Duration::from_secs(1))
+            .unwrap(),
+    );
+    let agent = create_agent(profile(), bindings).unwrap();
+    let baseline = tokio::runtime::Handle::current()
+        .metrics()
+        .num_alive_tasks();
+    let mut slow_request = request("slow");
+    slow_request.session_id = id("slow-session");
+    let slow = completed(agent.start(slow_request, context()).await.unwrap());
+    tokio::time::timeout(Duration::from_secs(2), lanes.slow.entered.notified())
+        .await
+        .unwrap();
+    assert_eq!(lanes.slow.release.available_permits(), 0);
+    let mut fast_request = request("fast");
+    fast_request.session_id = id("fast-session");
+    let fast = completed(agent.start(fast_request, context()).await.unwrap());
+    let result = tokio::time::timeout(Duration::from_secs(2), fast.outcome(&context()))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(completed(result).result.status(), RunStatus::Succeeded);
+    assert_eq!(
+        fixture
+            .store
+            .load(&scope(), slow.run_id())
+            .await
+            .unwrap()
+            .snapshot
+            .status,
+        RunStatus::Running
+    );
+    assert_eq!(lanes.slow.release.available_permits(), 0);
+    lanes.slow.release.add_permits(1);
+    let result = tokio::time::timeout(Duration::from_secs(2), slow.outcome(&context()))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(completed(result).result.status(), RunStatus::Succeeded);
+    assert_eq!(lanes.calls.load(Ordering::SeqCst), 2);
+    assert!(
+        fixture
+            .store
+            .load_session(&scope(), &id("slow-session"))
+            .await
+            .unwrap()
+            .active_run_id
+            .is_none()
+    );
+    assert!(
+        fixture
+            .store
+            .load_session(&scope(), &id("fast-session"))
+            .await
+            .unwrap()
+            .active_run_id
+            .is_none()
+    );
+    drop(slow);
+    drop(fast);
+    drop(agent);
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while tokio::runtime::Handle::current()
+            .metrics()
+            .num_alive_tasks()
+            > baseline
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+}
