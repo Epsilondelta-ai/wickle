@@ -182,6 +182,9 @@ mod host {
             policy.clone(),
             clock.clone(),
         ));
+        // The Run budget includes both process lifetimes and the approval gap.
+        // Each child has a separate 30-second wall watchdog below; this is a
+        // recovery-contract example, not a 30-second end-to-end latency test.
         let profile = AgentProfile::from_json(
             r#"{
         "schema_version":"wickle.agent-profile.v1","agent_id":"writer","version":"1",
@@ -190,7 +193,7 @@ mod host {
         "connectors":[{"binding_id":"data","connector_id":"report-service","version":"1"}],
         "adapters":[{"binding_id":"reports","adapter_id":"report-adapter","version":"1","connections":{"main":"data"}}],
         "context_policy":{"strategy":"bounded"},"output_contract":{"type":"text"},
-        "limits":{"max_model_calls":3,"max_tool_attempts":2,"max_repair_attempts":0,"max_recovery_attempts":0,"max_elapsed_ms":30000}
+        "limits":{"max_model_calls":3,"max_tool_attempts":2,"max_repair_attempts":0,"max_recovery_attempts":0,"max_elapsed_ms":120000}
     }"#,
         )?;
         Ok((
