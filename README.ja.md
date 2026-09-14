@@ -2,32 +2,91 @@
 
 [English](README.md) | [한국어](README.ko.md) | **日本語** | [简体中文](README.zh-CN.md) | [Español](README.es.md) | [Français](README.fr.md) | [Deutsch](README.de.md) | [Русский](README.ru.md)
 
-**EpsilonDelta が開発する、拡張可能なエージェントエンジン。**
+**Rust アプリケーションに組み込む拡張可能なエージェントエンジン。**
+
+プロファイル、モデル、ツールを組み合わせてエージェントを実行します。Wickle はアプリケーションと同じプロセスでモデルの判断とツール呼び出しを繰り返し、データアクセス・認証情報・権限はアプリケーションが提供します。
 
 <p align="center">
-  <img src="assets/mascot/wickle.png" alt="回し車を走るハリネズミ、Wickle のマスコット" width="420" />
+  <img src="assets/mascot/wickle.png" alt="Wickle" width="320" />
 </p>
 
-Wickle は、EpsilonDelta が Rust で開発しているエージェントエンジンです。モデルによる判断とツール呼び出しのループを、アプリケーションに組み込めるライブラリとして提供することを目指しています。
+## インストール
 
-Agent Profile でエージェントの振る舞いを設定し、アダプターを通じてさまざまなモデルやツールに接続する構成を設計しています。
+Rust 1.85 以上と Tokio ランタイムが必要です。コアとアダプターには同じ Git タグを使用します。v0.1.0 は GitHub Releases で配布します。
 
-**開発状況:** モデルとツールの順次呼び出し、システム入力の分離、結果の保存、イベントの再取得、キャンセル、保存済みの承認・入力・外部作用確認待ちからの再開に対応しています。同じ再開コマンドは重複して処理せず、外部作用の確定には Host による検証を必要とします。Lifecycle Hook により、制限付きのコンテキスト・引数変換と保存後の観察にも対応しています。アダプターの Tool・Hook・ContextSource export は固定された構成と実行区間ごとのインスタンスで接続し、区間終了時にリソースを解放します。[アダプターランタイム](docs/adapters.md)。実行権限と保存済み入力を確認し、外部作用を照会して中断した実行を復旧できます。[実行の復旧](docs/recovery.md)。[エージェントの実行](docs/agents.md) · [データ契約](docs/contracts.md)。
+```toml
+[dependencies]
+wickle = { git = "https://github.com/Epsilondelta-ai/wickle", tag = "v0.1.0" }
+wickle-model-openai = { git = "https://github.com/Epsilondelta-ai/wickle", tag = "v0.1.0" }
+wickle-model-router = { git = "https://github.com/Epsilondelta-ai/wickle", tag = "v0.1.0" }
+```
 
-読み取り専用の [ContextSource](docs/context-sources.md) は、Run・モデルステップごとの取得、データの保存、再利用時の現在のアクセス権確認に対応しています。
+## エージェントの実行
 
-[Skills](docs/skills.md) は登録済みツールから固定バージョンの指示全文を読み込みます。[Artifacts](docs/artifacts.md) はスコープ付きの原文、サイズ制限付きプレビュー、出典情報を保持します。
+`AgentProfile` に指示、ツール、モデルバインディング、実行上限を設定します。モデル・状態ストア・権限ポリシーで `AgentBindings` を構成し、認証済みの `ExecutionContext` と `RunRequest` を渡します。
 
-[コンテキストの選択・圧縮](docs/context-compaction.md) は元の会話を保持し、制限付きプレビューと検証済みの要約を適用します。モデルによる圧縮も同じ Run の予算を使用します。
+```rust
+use wickle::*;
 
-[出力検証](docs/verification.md)は JSON Schema、バージョンを固定した評価基準、上限付きの修正、固定された候補の承認に対応します。モデルによる検証も同じ Run 予算を使います。
+pub async fn run_once(
+    profile: AgentProfile,
+    bindings: AgentBindings,
+    request: RunRequest,
+    context: ExecutionContext,
+) -> Result<Guarded<RunOutcome>, ContractError> {
+    let agent = create_agent(profile, bindings)?;
+    match agent.start(request, context.clone()).await? {
+        Guarded::Completed(handle) => handle.outcome(&context).await,
+        Guarded::ApprovalRequired(challenge) => {
+            Ok(Guarded::ApprovalRequired(challenge))
+        }
+    }
+}
+```
 
-[モデルプロバイダーガイド](docs/model-providers.md)では、OpenAI、Azure OpenAI、Anthropic、AWS Bedrock、Gemini API、Vertex AI、xAI アダプターの共通接続方法を説明しています。認証、API バージョン、各プロバイダーの動作の違いは個別に扱います。
+`start` は実行ハンドル、`outcome` は保存済みの結果を返します。`Guarded::ApprovalRequired` は承認が必要な状態です。例の構成要素はアプリケーション側で用意します。詳細は実行ガイドを参照してください。
 
-[MCP ツール接続](docs/mcp.md)では、確認済みのツールを stdio で接続する方法を説明します。
+## 主な機能
 
-[イベントコンシューマー](docs/event-consumers.md)では、Host が実行記録をメモリやグラフサービスに渡す方法を説明します。
+- **ツール入力の分離:** モデル用引数だけを公開し、workspace ID などはシステム入力から注入します。
+- **状態の永続化:** 結果とイベント、承認・入力待ち、明示的な再開と復旧を扱います。
+- **拡張:** ツール、ContextSource、Skills、Hooks、MCP stdio を接続します。
+- **実行上限:** モデル呼び出し、ツール試行、修正、経過時間を制限します。
+- **アクセス制御:** Host ポリシーで組織とワークスペースの範囲を分離します。
+- **文脈と出力:** アーティファクトと根拠、文脈圧縮、構造化出力、verifier に対応します。
 
-[モデルバージョン別の検証表](docs/model-support.md)で、ローカル契約テストと実接続の結果を区別しています。
+## モデルとアダプター
 
-[独立 Host の統合検証](docs/integration-validation.md)では、パッケージの分離、アダプター交換、プロセスをまたぐ再開を確認します。
+以下のサービスを個別の crate で接続できます。モデルバージョン、デプロイ名、API 契約、オプションを明示します。対応操作と制限は各ガイドを確認してください。
+
+| Provider | Crate |
+| --- | --- |
+| OpenAI GPT | `wickle-model-openai` |
+| Azure OpenAI / Microsoft Foundry | `wickle-model-azure-openai` |
+| Anthropic Claude | `wickle-model-anthropic` |
+| AWS Bedrock Claude | `wickle-model-bedrock` |
+| Google Gemini API / AI Studio | `wickle-model-gemini` |
+| Google Vertex AI Gemini | `wickle-model-vertex` |
+| xAI Grok | `wickle-model-xai` |
+
+ローカル永続化には `wickle-state-sqlite`、拡張の構成には `wickle-adapter-runtime` を使用します。メモリやグラフは ContextSource またはツールとして接続し、実行後の更新は外部イベントコンシューマーが担当します。
+
+## ドキュメント
+
+- [依存関係の設定](docs/installation.md)
+- [バインディング・リクエスト・結果](docs/agents.md)
+- [ツールとシステム入力](docs/tool-inputs.md)
+- [文脈とメモリ](docs/context-sources.md)
+- [Skills](docs/skills.md)
+- [Hooks](docs/hooks.md)
+- [モデルルーティング](docs/model-routing.md)
+- [モデル設定と対応範囲](docs/model-providers.md)
+- [SQLite と復旧](docs/sqlite-state-store.md)
+- [MCP ツール](docs/mcp.md)
+- [Artifacts](docs/artifacts.md)
+- [文脈圧縮](docs/context-compaction.md)
+- [出力検証](docs/verification.md)
+
+## ライセンス
+
+[MIT](LICENSE) · MIT © EpsilonDelta。0.1 系は初期 API のため変更される場合があります。

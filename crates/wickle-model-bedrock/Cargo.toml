@@ -1,12 +1,13 @@
 [package]
 name = "wickle-model-bedrock"
 version.workspace = true
+license.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 repository.workspace = true
 description = "AWS Bedrock Claude model adapters for Wickle"
 publish = false
-include = ["Cargo.toml", "src/**"]
+include = ["Cargo.toml", "LICENSE", "src/**"]
 [dependencies]
 wickle = { path = "../wickle", version = "=0.1.0" }
 wickle-model-anthropic = { path = "../wickle-model-anthropic", version = "=0.1.0" }

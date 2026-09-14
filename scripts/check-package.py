@@ -93,6 +93,7 @@ def main():
             destination = staged / manifest.parent.relative_to(ROOT)
             destination.mkdir(parents=True)
             shutil.copyfile(manifest, destination / "Cargo.toml")
+            shutil.copyfile(manifest.parent / "LICENSE", destination / "LICENSE")
             shutil.copytree(manifest.parent / "src", destination / "src")
         package_paths = {core["name"]: base / package_name}
         core_source_digest = source_digest(package_paths["wickle"])

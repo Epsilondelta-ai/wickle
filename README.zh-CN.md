@@ -2,32 +2,91 @@
 
 [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | **简体中文** | [Español](README.es.md) | [Français](README.fr.md) | [Deutsch](README.de.md) | [Русский](README.ru.md)
 
-**由 EpsilonDelta 开发的可扩展智能体引擎。**
+**可嵌入 Rust 应用的可扩展智能体引擎。**
+
+组合配置档案、模型和工具，在应用中运行智能体。Wickle 在同一进程内循环执行模型判断和工具调用；数据访问、凭据和授权由应用提供。
 
 <p align="center">
-  <img src="assets/mascot/wickle.png" alt="Wickle 的刺猬吉祥物正在跑轮上奔跑" width="420" />
+  <img src="assets/mascot/wickle.png" alt="Wickle" width="320" />
 </p>
 
-Wickle 是 EpsilonDelta 正在使用 Rust 开发的智能体引擎，旨在以可嵌入应用程序的库形式，运行模型决策与工具调用的循环。
+## 安装
 
-其设计通过 Agent Profile 配置智能体行为，并通过适配器连接不同的模型和工具。
+需要 Rust 1.85 或更新版本及 Tokio 运行时。核心与适配器使用相同的 Git 标签。v0.1.0 通过 GitHub Releases 发布。
 
-**开发状态：** 已支持模型与工具的串行调用、系统输入分离、结果持久化、事件重放、取消，以及从已保存的审批、输入或外部操作确认等待中恢复执行。恢复命令会去重，外部操作是否生效须由 Host 验证。生命周期 Hook 支持受限的上下文和参数转换，以及提交后的结果观察。适配器 Tool/Hook/ContextSource export 使用固定的装配配置和按执行阶段隔离的实例，阶段结束后释放资源。[适配器运行时](docs/adapters.md)。支持在验证执行所有权和已保存输入后恢复中断的执行，并查询外部操作的结果。[执行恢复](docs/recovery.md)。[运行智能体](docs/agents.md) · [数据契约](docs/contracts.md)。
+```toml
+[dependencies]
+wickle = { git = "https://github.com/Epsilondelta-ai/wickle", tag = "v0.1.0" }
+wickle-model-openai = { git = "https://github.com/Epsilondelta-ai/wickle", tag = "v0.1.0" }
+wickle-model-router = { git = "https://github.com/Epsilondelta-ai/wickle", tag = "v0.1.0" }
+```
 
-只读 [ContextSource](docs/context-sources.md) 支持按 Run 或模型步骤查询、保存数据批次，并在复用时重新检查当前访问权限。
+## 运行智能体
 
-[Skills](docs/skills.md) 通过已注册工具加载固定版本的完整指令。[Artifacts](docs/artifacts.md) 保存按 scope 隔离的原文、有大小限制的预览及来源依据。
+在 `AgentProfile` 中设置指令、工具、模型绑定和执行限制。通过模型、状态存储及授权策略构建 `AgentBindings`，再传入 `RunRequest` 和经过认证的 `ExecutionContext`。
 
-[上下文选择与压缩](docs/context-compaction.md) 保留原始对话，并应用有大小限制的预览和经过验证的摘要。模型压缩也使用同一 Run 的预算。
+```rust
+use wickle::*;
 
-[输出验证](docs/verification.md)支持 JSON Schema、固定版本的验证标准、限定次数的修正和固定候选结果的审批。模型验证也使用同一 Run 预算。
+pub async fn run_once(
+    profile: AgentProfile,
+    bindings: AgentBindings,
+    request: RunRequest,
+    context: ExecutionContext,
+) -> Result<Guarded<RunOutcome>, ContractError> {
+    let agent = create_agent(profile, bindings)?;
+    match agent.start(request, context.clone()).await? {
+        Guarded::Completed(handle) => handle.outcome(&context).await,
+        Guarded::ApprovalRequired(challenge) => {
+            Ok(Guarded::ApprovalRequired(challenge))
+        }
+    }
+}
+```
 
-[模型提供商指南](docs/model-providers.md)介绍 OpenAI、Azure OpenAI、Anthropic、AWS Bedrock、Gemini API、Vertex AI 和 xAI 适配器的通用连接方式。各提供商的身份验证、API 版本和行为差异分别处理。
+`start` 返回执行句柄，`outcome` 返回已保存的结果。`Guarded::ApprovalRequired` 表示应用需要取得批准。示例中的组件由应用预先配置，详见运行指南。
 
-[MCP 工具连接](docs/mcp.md)介绍如何通过 stdio 连接已审核的工具。
+## 主要功能
 
-[事件消费者](docs/event-consumers.md)介绍 Host 如何将执行记录传递给记忆和图服务。
+- **工具输入分离：** 仅向模型公开其负责的参数，工作区 ID 等可信值由系统输入注入。
+- **持久执行：** 保存结果与事件，支持批准等待、输入等待、恢复与重新继续。
+- **扩展：** 连接工具、ContextSource、Skills、Hooks 和 MCP stdio。
+- **执行限制：** 限制模型调用、工具尝试、修复次数与运行时间。
+- **访问范围：** 通过 Host 策略隔离组织与工作区。
+- **上下文与输出：** 管理原始文件和证据，支持上下文压缩、结构化输出与 verifier。
 
-[模型版本验证矩阵](docs/model-support.md)区分本地契约测试与实际连接结果。
+## 模型和适配器
 
-[独立 Host 集成验证](docs/integration-validation.md)涵盖包隔离、适配器替换和跨进程恢复。
+可使用独立 crate 接入以下服务。明确配置模型版本、部署名称、API 契约及提供者选项；具体支持范围与限制见相关指南。
+
+| Provider | Crate |
+| --- | --- |
+| OpenAI GPT | `wickle-model-openai` |
+| Azure OpenAI / Microsoft Foundry | `wickle-model-azure-openai` |
+| Anthropic Claude | `wickle-model-anthropic` |
+| AWS Bedrock Claude | `wickle-model-bedrock` |
+| Google Gemini API / AI Studio | `wickle-model-gemini` |
+| Google Vertex AI Gemini | `wickle-model-vertex` |
+| xAI Grok | `wickle-model-xai` |
+
+使用 `wickle-state-sqlite` 实现本地持久化，使用 `wickle-adapter-runtime` 组装扩展。记忆与图服务通过 ContextSource 或工具连接，执行后的写入由外部事件消费者负责。
+
+## 使用文档
+
+- [安装依赖](docs/installation.md)
+- [绑定、请求和结果](docs/agents.md)
+- [工具与系统输入](docs/tool-inputs.md)
+- [上下文和记忆](docs/context-sources.md)
+- [Skills](docs/skills.md)
+- [Hooks](docs/hooks.md)
+- [模型路由](docs/model-routing.md)
+- [提供者配置与支持范围](docs/model-providers.md)
+- [SQLite 与恢复](docs/sqlite-state-store.md)
+- [MCP 工具](docs/mcp.md)
+- [Artifacts](docs/artifacts.md)
+- [上下文压缩](docs/context-compaction.md)
+- [输出验证](docs/verification.md)
+
+## 许可证
+
+[MIT](LICENSE) · MIT © EpsilonDelta。0.1 系列属于初始 API，后续版本可能调整。

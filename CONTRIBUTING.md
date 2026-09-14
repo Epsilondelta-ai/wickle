@@ -16,11 +16,11 @@ cargo doc --workspace --no-deps --locked
 python3 scripts/check-package.py
 ```
 
-The package check builds a `.crate`, extracts it outside the checkout, and builds
-and runs a separate Rust consumer with its own target directory. Use
-`--allow-dirty` to check uncommitted changes. The consumer validates a profile
-through a Host resolver, persists and restores it, and checks its pinned identity.
-Agent execution is not implemented yet.
+The package check builds all library archives, extracts them outside the checkout,
+and runs focused consumers plus two independent business workspaces. It verifies
+model/tool execution, persistence, extension contracts, process recovery and
+unchanged core package digests. Use `--allow-dirty` for uncommitted changes.
+See [integration validation](docs/integration-validation.md) for the exact scope.
 
 Tests use insertion-ordered JSON objects so digest tests can detect a missing
 sorting step. Library-only builds also run separately from test feature unification.
