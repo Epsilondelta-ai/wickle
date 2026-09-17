@@ -73,6 +73,7 @@ pub async fn run_once(
 
 ## 사용 문서
 
+- [Rust·에이전트·아키텍처 학습: Wickle 0.1.0 직접 구현하기](docs/learn/ko/README.md)
 - [설치와 의존성 구성](docs/installation.md)
 - [에이전트 바인딩·요청·결과](docs/agents.md)
 - [도구와 시스템 입력](docs/tool-inputs.md)

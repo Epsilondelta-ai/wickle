@@ -73,6 +73,7 @@ Use `wickle-state-sqlite` for local persistence and `wickle-adapter-runtime` to 
 
 ## Documentation
 
+- [Korean hands-on course: build Wickle 0.1.0 with Rust](docs/learn/ko/README.md)
 - [Install and configure dependencies](docs/installation.md)
 - [Agent bindings, requests and results](docs/agents.md)
 - [Tools and system inputs](docs/tool-inputs.md)
