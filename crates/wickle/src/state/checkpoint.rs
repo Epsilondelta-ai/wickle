@@ -36,6 +36,8 @@ struct CheckpointView<'a> {
     hook_observations: Vec<&'a crate::HookObservation>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     executions: Vec<&'a crate::ExecutionHistory>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    legacy_runs: Vec<&'a Id>,
 }
 #[derive(Serialize)]
 struct SessionView<'a> {
@@ -64,6 +66,11 @@ impl Serialize for StateStoreCheckpoint {
                 STATE_STORE_CHECKPOINT_VERSION
             },
             executions: self.state.executions.values().collect(),
+            legacy_runs: if self.state.executions.is_empty() {
+                Vec::new()
+            } else {
+                self.state.legacy_runs.iter().collect()
+            },
             scope: &self.scope,
             sessions: self
                 .state
@@ -112,6 +119,8 @@ struct CheckpointData {
     hook_observations: Vec<crate::HookObservation>,
     #[serde(default)]
     executions: Vec<crate::ExecutionHistory>,
+    #[serde(default)]
+    legacy_runs: Vec<Id>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -236,7 +245,9 @@ fn restore_graph(data: CheckpointData) -> Result<StateStoreCheckpoint, ContractE
     {
         return Err(invalid("checkpoint.schema_version"));
     }
-    if data.schema_version == LEGACY_CHECKPOINT_VERSION && !data.executions.is_empty() {
+    if data.schema_version == LEGACY_CHECKPOINT_VERSION
+        && (!data.executions.is_empty() || !data.legacy_runs.is_empty())
+    {
         return Err(invalid("checkpoint.legacy_execution"));
     }
     let execution_records = data.executions.clone();
@@ -451,6 +462,29 @@ fn restore_graph(data: CheckpointData) -> Result<StateStoreCheckpoint, ContractE
             .is_some()
         {
             return Err(invalid("checkpoint.duplicate_execution"));
+        }
+    }
+    if data.schema_version == LEGACY_CHECKPOINT_VERSION {
+        state.legacy_runs = state.runs.keys().cloned().collect();
+    } else {
+        for id in data.legacy_runs {
+            let run = state
+                .runs
+                .get(&id)
+                .ok_or_else(|| invalid("checkpoint.legacy_run"))?;
+            if !run.snapshot.status.is_terminal()
+                || state.executions.contains_key(&id)
+                || !state.legacy_runs.insert(id)
+            {
+                return Err(invalid("checkpoint.legacy_run"));
+            }
+        }
+        if state
+            .runs
+            .keys()
+            .any(|id| !state.executions.contains_key(id) && !state.legacy_runs.contains(id))
+        {
+            return Err(invalid("checkpoint.execution_missing"));
         }
     }
     Ok(StateStoreCheckpoint {

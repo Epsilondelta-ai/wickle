@@ -183,6 +183,58 @@ pub(super) fn validate_history(
             return Err(invalid("execution.accepted"));
         }
     }
+    let mut expected = BTreeMap::new();
+    for (command, revision) in snapshot
+        .resume_receipts
+        .iter()
+        .map(|r| (&r.command, r.accepted_revision))
+        .chain(
+            snapshot
+                .recovery_receipts
+                .iter()
+                .map(|r| (&r.command, r.accepted_revision)),
+        )
+    {
+        if expected
+            .insert(command.command_id.clone(), (data_digest(command), revision))
+            .is_some()
+        {
+            return Err(invalid("execution.receipt_duplicate"));
+        }
+    }
+    for control in &history.controls {
+        if let Some(id) = &control.processed_segment_id {
+            let segment = history
+                .segments
+                .iter()
+                .find(|s| &s.segment_id == id)
+                .ok_or_else(|| invalid("execution.control_segment"))?;
+            if expected
+                .insert(
+                    control.command.command_id.clone(),
+                    (data_digest(&control.command), segment.accepted_revision),
+                )
+                .is_some()
+            {
+                return Err(invalid("execution.receipt_duplicate"));
+            }
+        }
+    }
+    if expected.len() != history.accepted_commands.len() {
+        return Err(invalid("execution.receipt_coverage"));
+    }
+    for accepted in &history.accepted_commands {
+        let segment = history
+            .segments
+            .iter()
+            .find(|s| s.segment_id == accepted.segment_id)
+            .ok_or_else(|| invalid("execution.receipt_segment"))?;
+        if expected.get(&accepted.command_id)
+            != Some(&(accepted.payload_digest.clone(), segment.accepted_revision))
+        {
+            return Err(invalid("execution.receipt_payload"));
+        }
+    }
     let mut controls = BTreeSet::new();
     for control in &history.controls {
         validate_control(&control.command)?;
@@ -404,6 +456,14 @@ impl MemoryStateStore {
                 });
             }
             return Err(error(ErrorCode::InvalidTransition, "execution.terminal"));
+        }
+        if !matches!(request.start, SegmentStart::Initial)
+            && history
+                .segments
+                .iter()
+                .any(|s| s.segment_id == request.segment_id)
+        {
+            return Err(error(ErrorCode::RequestConflict, "execution.segment_id"));
         }
         let lease = self.acquire_lease_now(
             scope,

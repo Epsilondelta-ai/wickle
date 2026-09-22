@@ -118,6 +118,12 @@ pub async fn atomic_execution_contract(store: Arc<dyn StateStore>) {
         lease_ttl_ms: 1000.try_into().unwrap(),
         start: SegmentStart::Control(id("cancel")),
     };
+    let mut reused = request.clone();
+    reused.segment_id = history.segments[0].segment_id.clone();
+    assert!(
+        store.begin_segment(&s, reused).await.is_err(),
+        "a control must allocate a new segment ID"
+    );
     let (a, b) = tokio::join!(
         store.begin_segment(&s, request.clone()),
         store.begin_segment(&s, request)

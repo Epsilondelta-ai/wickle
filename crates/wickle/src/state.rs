@@ -314,6 +314,7 @@ struct ScopeState {
     message_ids: BTreeSet<Id>,
     hook_observations: BTreeMap<Id, Vec<crate::HookObservation>>,
     executions: BTreeMap<Id, crate::ExecutionHistory>,
+    legacy_runs: BTreeSet<Id>,
 }
 
 #[derive(Clone)]

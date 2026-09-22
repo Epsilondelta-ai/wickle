@@ -89,7 +89,10 @@ New admissions write `wickle.state-store.v2` scope checkpoints containing origin
 execution actors, segments and control-command history. The SQL table layout is
 unchanged. Version-one checkpoints remain readable without rewriting them, and
 existing terminal outcomes/events remain intact when a later admission upgrades
-the scope in the same transaction.
+the scope in the same transaction. The v2 checkpoint explicitly lists inherited
+legacy Run IDs; missing history for an unmarked Run is corruption, including for
+terminal Runs. Accepted command evidence must match the saved recovery/resume
+receipt payload and segment revision.
 
 A legacy nonterminal Run has no trustworthy execution-history metadata. New
 admission into such a scope is rejected with `execution.legacy_drain_required`;
