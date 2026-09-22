@@ -35,6 +35,10 @@ mod hooks;
 mod input_binding;
 mod message;
 mod model;
+mod model_options;
+pub use model_options::{
+    ModelConfiguration, ModelOptionSource, merge_model_options, validate_inference_options,
+};
 mod model_catalog;
 mod model_dispatch;
 mod model_execution;

@@ -66,6 +66,7 @@ fn proof(binding: &mut ModelBinding, model: &ModelDefinition) {
 }
 fn binding(name: &str, model: &ModelDefinition) -> ModelBinding {
     let mut binding = ModelBinding {
+        default_options: Default::default(),
         binding: versioned(name),
         model: model.reference(),
         requested_model: model.model_id.clone(),
@@ -351,7 +352,7 @@ async fn options_features_and_token_space_are_checked_without_mutating_the_reque
     );
     input = request();
     input.max_output_tokens = 129.try_into().unwrap();
-    assert!(router.resolve(&input).await.is_err());
+    router.resolve(&input).await.unwrap();
     input = request();
     input.input_tokens = 1000;
     assert!(router.resolve(&input).await.is_err());
@@ -679,7 +680,7 @@ async fn selection_validation_rechecks_actual_requirements_after_request_digest_
                     .insert(id("unavailable-feature"));
             }
             2 => changed.options = object(json!({"unsupported_option":true})),
-            3 => changed.max_output_tokens = 129.try_into().unwrap(),
+            3 => changed.input_tokens = 1024,
             _ => unreachable!(),
         }
         let mut selected = original.clone();
@@ -745,4 +746,112 @@ async fn planned_metadata_can_be_stored_but_cannot_authorize_execution_selection
             .code,
         ErrorCode::ModelSupportInsufficient
     );
+}
+
+#[test]
+fn binding_defaults_replace_whole_values_and_preserve_schema_and_origin() {
+    let mut catalog = catalog();
+    let schema = json!({"type":"object","properties":{
+        "reasoning":{"type":"object","properties":{"effort":{"enum":["low","high"]},"summary":{"type":"boolean"}},"additionalProperties":false},
+        "temperature":{"type":"number","minimum":0,"maximum":1}},"additionalProperties":false});
+    catalog.models[0].capabilities.options_schema = schema.clone();
+    catalog.bindings[0].capabilities.options_schema = schema;
+    catalog.bindings[0].default_options =
+        object(json!({"reasoning":{"effort":"low","summary":true},"temperature":0.2}));
+    proof(&mut catalog.bindings[0], &catalog.models[0]);
+    let pinned = snapshot(catalog, vec![rule(ModelPurpose::Agent, "primary", &[])]);
+    let route = pinned.route_for_binding(&versioned("primary")).unwrap();
+    let requested = object(json!({"reasoning":{"effort":"high"}}));
+    let sources = [("reasoning".into(), ModelOptionSource::Run)]
+        .into_iter()
+        .collect();
+    let config = pinned
+        .model_configuration(&route, &requested, &sources, 2048.try_into().unwrap())
+        .unwrap();
+    assert_eq!(
+        config.effective,
+        object(json!({"reasoning":{"effort":"high"},"temperature":0.2}))
+    );
+    assert_eq!(config.sources["reasoning"], ModelOptionSource::Run);
+    assert_eq!(config.sources["temperature"], ModelOptionSource::Binding);
+    assert_eq!(config.max_output_tokens.get(), 128);
+    assert_eq!(config.requested_max_output_tokens.get(), 2048);
+    assert_eq!(config.binding_schema_revision, id("capabilities-primary"));
+    let invalid = object(json!({"reasoning":{"effort":"unknown"}}));
+    assert_eq!(
+        pinned
+            .model_configuration(&route, &invalid, &sources, 32.try_into().unwrap())
+            .unwrap_err()
+            .code,
+        ErrorCode::ModelOptionUnsupported
+    );
+}
+
+#[test]
+fn inference_options_cannot_carry_transport_or_credential_controls() {
+    for key in [
+        "endpoint",
+        "api_key",
+        "extra_body",
+        "max_retries",
+        "max_tokens",
+        "Authorization",
+    ] {
+        let options = [(key.into(), json!("injected"))].into_iter().collect();
+        assert_eq!(
+            validate_inference_options(&options).unwrap_err().code,
+            ErrorCode::ModelOptionUnsupported
+        );
+    }
+}
+
+#[tokio::test]
+async fn fallback_uses_its_pinned_defaults_but_never_discards_explicit_overrides() {
+    let mut catalog = catalog();
+    for (index, effort) in [(0, "low"), (1, "high")] {
+        catalog.bindings[index].default_options = object(json!({"reasoning_effort":effort}));
+        proof(&mut catalog.bindings[index], &catalog.models[index]);
+    }
+    let pinned = snapshot(
+        catalog,
+        vec![rule(ModelPurpose::Agent, "primary", &["second"])],
+    );
+    let router = PolicyModelRouter::new(pinned.clone()).unwrap();
+    let mut input = request();
+    let first = router.resolve(&input).await.unwrap();
+    let first_config = pinned
+        .model_configuration(
+            &first.route,
+            &input.options,
+            &Default::default(),
+            input.max_output_tokens,
+        )
+        .unwrap();
+    assert_eq!(first_config.effective["reasoning_effort"], json!("low"));
+    input.previous_route = Some(first.route);
+    input.previous_failure = Some(ModelFailureKind::Transport);
+    let second = router.resolve(&input).await.unwrap();
+    let second_config = pinned
+        .model_configuration(
+            &second.route,
+            &input.options,
+            &Default::default(),
+            input.max_output_tokens,
+        )
+        .unwrap();
+    assert_eq!(second_config.effective["reasoning_effort"], json!("high"));
+    input.options = object(json!({"reasoning_effort":"low"}));
+    let sources = [("reasoning_effort".into(), ModelOptionSource::Run)]
+        .into_iter()
+        .collect();
+    let explicit = pinned
+        .model_configuration(
+            &second.route,
+            &input.options,
+            &sources,
+            input.max_output_tokens,
+        )
+        .unwrap();
+    assert_eq!(explicit.effective["reasoning_effort"], json!("low"));
+    assert_eq!(explicit.sources["reasoning_effort"], ModelOptionSource::Run);
 }

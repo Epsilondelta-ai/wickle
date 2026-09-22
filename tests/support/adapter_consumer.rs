@@ -128,6 +128,7 @@ fn routing(scope: &Scope) -> Result<RoutingSnapshot, ContractError> {
         evidence: vec![],
     };
     let mut binding = ModelBinding {
+            default_options: Default::default(),
         binding: reference("primary"),
         model: model.reference(),
         requested_model: model.model_id.clone(),

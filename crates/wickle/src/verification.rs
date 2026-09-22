@@ -126,7 +126,7 @@ pub struct VerificationModelRequest {
     pub model_binding: Id,
     /// Review messages composed from approved criteria and candidate data.
     pub messages: Vec<ModelMessage>,
-    /// Optional model option override; otherwise inherit Run options.
+    /// Purpose-specific inference overrides; None uses only the selected binding defaults.
     pub options: Option<JsonObject>,
     /// Finite output-token reservation.
     pub max_output_tokens: std::num::NonZeroU64,

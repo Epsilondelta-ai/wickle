@@ -50,6 +50,7 @@ fn definition_ref(model: &ModelDefinition) -> ModelDefinitionRef {
 
 fn binding(model: &ModelDefinition, name: &str) -> Result<ModelBinding, ContractError> {
     let mut binding = ModelBinding {
+            default_options: Default::default(),
         binding: reference(name),
         model: definition_ref(model),
         requested_model: model.model_id.clone(),

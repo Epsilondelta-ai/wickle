@@ -204,6 +204,7 @@ impl Router {
             evidence: vec![],
         };
         let mut binding = ModelBinding {
+            default_options: Default::default(),
             binding: reference("route"),
             model: model.reference(),
             requested_model: model.model_id.clone(),

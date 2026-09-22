@@ -52,6 +52,7 @@ pub fn routing_snapshot() -> RoutingSnapshot {
             }],
         };
         let mut binding = ModelBinding {
+            default_options: Default::default(),
             binding: reference(name),
             model: model.reference(),
             requested_model: model.model_id.clone(),
@@ -344,7 +345,7 @@ impl ModelRequestProjector for Projector {
         &'a self,
         selection: &'a RouteSelection,
         input: &'a RoutedModelInput,
-        _: &'a ModelProjectionContext,
+        context: &'a ModelProjectionContext,
     ) -> PortFuture<'a, ProjectedModelRequest> {
         Box::pin(async move {
             self.calls.lock().unwrap().push(selection.route.clone());
@@ -366,8 +367,8 @@ impl ModelRequestProjector for Projector {
                 }],
                 tools: vec![],
                 output: ModelOutput::Text {},
-                max_output_tokens: input.routing.max_output_tokens,
-                options: input.routing.options.clone(),
+                max_output_tokens: context.configuration.max_output_tokens,
+                options: context.configuration.effective.clone(),
                 limits: ModelResponseLimits {
                     max_input_bytes: 16384,
                     max_response_bytes: 4096,

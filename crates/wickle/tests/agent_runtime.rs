@@ -1164,3 +1164,50 @@ async fn saved_submission_survives_catalog_outage_but_not_revoked_authorization(
     assert!(offline.0.load(Ordering::SeqCst) > 0);
     assert_eq!(fixture.model.calls.load(Ordering::SeqCst), 1);
 }
+
+#[tokio::test]
+async fn profile_and_run_options_reach_the_model_with_pinned_origins_and_output_caps() {
+    for (run_effort, run_cap, expected_effort, expected_source, expected_cap) in [
+        (None, None, "low", ModelOptionSource::Profile, 80),
+        (Some("high"), Some(40), "high", ModelOptionSource::Run, 40),
+        (Some("high"), Some(120), "high", ModelOptionSource::Run, 80),
+    ] {
+        let fixture = Fixture::new(Response::Text, false);
+        let mut profile = profile();
+        profile
+            .model_options
+            .insert("effort".into(), serde_json::json!("low"));
+        profile.limits.max_output_tokens = Some(80.try_into().unwrap());
+        let agent = create_agent(profile, fixture.bindings()).unwrap();
+        let mut input = request("options");
+        if let Some(effort) = run_effort {
+            input
+                .model_options
+                .insert("effort".into(), serde_json::json!(effort));
+        }
+        input.max_output_tokens = run_cap.map(|cap: u64| cap.try_into().unwrap());
+        let handle = completed(agent.start(input, context()).await.unwrap());
+        let outcome = completed(handle.outcome(&context()).await.unwrap());
+        assert_eq!(outcome.result.status(), RunStatus::Succeeded);
+        {
+            let calls = fixture.model.requests.lock().unwrap();
+            assert_eq!(calls.len(), 1);
+            assert_eq!(
+                calls[0].options["effort"],
+                serde_json::json!(expected_effort)
+            );
+            assert_eq!(calls[0].max_output_tokens.get(), expected_cap);
+        }
+        let saved = fixture.store.load(&scope(), handle.run_id()).await.unwrap();
+        let config = saved.snapshot.model_ledger[0]
+            .configuration
+            .as_ref()
+            .unwrap();
+        assert_eq!(config.sources["effort"], expected_source);
+        assert_eq!(
+            config.effective["effort"],
+            serde_json::json!(expected_effort)
+        );
+        assert_eq!(config.max_output_tokens.get(), expected_cap);
+    }
+}

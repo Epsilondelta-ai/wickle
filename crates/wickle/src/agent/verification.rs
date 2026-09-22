@@ -616,10 +616,12 @@ impl VerificationModel for ReviewModels<'_> {
                     purpose: ModelPurpose::Verification,
                     required_capabilities: std::collections::BTreeSet::from([Id::new("text")?]),
                     input_tokens: 0,
-                    max_output_tokens: request.max_output_tokens,
-                    options: request
-                        .options
-                        .unwrap_or(saved.snapshot.request.model_options),
+                    max_output_tokens: crate::model_options::output_cap(
+                        &saved.snapshot,
+                        self.bindings.settings.max_output_tokens,
+                    )
+                    .min(request.max_output_tokens),
+                    options: request.options.unwrap_or_default(),
                     scope: self.budget.scope().clone(),
                     allowed_bindings: std::iter::once(&rule.primary)
                         .chain(&rule.fallbacks)
@@ -749,7 +751,7 @@ impl ModelRequestProjector for ReviewProjector<'_> {
         &'a self,
         selection: &'a RouteSelection,
         input: &'a RoutedModelInput,
-        _: &'a ModelProjectionContext,
+        context: &'a ModelProjectionContext,
     ) -> PortFuture<'a, ProjectedModelRequest> {
         Box::pin(async move {
             let request = ModelRequest {
@@ -759,8 +761,8 @@ impl ModelRequestProjector for ReviewProjector<'_> {
                 messages: self.messages.clone(),
                 tools: vec![],
                 output: ModelOutput::Text {},
-                max_output_tokens: input.routing.max_output_tokens,
-                options: input.routing.options.clone(),
+                max_output_tokens: context.configuration.max_output_tokens,
+                options: context.configuration.effective.clone(),
                 limits: self.bindings.settings.response_limits.clone(),
             };
             let input_tokens = self.bindings.token_estimator.estimate(&request)?;

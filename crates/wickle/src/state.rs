@@ -954,6 +954,35 @@ fn validate_snapshot_refs(
             {
                 return Err(error(ErrorCode::InvalidSnapshot, "routing.step_identity"));
             }
+            if let Some(configuration) = &invocation.configuration {
+                if invocation.purpose == crate::ModelPurpose::Agent
+                    && (step.input.routing.options != crate::model_options::agent_options(snapshot)
+                        || snapshot
+                            .profile
+                            .profile()
+                            .limits
+                            .max_output_tokens
+                            .into_iter()
+                            .chain(snapshot.request.max_output_tokens)
+                            .min()
+                            .is_some_and(|cap| step.input.routing.max_output_tokens > cap))
+                {
+                    return Err(error(ErrorCode::InvalidSnapshot, "routing.agent_options"));
+                }
+                let expected = routing.model_configuration(
+                    &invocation.route,
+                    &step.input.routing.options,
+                    &crate::model_options::requested_sources(
+                        snapshot,
+                        invocation.purpose,
+                        &step.input.routing.options,
+                    ),
+                    step.input.routing.max_output_tokens,
+                )?;
+                if configuration != &expected {
+                    return Err(error(ErrorCode::InvalidSnapshot, "routing.configuration"));
+                }
+            }
             let rule = routing
                 .policy()
                 .rules
@@ -2043,6 +2072,7 @@ fn validate_transition(previous: &RunSnapshot, next: &RunSnapshot) -> Result<(),
                     || old.purpose != new.purpose
                     || old.route != new.route
                     || old.selection_reason != new.selection_reason
+                    || old.configuration != new.configuration
                     || old.request_digest != new.request_digest
                     || old.inspection_ref != new.inspection_ref
                     || (matches!(

@@ -74,6 +74,7 @@ fn routing_snapshot(scope: &Scope) -> Result<RoutingSnapshot, ContractError> {
             evidence: vec![],
         };
         let mut binding = ModelBinding {
+            default_options: Default::default(),
             binding: reference(name),
             model: model.reference(),
             requested_model: model.model_id.clone(),

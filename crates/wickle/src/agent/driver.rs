@@ -641,8 +641,11 @@ impl Agent {
                     required
                 },
                 input_tokens: 0,
-                max_output_tokens: bindings.settings.max_output_tokens,
-                options: saved.snapshot.request.model_options.clone(),
+                max_output_tokens: crate::model_options::output_cap(
+                    &saved.snapshot,
+                    bindings.settings.max_output_tokens,
+                ),
+                options: crate::model_options::agent_options(&saved.snapshot),
                 scope: bindings.scope.clone(),
                 allowed_bindings: std::iter::once(&rule.primary)
                     .chain(&rule.fallbacks)
@@ -1137,8 +1140,8 @@ impl ModelRequestProjector for Projector<'_> {
                 purpose: input.routing.purpose,
                 route: selection.route.clone(),
                 output: self.output.clone(),
-                max_output_tokens: self.settings.max_output_tokens,
-                options: input.routing.options.clone(),
+                max_output_tokens: context.configuration.max_output_tokens,
+                options: context.configuration.effective.clone(),
                 response_limits: self.settings.response_limits.clone(),
                 limits: self.settings.projection_limits,
             };

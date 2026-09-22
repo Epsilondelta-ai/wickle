@@ -90,6 +90,7 @@ impl ModelCapabilities {
     }
     /// Validate supplied options without dropping unsupported keys or inserting defaults.
     pub fn validate_options(&self, options: &JsonObject) -> Result<(), ContractError> {
+        crate::validate_inference_options(options)?;
         let validator = closed_schema(
             &self.options_schema,
             ErrorCode::ModelOptionUnsupported,
@@ -184,6 +185,9 @@ pub struct ModelValidationEvidence {
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ModelBinding {
+    /// Inference defaults for this exact binding. Final merged values are schema-validated.
+    #[serde(default, skip_serializing_if = "JsonObject::is_empty")]
+    pub default_options: JsonObject,
     /// Exact binding identity and revision.
     pub binding: VersionedRef,
     /// Exact provider-qualified model reference.
@@ -228,7 +232,7 @@ impl ModelBinding {
         if self.model != model.reference() {
             return Err(failure(ErrorCode::ModelBindingInvalid, "binding.model"));
         }
-        Ok(data_digest(&(
+        let legacy = data_digest(&(
             (
                 &model.model_key,
                 &model.family,
@@ -251,7 +255,12 @@ impl ModelBinding {
                 self.version_semantics,
                 &self.capabilities,
             ),
-        )))
+        ));
+        Ok(if self.default_options.is_empty() {
+            legacy
+        } else {
+            data_digest(&("binding-default-options-v1", legacy, &self.default_options))
+        })
     }
     /// Validate the exact target, capability ceilings and recorded support evidence.
     pub fn validate(&self, model: &ModelDefinition) -> Result<(), ContractError> {
@@ -271,6 +280,7 @@ impl ModelBinding {
             ));
         }
         self.validate_target()?;
+        crate::validate_inference_options(&self.default_options)?;
         let digest = self.contract_digest(model)?;
         if self
             .evidence
@@ -478,21 +488,21 @@ impl ResolvedCatalogBinding {
                 "model.features",
             ));
         }
-        self.model
-            .capabilities
-            .validate_options(&requirements.options)?;
-        self.binding
-            .capabilities
-            .validate_options(&requirements.options)?;
-        if requirements.max_output_tokens > self.model.capabilities.max_output_tokens
-            || requirements.max_output_tokens > self.binding.capabilities.max_output_tokens
-            || requirements
-                .input_tokens
-                .checked_add(requirements.max_output_tokens.get())
-                .is_none_or(|tokens| {
-                    tokens > self.model.capabilities.context_window.get()
-                        || tokens > self.binding.capabilities.context_window.get()
-                })
+        let effective =
+            crate::merge_model_options(&self.binding.default_options, &requirements.options);
+        self.model.capabilities.validate_options(&effective)?;
+        self.binding.capabilities.validate_options(&effective)?;
+        let output_cap = requirements
+            .max_output_tokens
+            .min(self.model.capabilities.max_output_tokens)
+            .min(self.binding.capabilities.max_output_tokens);
+        if requirements
+            .input_tokens
+            .checked_add(output_cap.get())
+            .is_none_or(|tokens| {
+                tokens > self.model.capabilities.context_window.get()
+                    || tokens > self.binding.capabilities.context_window.get()
+            })
         {
             return Err(failure(
                 ErrorCode::ModelContextIncompatible,

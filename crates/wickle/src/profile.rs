@@ -307,6 +307,13 @@ pub enum OutputContract {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RunLimits {
+    /// Optional profile output-token ceiling; Host/model ceilings still apply when absent.
+    #[serde(
+        default,
+        deserialize_with = "optional",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub max_output_tokens: Option<NonZeroU64>,
     /// All physical model calls, including verification and compaction.
     pub max_model_calls: NonZeroU64,
     /// Physical tool dispatch attempts; zero disables tools.
@@ -337,6 +344,9 @@ pub struct AgentProfile {
     pub instructions: Instructions,
     /// Host-registered model binding or routing configuration name.
     pub model_binding: Id,
+    /// Inference overrides, applied after binding defaults and before Run overrides.
+    #[serde(default, skip_serializing_if = "JsonObject::is_empty")]
+    pub model_options: JsonObject,
     /// Selected tools; an explicit empty list is permitted.
     pub tools: Vec<ToolBindingRef>,
     /// Selected skills; an explicit empty list is permitted.
@@ -398,6 +408,7 @@ impl AgentProfile {
 
     /// Check profile-local bindings without opening adapters or contacting models.
     pub fn validate_structure(&self) -> Result<(), ContractError> {
+        crate::validate_inference_options(&self.model_options)?;
         let invalid = |path| ContractError::new(ErrorCode::InvalidReference, path);
         let mut connectors = BTreeSet::new();
         for item in &self.connectors {

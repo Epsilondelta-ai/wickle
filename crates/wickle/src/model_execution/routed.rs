@@ -18,6 +18,8 @@ pub struct RoutedModelInput {
 
 /// Current Host context for a bounded route-specific projection.
 pub struct ModelProjectionContext {
+    /// Validated settings for this exact destination.
+    pub configuration: crate::ModelConfiguration,
     /// Exact authenticated namespace.
     pub scope: crate::Scope,
     /// Current principal for any separately authorized context reads.
@@ -66,6 +68,7 @@ pub(super) struct ContextUseGate<'a> {
     pub projector: &'a dyn ModelRequestProjector,
     pub selection: &'a RouteSelection,
     pub input: &'a RoutedModelInput,
+    pub configuration: &'a crate::ModelConfiguration,
 }
 impl ContextUseGate<'_> {
     pub(super) async fn check(
@@ -74,6 +77,7 @@ impl ContextUseGate<'_> {
         budget: &RunBudget,
     ) -> Result<(), ContractError> {
         let controls = ModelProjectionContext {
+            configuration: self.configuration.clone(),
             scope: budget.scope().clone(),
             principal_ref: context.data.principal_ref.clone(),
             capability_grant_ref: context.data.capability_grant_ref.clone(),
@@ -150,9 +154,23 @@ impl ModelExchange {
             ));
         }
         if input.routing.purpose == ModelPurpose::Agent
-            && input.routing.options != saved.snapshot.request.model_options
+            && input.routing.options != crate::model_options::agent_options(&saved.snapshot)
         {
             return Err(failure(ErrorCode::RequestConflict, "routing.model_options"));
+        }
+        if input.routing.purpose == ModelPurpose::Agent {
+            let cap = saved
+                .snapshot
+                .profile
+                .profile()
+                .limits
+                .max_output_tokens
+                .into_iter()
+                .chain(saved.snapshot.request.max_output_tokens)
+                .min();
+            if cap.is_some_and(|cap| input.routing.max_output_tokens > cap) {
+                return Err(failure(ErrorCode::RequestConflict, "routing.output_cap"));
+            }
         }
         if saved.snapshot.tool_ledger.iter().any(|entry| !matches!(&entry.state,
             ToolCallState::Settled { result } if result.status != crate::ToolResultStatus::Unknown && result.effect != crate::ToolEffect::Unknown
@@ -235,7 +253,18 @@ impl ModelExchange {
             {
                 return Ok(Guarded::ApprovalRequired(challenge));
             }
+            let configuration = pinned.model_configuration(
+                &selection.route,
+                &input.routing.options,
+                &crate::model_options::requested_sources(
+                    &saved.snapshot,
+                    input.routing.purpose,
+                    &input.routing.options,
+                ),
+                input.routing.max_output_tokens,
+            )?;
             let projection_context = ModelProjectionContext {
+                configuration: configuration.clone(),
                 scope: budget.scope().clone(),
                 principal_ref: context.data.principal_ref.clone(),
                 capability_grant_ref: context.data.capability_grant_ref.clone(),
@@ -255,7 +284,7 @@ impl ModelExchange {
             )
             .await?;
             projection_context.cancellation.cancel();
-            validate_projection(&prepared.request, input, &selection)?;
+            validate_projection(&prepared.request, input, &selection, &configuration)?;
             // Validate the final route-specific estimate, not the earlier candidate estimate.
             let mut final_requirements = routing.clone();
             final_requirements.input_tokens = prepared.input_tokens;
@@ -304,6 +333,7 @@ impl ModelExchange {
                 ContextUseGate {
                     projector,
                     selection: &selection,
+                    configuration: &configuration,
                     input,
                 }
                 .check(context, budget)
@@ -341,6 +371,7 @@ impl ModelExchange {
                     Some(ContextUseGate {
                         projector,
                         selection: &selection,
+                        configuration: &configuration,
                         input,
                     }),
                 )
@@ -579,12 +610,13 @@ fn validate_projection(
     request: &ModelRequest,
     input: &RoutedModelInput,
     selection: &RouteSelection,
+    configuration: &crate::ModelConfiguration,
 ) -> Result<(), ContractError> {
     if request.request_id != input.model_step_id
         || request.route != selection.route
         || request.purpose != input.routing.purpose
-        || request.options != input.routing.options
-        || request.max_output_tokens != input.routing.max_output_tokens
+        || request.options != configuration.effective
+        || request.max_output_tokens != configuration.max_output_tokens
     {
         return Err(failure(
             ErrorCode::ModelContextIncompatible,

@@ -301,6 +301,45 @@ impl RoutingSnapshot {
         Ok(())
     }
 
+    /// Resolve and validate inference settings against the pinned destination.
+    pub fn model_configuration(
+        &self,
+        route: &crate::ResolvedModelRoute,
+        requested: &crate::JsonObject,
+        sources: &std::collections::BTreeMap<String, crate::ModelOptionSource>,
+        upper_bound: std::num::NonZeroU64,
+    ) -> Result<crate::ModelConfiguration, ContractError> {
+        self.validate_route(route)?;
+        let resolved = self.resolved_binding(&route.binding)?;
+        let effective = crate::merge_model_options(&resolved.binding.default_options, requested);
+        resolved.model.capabilities.validate_options(&effective)?;
+        resolved.binding.capabilities.validate_options(&effective)?;
+        if sources.keys().ne(requested.keys()) {
+            return Err(error(
+                ErrorCode::InvalidConfiguration,
+                "model.option_sources",
+            ));
+        }
+        let mut origins = resolved
+            .binding
+            .default_options
+            .keys()
+            .map(|key| (key.clone(), crate::ModelOptionSource::Binding))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        origins.extend(sources.clone());
+        Ok(crate::ModelConfiguration {
+            requested: requested.clone(),
+            effective,
+            sources: origins,
+            model_schema_revision: resolved.model.capabilities.revision.clone(),
+            binding_schema_revision: resolved.binding.capabilities.revision.clone(),
+            requested_max_output_tokens: upper_bound,
+            max_output_tokens: upper_bound
+                .min(resolved.model.capabilities.max_output_tokens)
+                .min(resolved.binding.capabilities.max_output_tokens),
+        })
+    }
+
     fn resolved_binding(
         &self,
         reference: &VersionedRef,

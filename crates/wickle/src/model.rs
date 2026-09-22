@@ -236,6 +236,13 @@ pub enum ModelAttemptState {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ModelInvocationRecord {
+    /// Frozen routed inference settings; absent for legacy or explicitly unrouted calls.
+    #[serde(
+        default,
+        deserialize_with = "optional",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub configuration: Option<crate::ModelConfiguration>,
     /// Owning run.
     pub run_id: Id,
     /// Logical model step, stable across transport retries.
