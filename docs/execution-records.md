@@ -1,9 +1,9 @@
 # Execution record contracts
 
 The execution-record types separate submitted input, resolved model preparation,
-execution ownership, and application business state. They are contracts for the
-next storage/driver integration; their presence does not enable interruption or
-new resume behavior in the existing driver.
+execution ownership, and application business state. The driver stores submitted
+request snapshots and immutable routed model preparations. Interruption-policy
+records do not yet enable an interrupted driver transition.
 
 `RequestSnapshot::capture` stores JSON text without rounding its number tokens.
 The profile reference and protected system inputs participate in its digest.
@@ -31,7 +31,8 @@ timeouts and default behavior before committing a decision.
 `PreparedStepRecord` references the exact model configuration, compiled Tool
 contracts and context projection for a model purpose. Runtime clients and
 credentials do not belong in these records. Protected record references must be
-resolved in the same authorized scope.
+resolved in the same authorized scope. See [prepared model steps](prepared-model-steps.md)
+for retry, fallback, recovery and Tool-contract binding.
 
 `ExecutionTransactions` specifies atomic segment acceptance and durable control
 command submission. It intentionally has no default implementation that simulates
@@ -41,6 +42,6 @@ events before the new segment driver can use them.
 
 The legacy Run checkpoint validator rejects `Interrupted`, because that format
 cannot carry the required execution record. `RunRequest.max_output_tokens` is a
-positive optional contract field. Until purpose-specific routing integration is
-available, the driver explicitly rejects a supplied override rather than silently
-ignoring it. Omitted values retain existing request encoding.
+positive optional contract field. The effective limit is bounded by Host,
+Profile, Run and selected-model caps; verification and compaction keep their own
+purpose-specific options. Omitted values retain existing request encoding.

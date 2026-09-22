@@ -527,6 +527,8 @@ pub struct ProjectionLimits {
 /// store; Message alone cannot authenticate its owner or prove history completeness.
 #[derive(Clone)]
 pub struct ProjectionInput<'a> {
+    /// Validated provider Tool contracts; empty retains native projection for direct callers.
+    pub tool_contracts: &'a [crate::CompiledToolContract],
     /// Original resolved profile of this run; never re-resolve it during resume.
     pub profile: &'a ResolvedProfile,
     /// Authenticated execution scope.
@@ -619,6 +621,23 @@ impl ContextAssembler {
         }
         validate_current_request(&input)?;
         let groups = project_transcript(snapshot, &input)?;
+        if !input.tool_contracts.is_empty()
+            && (input.tool_contracts.len() != snapshot.tools().len()
+                || input
+                    .tool_contracts
+                    .iter()
+                    .zip(snapshot.tools())
+                    .any(|(contract, original)| {
+                        contract.canonical_name() != &original.model_tool.name
+                            || contract.tool() != &original.tool
+                            || contract.target().provider != input.route.provider
+                            || contract.target().api_contract != input.route.api_contract
+                            || contract.target().capability_revision
+                                != input.route.capability_revision
+                    }))
+        {
+            return Err(mismatch("projection.tool_contracts"));
+        }
         let current = groups
             .iter()
             .position(|group| &group.run_id == input.run_id)
@@ -704,6 +723,16 @@ impl ContextAssembler {
         let make_request = |selected_groups: &BTreeSet<usize>,
                             selected_context: &BTreeSet<usize>| {
             let mut messages = snapshot.prefix();
+            for contract in input.tool_contracts {
+                for fragment in contract.constraint_fragments() {
+                    messages.push(ModelMessage {
+                        role: ModelRole::System,
+                        content: vec![ModelContent::Text {
+                            text: fragment.text.clone(),
+                        }],
+                    });
+                }
+            }
             // Historical summaries precede the retained conversation and current request.
             for index in selected_context {
                 if input.context_items[*index].origin == ContextOrigin::Compaction {
@@ -728,12 +757,19 @@ impl ContextAssembler {
                 purpose: input.purpose,
                 route: input.route.clone(),
                 messages,
-                tools: snapshot
-                    .data
-                    .tools
-                    .iter()
-                    .map(|tool| tool.model_tool.clone())
-                    .collect(),
+                tools: if input.tool_contracts.is_empty() {
+                    snapshot
+                        .tools()
+                        .iter()
+                        .map(|tool| tool.model_tool.clone())
+                        .collect()
+                } else {
+                    input
+                        .tool_contracts
+                        .iter()
+                        .map(|contract| contract.wire_tool().clone())
+                        .collect()
+                },
                 output: input.output.clone(),
                 max_output_tokens: input.max_output_tokens,
                 options: input.options.clone(),
@@ -922,7 +958,8 @@ fn project_transcript(
                             .data
                             .tools
                             .iter()
-                            .find(|tool| tool.model_tool.name == call.tool_name);
+                            .find(|tool| tool.model_tool.name == call.tool_name)
+                            .filter(|_| call.descriptor_digest.is_some());
                         if tool.is_some_and(|tool| {
                             Some(&tool.descriptor_digest) != call.descriptor_digest.as_ref()
                         }) {
@@ -938,10 +975,26 @@ fn project_transcript(
                             },
                         );
                         if is_visible {
+                            let contract = if tool.is_some() {
+                                input
+                                    .tool_contracts
+                                    .iter()
+                                    .find(|contract| contract.canonical_name() == &call.tool_name)
+                            } else {
+                                None
+                            };
                             content.push(ModelContent::ToolCall {
                                 provider_call_id: call.provider_call_id.clone(),
-                                name: call.tool_name.clone(),
-                                arguments: call.model_inputs.clone(),
+                                name: contract.map_or_else(
+                                    || call.tool_name.clone(),
+                                    |contract| contract.wire_tool().name.clone(),
+                                ),
+                                arguments: match contract {
+                                    Some(contract) => {
+                                        contract.encode_arguments(&call.model_inputs)?
+                                    }
+                                    None => call.model_inputs.clone(),
+                                },
                             });
                         }
                     }

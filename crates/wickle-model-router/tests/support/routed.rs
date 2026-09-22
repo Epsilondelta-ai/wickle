@@ -2,7 +2,7 @@ use std::{
     collections::VecDeque,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::Duration,
 };
@@ -16,6 +16,30 @@ use wickle_model_router::{ModelDispatcherEntry, PolicyModelRouter, RegistryModel
 
 use crate::core::{self, id, scope};
 
+fn search_binding() -> PromptToolBinding {
+    let descriptor = ToolDescriptor::from_json(&json!({
+        "tool":{"id":"search","version":"1"},"name":"search","description":"Search records",
+        "input_schema":{"type":"object","properties":{},"required":[],"additionalProperties":false},
+        "agent_parameters":[],"output_schema":{},"max_output_bytes":1024
+    }).to_string()).unwrap();
+    PromptToolBinding {
+        selection: serde_json::from_value(json!({"tool_id":"search","version":"1"})).unwrap(),
+        compiled: SchemaCompiler::new()
+            .compile(descriptor, &SystemInputRegistry::default())
+            .unwrap(),
+    }
+}
+fn search_manifest(binding: &PromptToolBinding) -> PinnedPromptTool {
+    PinnedPromptTool {
+        selection: binding.selection.clone(),
+        tool: binding.compiled.descriptor().tool.clone(),
+        compiler_version: binding.compiled.compiler_version().into(),
+        compiled_digest: binding.compiled.digest().clone(),
+        descriptor_digest: binding.compiled.descriptor_digest().clone(),
+        model_schema_digest: binding.compiled.model_schema_digest().clone(),
+        model_tool: binding.compiled.to_model_tool(),
+    }
+}
 pub fn reference(name: &str) -> VersionedRef {
     VersionedRef {
         id: id(name),
@@ -156,6 +180,8 @@ pub enum Reply {
 }
 
 pub struct Model {
+    pub compiler_lookups: AtomicUsize,
+    pub panic_compiler: AtomicBool,
     binding: ModelPortBinding,
     replies: Mutex<VecDeque<Reply>>,
     pub calls: Mutex<Vec<ModelRequest>>,
@@ -170,6 +196,8 @@ impl Model {
             .find(|model| model.reference() == binding.model)
             .unwrap();
         Self {
+            compiler_lookups: AtomicUsize::new(0),
+            panic_compiler: AtomicBool::new(false),
             binding: ModelPortBinding {
                 provider: model.provider.clone(),
                 adapter: binding.adapter.clone(),
@@ -182,6 +210,14 @@ impl Model {
     }
 }
 impl ModelPort for Model {
+    fn tool_schema_compiler(&self) -> Arc<dyn ProviderToolSchemaCompiler> {
+        self.compiler_lookups.fetch_add(1, Ordering::SeqCst);
+        assert!(
+            !self.panic_compiler.load(Ordering::SeqCst),
+            "compiler must not be consulted for replay"
+        );
+        Arc::new(NativeToolSchemaCompiler)
+    }
     fn binding(&self) -> ModelPortBinding {
         self.binding.clone()
     }
@@ -270,6 +306,7 @@ pub enum Inspection {
     UnavailablePrimary,
     UnavailableAll,
     Pending,
+    PendingFallback,
     Panics,
 }
 #[derive(Default)]
@@ -296,6 +333,9 @@ impl ModelRouteInspector for Inspector {
             let mode = *self.mode.lock().unwrap();
             match mode {
                 Inspection::Pending => std::future::pending::<()>().await,
+                Inspection::PendingFallback if route.binding.id == id("fallback") => {
+                    std::future::pending::<()>().await
+                }
                 Inspection::Panics => panic!("fixture inspector panic"),
                 _ => {}
             }
@@ -413,7 +453,32 @@ impl ModelRequestProjector for Projector {
                 }
                 _ => {}
             }
+            let mut tool_set = vec![];
+            let mut compiled_tools = vec![];
+            if matches!(mode, Projection::UsesTools) {
+                let binding = search_binding();
+                tool_set.push(ResolvedToolSetEntry::new(
+                    search_manifest(&binding),
+                    &binding.compiled,
+                )?);
+                compiled_tools.push(CompiledToolContract::compile(
+                    &binding.compiled,
+                    ProviderToolTarget {
+                        provider: selection.route.provider.clone(),
+                        api_contract: selection.route.api_contract.clone(),
+                        capability_revision: selection.route.capability_revision.clone(),
+                    },
+                    context
+                        .tool_schema_compiler
+                        .as_deref()
+                        .expect("new projection compiler"),
+                    ProviderToolSchemaLimits::default(),
+                )?);
+            }
             Ok(ProjectedModelRequest {
+                tool_set,
+                compiled_tools,
+                provenance: Default::default(),
                 request,
                 input_tokens: if matches!(mode, Projection::TooManyTokens) {
                     4096
@@ -451,6 +516,7 @@ impl Fixture {
         let mut input =
             core::admission("run", "request", "session", "Preserved request", "1").await;
         let mut profile = serde_json::to_value(input.snapshot.profile.profile()).unwrap();
+        profile["tools"] = json!([{"tool_id":"search","version":"1"}]);
         profile["limits"]["max_model_calls"] = json!(model_calls);
         profile["limits"]["max_recovery_attempts"] = json!(recoveries);
         input.snapshot.profile = ProfileValidator::new(&core::Catalog { revision: "1" })
@@ -484,6 +550,26 @@ impl Fixture {
             .iter_mut()
             .find(|record| record.reference() == &previous)
             .unwrap() = record;
+        let prompt = PromptSnapshot::create(
+            &input.snapshot.profile,
+            vec![],
+            None,
+            vec![search_binding()],
+            vec![],
+        )
+        .unwrap();
+        let prompt_record = ProtectedRecord::new(
+            input.prompt_snapshot.record_id.clone(),
+            1,
+            serde_json::to_value(prompt).unwrap(),
+        );
+        let old_prompt = input.prompt_snapshot.clone();
+        input.prompt_snapshot = prompt_record.reference().clone();
+        *input
+            .records
+            .iter_mut()
+            .find(|record| record.reference() == &old_prompt)
+            .unwrap() = prompt_record;
         store.admit(&scope(), input).await.unwrap();
         let lease = store
             .acquire_lease(&scope(), &id("run"), &id("worker"), 0, 20_000)

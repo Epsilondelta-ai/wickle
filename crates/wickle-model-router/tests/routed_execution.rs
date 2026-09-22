@@ -1,6 +1,9 @@
 //! Core-owned attempts, policy, inspection and fallback through real routing and dispatch.
 
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::{Arc, atomic::Ordering},
+    time::Duration,
+};
 
 use serde_json::json;
 use wickle::*;
@@ -191,20 +194,24 @@ async fn completed_steps_reuse_saved_response_but_recheck_permission_and_project
     assert_eq!(fixture.inspector.calls.lock().unwrap().len(), 1);
     assert_eq!(fixture.saved().await.revision, revision);
     *fixture.projector.mode.lock().unwrap() = Projection::DifferentContent;
-    assert_eq!(
+    fixture.first.panic_compiler.store(true, Ordering::SeqCst);
+    // A completed preparation is restored, not regenerated with changed Host code.
+    let replay = completed(
         exchange
             .generate_routed(
                 &fixture.router,
                 &input,
                 &fixture.projector,
                 &fixture.context(),
-                &fixture.budget().await
+                &fixture.budget().await,
             )
             .await
-            .unwrap_err()
-            .code,
-        ErrorCode::RequestConflict
+            .unwrap(),
     );
+    assert_eq!(replay, first);
+    assert_eq!(fixture.first.compiler_lookups.load(Ordering::SeqCst), 1);
+    assert_eq!(fixture.saved().await.revision, revision);
+    assert_eq!(fixture.call_counts(), (1, 0));
     *fixture.projector.mode.lock().unwrap() = Projection::Valid;
     *fixture.policy.denied_provider.lock().unwrap() = Some(id("provider-a"));
     assert_eq!(
@@ -412,7 +419,7 @@ async fn routed_invocations_need_valid_inspection_records_in_both_commits_and_re
             if corruption == "foreign-step" {
                 input.routing.scope.tenant_id = id("another-tenant");
             }
-            records.push(ProtectedRecord::new(id(&format!("model-step-{}",canonical_digest(&json!([saved.run_id,"new-step"])))),1,json!({"schema_version":"wickle.model-step.v1","run_id":saved.run_id,"input":input})));
+            records.push(ProtectedRecord::new(id(&format!("model-step-{}",canonical_digest(&json!([saved.run_id,"new-step"])))),1,json!({"schema_version":"wickle.model-step.v2","run_id":saved.run_id,"through_sequence":1,"input":input})));
         }
         if corruption == "missing" {
             invocation.inspection_ref = None;
@@ -434,7 +441,60 @@ async fn routed_invocations_need_valid_inspection_records_in_both_commits_and_re
             invocation.inspection_ref = Some(changed.reference().clone());
             records.push(changed);
         }
+        let original = fixture
+            .store
+            .read_record(&scope(), invocation.prepared_step_ref.as_ref().unwrap())
+            .await
+            .unwrap();
+        let mut root: PreparedStepRecord =
+            serde_json::from_value(original.value().clone()).unwrap();
+        let original_projection = fixture
+            .store
+            .read_record(&scope(), &root.context_projection)
+            .await
+            .unwrap();
+        let mut projection: PreparedModelProjection =
+            serde_json::from_value(original_projection.value().clone()).unwrap();
+        projection.request.request_id = id("new-step");
+        let mut physical = projection.request.clone();
+        physical.request_id = invocation.attempt_id.clone();
+        invocation.request_digest = physical.digest();
+        let projection_record = ProtectedRecord::new(
+            id("new-step-projection"),
+            1,
+            serde_json::to_value(projection).unwrap(),
+        );
+        if let Some(step) = records
+            .iter()
+            .find(|record| record.value()["schema_version"] == "wickle.model-step.v2")
+        {
+            root.step_input = step.reference().clone();
+        }
+        root.model_step_id = id("new-step");
+        root.context_projection = projection_record.reference().clone();
+        let root_record = ProtectedRecord::new(
+            id("new-step-preparation"),
+            1,
+            serde_json::to_value(root).unwrap(),
+        );
+        invocation.prepared_step_ref = Some(root_record.reference().clone());
         let mut update = core::prepared(&saved, fixture.lease.clone(), 0);
+        if let Some(step) = records
+            .iter()
+            .find(|record| record.value()["schema_version"] == "wickle.model-step.v2")
+        {
+            update
+                .snapshot
+                .model_step_inputs
+                .push(step.reference().clone());
+        }
+        update.snapshot.model_step_id = Some(id("new-step"));
+        update.snapshot.active_prepared_step = Some(root_record.reference().clone());
+        update
+            .snapshot
+            .prepared_steps
+            .push(root_record.reference().clone());
+        records.extend([projection_record, root_record]);
         update.snapshot.model_ledger.push(invocation);
         update.records = records.clone();
         let checkpoint = fixture.store.export_checkpoint(&scope()).unwrap();
@@ -774,4 +834,73 @@ async fn agent_calls_cannot_substitute_the_profile_logical_binding() {
     assert_eq!(error.code, ErrorCode::ModelRouteDenied);
     assert_eq!(fixture.call_counts(), (0, 0));
     assert_eq!(fixture.saved().await.usage.model_calls, 0);
+}
+
+#[tokio::test]
+async fn prepared_fallback_survives_a_crash_before_dispatch_without_reprojection_or_double_charge()
+{
+    let mut fixture = Fixture::new(
+        vec![Reply::Fail(ModelFailureKind::Transport)],
+        vec![Reply::Complete],
+    )
+    .await;
+    *fixture.inspector.mode.lock().unwrap() = Inspection::PendingFallback;
+    let input = fixture.input("durable-fallback");
+    {
+        let exchange = fixture.exchange(0);
+        let budget = fixture.budget().await;
+        let context = fixture.context();
+        let work = exchange.generate_routed(
+            &fixture.router,
+            &input,
+            &fixture.projector,
+            &context,
+            &budget,
+        );
+        tokio::pin!(work);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                tokio::select! {
+                    result = &mut work => panic!("fallback should be paused before dispatch: {result:?}"),
+                    _ = fixture.inspector.entered.notified() => {
+                        if fixture.inspector.calls.lock().unwrap().last().is_some_and(|route| route.binding.id == id("fallback")) { break; }
+                    }
+                }
+            }
+        }).await.unwrap();
+    }
+    let before = fixture.saved().await;
+    assert_eq!(fixture.call_counts(), (1, 0));
+    assert_eq!(before.prepared_steps.len(), 2);
+    assert_eq!(before.usage.recovery_attempts, 1);
+    let checkpoint = fixture.store.export_checkpoint(&scope()).unwrap();
+    let restored = StateStoreCheckpoint::from_json(
+        &serde_json::to_string(&checkpoint).unwrap(),
+        &scope(),
+        &checkpoint.digest(),
+    )
+    .unwrap();
+    fixture.store = Arc::new(MemoryStateStore::from_checkpoint(restored));
+    *fixture.inspector.mode.lock().unwrap() = Inspection::Healthy;
+    *fixture.projector.mode.lock().unwrap() = Projection::DifferentContent;
+    fixture.second.panic_compiler.store(true, Ordering::SeqCst);
+    completed(
+        fixture
+            .exchange(0)
+            .generate_routed(
+                &fixture.router,
+                &input,
+                &fixture.projector,
+                &fixture.context(),
+                &fixture.budget().await,
+            )
+            .await
+            .unwrap(),
+    );
+    let after = fixture.saved().await;
+    assert_eq!(after.prepared_steps, before.prepared_steps);
+    assert_eq!(after.usage.recovery_attempts, 1);
+    assert_eq!(fixture.call_counts(), (1, 1));
+    assert_eq!(fixture.projector.calls.lock().unwrap().len(), 2);
+    assert_eq!(fixture.second.compiler_lookups.load(Ordering::SeqCst), 1);
 }

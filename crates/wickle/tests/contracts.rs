@@ -730,6 +730,9 @@ async fn checkpoint() -> RunSnapshot {
         expires_at_ms: Some(100000),
     };
     RunSnapshot {
+        model_step_inputs: vec![],
+        prepared_steps: vec![],
+        active_prepared_step: None,
         schema_version: RunSnapshotSchemaVersion::V1,
         run_id: id("run"),
         request_digest: admission_digest(&request, &p, system_inputs.as_ref()),
@@ -1174,6 +1177,7 @@ fn route_roundtrip_keeps_model_api_deployment_and_adapter_versions_distinct() {
     changed.deployment_revision = Some(id("new-deployment-revision"));
     assert_ne!(changed.digest(), original);
     let record = ModelInvocationRecord {
+        prepared_step_ref: None,
         configuration: None,
         run_id: id("run"),
         model_step_id: id("step"),

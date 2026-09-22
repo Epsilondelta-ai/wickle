@@ -881,3 +881,41 @@ async fn reconciled_tool_observation_retains_the_original_model_step_sources() {
         }]
     );
 }
+
+#[tokio::test]
+async fn preparation_commit_failure_or_lost_ack_never_dispatches_or_charges_a_model() {
+    for failure in [1, 2] {
+        let mut fixture = Fixture::new();
+        let source = fixture.add(
+            "records",
+            ContextTrigger::RunStart,
+            true,
+            vec![Reply::Ready],
+        );
+        fixture
+            .store
+            .preparation_failure
+            .store(failure, Ordering::SeqCst);
+        let agent = fixture.agent();
+        let handle = fixture.start(&agent).await;
+        assert_eq!(
+            handle.outcome(&context()).await.unwrap_err().code,
+            ErrorCode::PersistenceUnavailable
+        );
+        let saved = fixture.saved(&handle).await;
+        assert_eq!(
+            saved.snapshot.prepared_steps.len(),
+            usize::from(failure == 2)
+        );
+        assert_eq!(saved.snapshot.model_step_inputs.len(), 1);
+        assert_eq!(saved.snapshot.usage.model_calls, 0);
+        assert!(saved.snapshot.model_ledger.is_empty());
+        assert!(saved.snapshot.tool_ledger.is_empty());
+        assert_eq!(fixture.model.physical_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(source.calls.load(Ordering::SeqCst), 1);
+        let image =
+            serde_json::to_value(fixture.store.inner.export_checkpoint(&scope()).unwrap()).unwrap();
+        StateStoreCheckpoint::from_json(&image.to_string(), &scope(), &canonical_digest(&image))
+            .unwrap();
+    }
+}

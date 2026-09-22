@@ -569,6 +569,7 @@ impl Agent {
                 .ok_or_else(|| fail(ErrorCode::RevisionConflict, "agent.prepare"))?;
             snapshot.phase = RunPhase::Prepare;
             snapshot.model_step_id = Some(step.clone());
+            snapshot.active_prepared_step = None;
             snapshot
                 .source_states
                 .retain(|state| state.trigger != ContextTrigger::BeforeModel);
@@ -671,6 +672,7 @@ impl Agent {
             },
         };
         let projector = Projector {
+            tools: segment.tools.clone(),
             output,
             saved,
             prompt,
@@ -1050,6 +1052,7 @@ pub(super) struct PreparedOutcome {
 }
 
 struct Projector<'a> {
+    tools: Arc<ToolRegistry>,
     output: ModelOutput,
     saved: StoredRun,
     prompt: PromptSnapshot,
@@ -1066,6 +1069,50 @@ struct Projector<'a> {
     projected_lineage: Mutex<Vec<ContextLineage>>,
 }
 impl ModelRequestProjector for Projector<'_> {
+    fn authorize_prepared<'a>(
+        &'a self,
+        prepared: &'a PreparedModelProjection,
+        selection: &'a RouteSelection,
+        input: &'a RoutedModelInput,
+        context: &'a ModelProjectionContext,
+    ) -> PortFuture<'a, ()> {
+        Box::pin(async move {
+            *self
+                .projected_lineage
+                .lock()
+                .map_err(|_| fail(ErrorCode::InvalidContract, "agent.lineage"))? =
+                prepared.provenance.source_lineage.clone();
+            let mut known = prepared.provenance.artifacts.clone();
+            let mut current = self.saved.snapshot.context_revision_ref.clone();
+            let mut seen = std::collections::BTreeSet::new();
+            while let Some(reference) = current {
+                if !seen.insert((reference.record_id.clone(), reference.revision)) {
+                    return Err(fail(ErrorCode::InvalidSnapshot, "agent.context_cycle"));
+                }
+                let record = self
+                    .bindings
+                    .state
+                    .read_record(&context.scope, &reference)
+                    .await?;
+                let revision: ContextRevision = serde_json::from_value(record.value().clone())
+                    .map_err(|_| fail(ErrorCode::InvalidSnapshot, "agent.context_revision"))?;
+                known.extend(crate::prepared_step::revision_artifacts(&revision));
+                current = revision.parent;
+            }
+            let mut artifacts = artifacts::selected(&prepared.request, &self.saved, &known)?;
+            for reference in &prepared.provenance.artifacts {
+                if !artifacts.contains(reference) {
+                    artifacts.push(reference.clone());
+                }
+            }
+            *self
+                .projected_artifacts
+                .lock()
+                .map_err(|_| fail(ErrorCode::InvalidContract, "agent.artifacts"))? = artifacts;
+            self.authorize_use(selection, input, context).await
+        })
+    }
+
     fn authorize_use<'a>(
         &'a self,
         selection: &'a RouteSelection,
@@ -1171,7 +1218,31 @@ impl ModelRequestProjector for Projector<'_> {
                         && message.role == MessageRole::User
                 })
                 .ok_or_else(|| fail(ErrorCode::InvalidSnapshot, "agent.request_message"))?;
+            let target = ProviderToolTarget {
+                provider: selection.route.provider.clone(),
+                api_contract: selection.route.api_contract.clone(),
+                capability_revision: selection.route.capability_revision.clone(),
+            };
+            let mut tool_set = vec![];
+            let mut compiled_tools = vec![];
+            for manifest in self.prompt.tools() {
+                let tool = &self
+                    .tools
+                    .get(&manifest.model_tool.name)
+                    .ok_or_else(|| fail(ErrorCode::ComponentUnavailable, "agent.prepared_tool"))?
+                    .compiled;
+                tool_set.push(ResolvedToolSetEntry::new(manifest.clone(), tool)?);
+                compiled_tools.push(CompiledToolContract::compile(
+                    tool,
+                    target.clone(),
+                    context.tool_schema_compiler.as_deref().ok_or_else(|| {
+                        fail(ErrorCode::InvalidConfiguration, "agent.schema_compiler")
+                    })?,
+                    ProviderToolSchemaLimits::default(),
+                )?);
+            }
             let seed = ProjectionInput {
+                tool_contracts: &compiled_tools,
                 profile: &self.saved.snapshot.profile,
                 scope: &context.scope,
                 run_id: &self.saved.snapshot.run_id,
@@ -1235,7 +1306,41 @@ impl ModelRequestProjector for Projector<'_> {
                 .projected_artifacts
                 .lock()
                 .map_err(|_| fail(ErrorCode::InvalidContract, "agent.artifacts"))? = references;
+            let mut fragments = vec![];
+            for reference in &self.source_batch_refs {
+                let record = self
+                    .bindings
+                    .state
+                    .read_record(&context.scope, reference)
+                    .await?;
+                if let Some(value) = record.value().get("fragments") {
+                    fragments.extend(
+                        serde_json::from_value::<Vec<ContextFragment>>(value.clone()).map_err(
+                            |_| fail(ErrorCode::InvalidSnapshot, "agent.prepared_fragments"),
+                        )?,
+                    );
+                }
+            }
+            let provenance = ProjectionProvenance {
+                context_revision_ref: None, // Stamped from the committed snapshot by ModelExchange.
+                through_sequence: self.saved.session.transcript_revision,
+                source_batches: self.source_batch_refs.clone(),
+                source_lineage: prepared.lineage,
+                artifacts: self
+                    .projected_artifacts
+                    .lock()
+                    .map_err(|_| fail(ErrorCode::InvalidContract, "agent.artifacts"))?
+                    .clone(),
+                fragments,
+                selected_message_ids: prepared.projection.selected_message_ids,
+                dropped_message_ids: prepared.projection.dropped_message_ids,
+                selected_context_ids: prepared.projection.selected_context_ids,
+                dropped_context_ids: prepared.projection.dropped_context_ids,
+            };
             Ok(ProjectedModelRequest {
+                tool_set,
+                compiled_tools,
+                provenance,
                 request: prepared.projection.request,
                 input_tokens: prepared.input_tokens,
             })

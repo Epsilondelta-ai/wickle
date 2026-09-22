@@ -508,6 +508,9 @@ impl Agent {
             .transpose()?;
         let now = bindings.clock.now()?.utc_ms;
         let snapshot = RunSnapshot {
+            model_step_inputs: vec![],
+            prepared_steps: vec![],
+            active_prepared_step: None,
             schema_version: RunSnapshotSchemaVersion::V1,
             run_id: run_id.clone(),
             request_digest: admission_digest(&request, &profile, Some(&inputs_ref)),

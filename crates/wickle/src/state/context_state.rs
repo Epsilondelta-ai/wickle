@@ -371,7 +371,7 @@ pub(super) fn validate_session(
     Ok(())
 }
 
-fn source_lineage(
+pub(super) fn source_lineage(
     state: &ScopeState,
     additions: &BTreeMap<RecordKey, ProtectedRecord>,
     current: &RunSnapshot,

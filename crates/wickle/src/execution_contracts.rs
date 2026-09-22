@@ -267,6 +267,20 @@ pub struct ExecutionSegment {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PreparedStepRecord {
+    /// Independently pinned logical input and original conversation boundary.
+    pub step_input: RecordRef,
+    /// Exact namespace owning all protected references.
+    pub scope: crate::Scope,
+    /// Owning execution.
+    pub run_id: Id,
+    /// Pinned resolved profile identity.
+    pub profile_digest: JsonDigest,
+    /// Optional pinned component assembly.
+    pub assembly_ref: Option<RecordRef>,
+    /// Final provider input identity independent of physical attempt IDs.
+    pub projection_fingerprint: JsonDigest,
+    /// Initial preparation or the explicit reason for changing the projection.
+    pub change_reason: Id,
     /// Explicit protected-record schema version.
     pub schema_version: ExecutionRecordVersion,
     /// Agent, verification or compaction invocation budget/policy purpose.

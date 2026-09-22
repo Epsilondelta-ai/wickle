@@ -213,6 +213,15 @@ impl RunBudget {
         &self,
         kind: ReservationKind,
     ) -> Result<AttemptReservation, ContractError> {
+        let (reservation, update) = crate::future::boxed(|| self.prepare_reservation(kind)).await?;
+        self.store.commit(&self.scope, &self.run_id, update).await?;
+        Ok(reservation)
+    }
+
+    async fn prepare_reservation(
+        &self,
+        kind: ReservationKind,
+    ) -> Result<(AttemptReservation, CommitInput), ContractError> {
         self.check_cancelled()?;
         let saved = self.store.load(&self.scope, &self.run_id).await?;
         self.validate_running(&saved.snapshot)?;
@@ -234,21 +243,102 @@ impl RunBudget {
         snapshot.usage.elapsed_ms = elapsed_ms;
         snapshot.timing.last_observed_at_ms = now_ms;
         snapshot.reservations.push(reservation.clone());
-        self.store
-            .commit(
-                &self.scope,
-                &self.run_id,
-                CommitInput {
-                    expected_revision,
-                    lease: self.lease.clone(),
-                    now_ms,
-                    snapshot,
-                    messages: Vec::new(),
-                    events: Vec::new(),
-                    records: Vec::new(),
-                },
-            )
-            .await?;
+        Ok((
+            reservation,
+            CommitInput {
+                expected_revision,
+                lease: self.lease.clone(),
+                now_ms,
+                snapshot,
+                messages: vec![],
+                events: vec![],
+                records: vec![],
+            },
+        ))
+    }
+
+    /// Charge the model attempt and record its exact input/inspection/event in
+    /// one CAS. A failed commit cannot leave a separately charged attempt.
+    pub(crate) async fn reserve_model(
+        &self,
+        request: &crate::ModelRequest,
+        configuration: Option<&crate::ModelConfiguration>,
+        prepared_step_ref: Option<&crate::RecordRef>,
+        selection_reason: Id,
+        observation: Option<crate::ModelRouteObservation>,
+    ) -> Result<AttemptReservation, ContractError> {
+        use crate::*;
+        let (reservation, mut update) = crate::future::boxed(|| {
+            self.prepare_reservation(ReservationKind::Model {
+                purpose: request.purpose,
+            })
+        })
+        .await?;
+        let invalid = || failure(ErrorCode::InvalidSnapshot, "model.reservation");
+        let mut physical = request.clone();
+        physical.request_id = reservation.attempt_id.clone();
+        let inspection = observation
+            .map(|observation| -> Result<_, ContractError> {
+                Ok(ProtectedRecord::new(
+                    Id::new(format!("model-inspection-{}", reservation.attempt_id))?,
+                    1,
+                    serde_json::to_value(observation).map_err(|_| invalid())?,
+                ))
+            })
+            .transpose()?;
+        let invocation = ModelInvocationRecord {
+            prepared_step_ref: prepared_step_ref.cloned(),
+            configuration: configuration.cloned(),
+            run_id: self.run_id.clone(),
+            model_step_id: request.request_id.clone(),
+            attempt_id: reservation.attempt_id.clone(),
+            purpose: request.purpose,
+            route: request.route.clone(),
+            selection_reason,
+            request_digest: physical.digest(),
+            state: ModelAttemptState::Reserved {},
+            inspection_ref: inspection.as_ref().map(|record| record.reference().clone()),
+            response_ref: None,
+            provider_request_id: None,
+            reported_model_id: None,
+            reported_model_version: None,
+            usage: None,
+        };
+        let record = ProtectedRecord::new(
+            Id::new(format!("model-invocation-{}", reservation.attempt_id))?,
+            1,
+            serde_json::to_value(&invocation).map_err(|_| invalid())?,
+        );
+        update.snapshot.last_event_seq = update
+            .snapshot
+            .last_event_seq
+            .checked_add(1)
+            .ok_or_else(invalid)?;
+        if request.purpose == ModelPurpose::Agent {
+            update.snapshot.phase = RunPhase::Model;
+            update.snapshot.model_step_id = Some(request.request_id.clone());
+        }
+        update.events.push(RunEvent {
+            schema_version: RunEventSchemaVersion::V1,
+            event_id: Id::new(format!("model-route-{}", reservation.attempt_id))?,
+            scope: self.scope.clone(),
+            run_id: self.run_id.clone(),
+            session_id: update.snapshot.request.session_id.clone(),
+            seq: update
+                .snapshot
+                .last_event_seq
+                .try_into()
+                .map_err(|_| invalid())?,
+            timestamp_ms: update.now_ms,
+            payload: RunEventPayload::ModelRouteSelected {
+                invocation_ref: record.reference().clone(),
+                route_digest: invocation.route.digest(),
+            },
+        });
+        update.snapshot.model_ledger.push(invocation);
+        update.records.push(record);
+        update.records.extend(inspection);
+        self.store.commit(&self.scope, &self.run_id, update).await?;
         Ok(reservation)
     }
 

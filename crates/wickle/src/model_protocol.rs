@@ -57,6 +57,12 @@ pub struct ModelCallContext {
 pub trait ModelPort: Send + Sync {
     /// Identities of the adapter and connection actually used by this instance.
     fn binding(&self) -> ModelPortBinding;
+    /// Pure compiler for this adapter's model-visible Tool schemas. It never
+    /// receives execution-only fields, clients or credentials. Override when
+    /// the provider requires a different schema representation.
+    fn tool_schema_compiler(&self) -> std::sync::Arc<dyn crate::ProviderToolSchemaCompiler> {
+        std::sync::Arc::new(crate::NativeToolSchemaCompiler)
+    }
     /// Generate one response. Partial argument deltas are never execution commands.
     fn generate<'a>(
         &'a self,

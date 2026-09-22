@@ -350,6 +350,43 @@ impl CompiledToolContract {
     pub fn digest(&self) -> &JsonDigest {
         &self.digest
     }
+    /// Encode canonical historical model arguments for this exact provider
+    /// representation. System inputs never belong in this map.
+    pub fn encode_arguments(&self, input: &JsonObject) -> Result<JsonObject, ContractError> {
+        match &self.data.decode_plan {
+            ArgumentDecodePlan::Identity {} => Ok(input.clone()),
+            ArgumentDecodePlan::Fields { fields } => {
+                if input
+                    .keys()
+                    .any(|key| !fields.iter().any(|field| &field.canonical_name == key))
+                {
+                    return Err(arguments());
+                }
+                let mut output = JsonObject::new();
+                for field in fields {
+                    let value = input.get(&field.canonical_name);
+                    match &field.encoding {
+                        ArgumentValueEncoding::Identity {} => {
+                            if let Some(value) = value {
+                                output.insert(field.wire_name.clone(), value.clone());
+                            }
+                        }
+                        ArgumentValueEncoding::Presence {
+                            present_key,
+                            value_key,
+                        } => {
+                            let envelope = serde_json::Map::from_iter([
+                                (present_key.clone(), Value::Bool(value.is_some())),
+                                (value_key.clone(), value.cloned().unwrap_or(Value::Null)),
+                            ]);
+                            output.insert(field.wire_name.clone(), Value::Object(envelope));
+                        }
+                    }
+                }
+                Ok(output)
+            }
+        }
+    }
     /// Restore model-owned names and values. Validation/defaults/system binding
     /// are separate boundaries; this does not authorize or execute the Tool.
     pub fn decode_arguments(

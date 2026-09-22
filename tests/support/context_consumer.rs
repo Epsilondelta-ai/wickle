@@ -99,6 +99,9 @@ fn admission(
     );
     let scope = profile.scope().clone();
     let snapshot = RunSnapshot {
+        model_step_inputs: vec![],
+        prepared_steps: vec![],
+        active_prepared_step: None,
         schema_version: RunSnapshotSchemaVersion::V1,
         run_id: id(run),
         request_digest: admission_digest(&request, profile, None),
@@ -171,6 +174,7 @@ fn project(
     ContextAssembler::new().project(
         prompt,
         ProjectionInput {
+            tool_contracts: &[],
             profile: &stored.snapshot.profile,
             scope: &stored.snapshot.scope,
             run_id: &stored.snapshot.run_id,

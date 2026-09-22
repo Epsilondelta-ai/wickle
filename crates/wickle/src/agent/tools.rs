@@ -108,6 +108,51 @@ impl Agent {
         if invocation.route.digest() != response.route_digest {
             return Err(fail(ErrorCode::ModelRoutingMismatch, "agent.tool_response"));
         }
+        let mut prepared_tools = Vec::new();
+        if let Some(reference) = &invocation.prepared_step_ref {
+            let root_record = bindings
+                .state
+                .read_record(budget.scope(), reference)
+                .await?;
+            let root: PreparedStepRecord = serde_json::from_value(root_record.value().clone())
+                .map_err(|_| fail(ErrorCode::InvalidSnapshot, "agent.prepared_step"))?;
+            let tool_record = bindings
+                .state
+                .read_record(budget.scope(), &root.tool_set)
+                .await?;
+            let tool_set: ResolvedToolSet = serde_json::from_value(tool_record.value().clone())
+                .map_err(|_| fail(ErrorCode::InvalidSnapshot, "agent.prepared_tool_set"))?;
+            tool_set.validate()?;
+            if tool_set.entries.len() != root.compiled_tools.len() {
+                return Err(fail(ErrorCode::InvalidSnapshot, "agent.prepared_tool_set"));
+            }
+            let target = ProviderToolTarget {
+                provider: invocation.route.provider.clone(),
+                api_contract: invocation.route.api_contract.clone(),
+                capability_revision: invocation.route.capability_revision.clone(),
+            };
+            for (entry, reference) in tool_set.entries.into_iter().zip(root.compiled_tools) {
+                if !prompt.tools().contains(&entry.manifest) {
+                    return Err(fail(ErrorCode::InvalidSnapshot, "agent.prepared_manifest"));
+                }
+                let tool = entry.restore_tool()?;
+                let record = bindings
+                    .state
+                    .read_record(budget.scope(), &reference)
+                    .await?;
+                let digest: JsonDigest =
+                    serde_json::from_value(record.value()["digest"].clone())
+                        .map_err(|_| fail(ErrorCode::InvalidSnapshot, "agent.prepared_contract"))?;
+                let contract = CompiledToolContract::restore(
+                    &record.value().to_string(),
+                    &tool,
+                    &target,
+                    &digest,
+                    ProviderToolSchemaLimits::default(),
+                )?;
+                prepared_tools.push((entry.manifest, contract, reference));
+            }
+        }
         let provider = invocation.route.provider.clone();
         let route_digest = invocation.route.digest();
         let expected_revision = snapshot.revision;
@@ -123,24 +168,59 @@ impl Agent {
         let mut records = vec![];
         let mut events = vec![];
         for proposed in &response.tool_calls {
-            let descriptor_digest = prompt
-                .tools()
+            let prepared = prepared_tools
                 .iter()
-                .find(|tool| tool.model_tool.name == proposed.name)
-                .map(|tool| tool.descriptor_digest.clone());
+                .find(|(_, contract, _)| contract.wire_tool().name == proposed.name);
+            let (name, model_inputs, descriptor_digest, contract_ref) =
+                if let Some((manifest, contract, reference)) = prepared {
+                    let raw = proposed.raw_arguments.clone().unwrap_or_else(|| {
+                        serde_json::to_string(&proposed.model_inputs).expect("model arguments")
+                    });
+                    let decoded = match contract
+                        .decode_arguments(&raw, ProviderToolSchemaLimits::default())
+                    {
+                        Ok(value) => value,
+                        Err(error) if error.code == ErrorCode::InvalidArguments => {
+                            JsonObject::new()
+                        }
+                        Err(error) => return Err(error),
+                    };
+                    (
+                        contract.canonical_name().clone(),
+                        decoded,
+                        Some(manifest.descriptor_digest.clone()),
+                        Some(reference.clone()),
+                    )
+                } else {
+                    let digest = if invocation.prepared_step_ref.is_none() {
+                        prompt
+                            .tools()
+                            .iter()
+                            .find(|tool| tool.model_tool.name == proposed.name)
+                            .map(|tool| tool.descriptor_digest.clone())
+                    } else {
+                        None
+                    };
+                    (
+                        proposed.name.clone(),
+                        proposed.model_inputs.clone(),
+                        digest,
+                        None,
+                    )
+                };
             let call = ToolCall {
                 provider_arguments: proposed.raw_arguments.as_ref().map(|raw| {
                     ProviderToolArguments {
                         name: proposed.name.clone(),
                         raw: raw.clone(),
-                        compiled_contract_ref: None,
+                        compiled_contract_ref: contract_ref,
                     }
                 }),
                 call_id: bindings.ids.next_id()?,
                 model_request_id: response.request_id.clone(),
                 provider_call_id: proposed.provider_call_id.clone(),
-                tool_name: proposed.name.clone(),
-                model_inputs: proposed.model_inputs.clone(),
+                tool_name: name,
+                model_inputs,
                 descriptor_digest,
                 bound_input_ref: None,
             };

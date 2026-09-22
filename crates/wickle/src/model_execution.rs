@@ -2,6 +2,7 @@ use std::{panic::AssertUnwindSafe, sync::Arc};
 
 use futures_util::FutureExt;
 
+mod prepared;
 mod routed;
 pub use routed::{
     ModelProjectionContext, ModelRequestProjector, ProjectedModelRequest, RoutedModelInput,
@@ -9,10 +10,9 @@ pub use routed::{
 
 use crate::{
     CommitInput, ContractError, ErrorCode, ExecutionContext, Guarded, Id, ModelAttemptState,
-    ModelCallContext, ModelFailureKind, ModelInvocationRecord, ModelPort, ModelProtocolError,
-    ModelRequest, ModelResponse, ModelResponseMetadata, PolicyAction, PolicyGate, PolicyRequest,
-    ProtectedRecord, ReservationKind, RunBudget, RunEvent, RunEventPayload, RunEventSchemaVersion,
-    RunPhase, collect_model_response,
+    ModelCallContext, ModelFailureKind, ModelPort, ModelProtocolError, ModelRequest, ModelResponse,
+    ModelResponseMetadata, PolicyAction, PolicyGate, PolicyRequest, ProtectedRecord,
+    ReservationKind, RunBudget, collect_model_response,
 };
 
 /// Explicit, bounded retries within the same already selected route. Router
@@ -173,49 +173,25 @@ impl ModelExchange {
             } else {
                 None
             };
-            let reservation = budget
-                .reserve(ReservationKind::Model {
-                    purpose: request.purpose,
-                })
-                .await?;
+            let reason = Id::new(if retry_number != 0 {
+                "same_route_retry"
+            } else if let Some((selection, _)) = routed {
+                routed::reason_code(selection.reason)
+            } else {
+                "requested_route"
+            })?;
+            let reservation = crate::future::boxed(|| {
+                budget.reserve_model(
+                    request,
+                    context_use.as_ref().map(|gate| gate.configuration),
+                    context_use.as_ref().map(|gate| gate.prepared_step_ref),
+                    reason,
+                    observation,
+                )
+            })
+            .await?;
             let mut physical_request = request.clone();
             physical_request.request_id = reservation.attempt_id.clone();
-            let inspection_record = observation
-                .map(|observation| {
-                    Ok::<_, ContractError>(ProtectedRecord::new(
-                        Id::new(format!("model-inspection-{}", reservation.attempt_id))?,
-                        1,
-                        serde_json::to_value(observation).map_err(|_| revision_error())?,
-                    ))
-                })
-                .transpose()?;
-            let invocation = ModelInvocationRecord {
-                configuration: context_use.as_ref().map(|gate| gate.configuration.clone()),
-                run_id: budget.run_id().clone(),
-                model_step_id: request.request_id.clone(),
-                attempt_id: reservation.attempt_id.clone(),
-                purpose: request.purpose,
-                route: request.route.clone(),
-                selection_reason: Id::new(if retry_number != 0 {
-                    "same_route_retry"
-                } else if let Some((selection, _)) = routed {
-                    routed::reason_code(selection.reason)
-                } else {
-                    "requested_route"
-                })?,
-                request_digest: physical_request.digest(),
-                state: ModelAttemptState::Reserved {},
-                inspection_ref: inspection_record
-                    .as_ref()
-                    .map(|record| record.reference().clone()),
-                response_ref: None,
-                provider_request_id: None,
-                reported_model_id: None,
-                reported_model_version: None,
-                usage: None,
-            };
-            self.record_start(budget, invocation, inspection_record)
-                .await?;
             // Neither a saved reservation nor earlier authorization grants lasting
             // permission. Check the physical request and current policy again.
             self.validate(&physical_request, context, budget, model.as_ref())?;
@@ -355,6 +331,24 @@ impl ModelExchange {
         Ok(())
     }
 
+    fn resolve_route(
+        &self,
+        scope: &crate::Scope,
+        route: &crate::ResolvedModelRoute,
+    ) -> Result<Arc<dyn ModelPort>, ContractError> {
+        let port = std::panic::catch_unwind(AssertUnwindSafe(|| match &self.models {
+            Models::Single(model) => Ok(model.clone()),
+            Models::Dispatcher(dispatcher) => dispatcher.resolve(scope, route),
+        }))
+        .map_err(|_| ContractError::new(ErrorCode::ComponentUnavailable, "model.dispatcher"))??;
+        if !port.binding().matches_route(route) {
+            return Err(ContractError::new(
+                ErrorCode::ModelBindingInvalid,
+                "model.binding",
+            ));
+        }
+        Ok(port)
+    }
     fn resolve_model(
         &self,
         request: &ModelRequest,
@@ -395,73 +389,6 @@ impl ModelExchange {
             },
             decision = self.policy.guard(&policy_request, context, Some(budget.call_deadline()?), None, || async { Ok(()) }) => decision,
         }
-    }
-
-    async fn record_start(
-        &self,
-        budget: &RunBudget,
-        invocation: ModelInvocationRecord,
-        inspection: Option<ProtectedRecord>,
-    ) -> Result<(), ContractError> {
-        let saved = budget.store().load(budget.scope(), budget.run_id()).await?;
-        let mut snapshot = saved.snapshot;
-        let expected_revision = snapshot.revision;
-        let (elapsed, now) = budget.settlement_time(snapshot.usage.elapsed_ms)?;
-        snapshot.revision = snapshot
-            .revision
-            .checked_add(1)
-            .ok_or_else(revision_error)?;
-        snapshot.last_event_seq = snapshot
-            .last_event_seq
-            .checked_add(1)
-            .ok_or_else(revision_error)?;
-        if invocation.purpose == crate::ModelPurpose::Agent {
-            snapshot.phase = RunPhase::Model;
-            snapshot.model_step_id = Some(invocation.model_step_id.clone());
-        }
-        snapshot.usage.elapsed_ms = elapsed;
-        snapshot.timing.last_observed_at_ms = now;
-        let record = ProtectedRecord::new(
-            Id::new(format!("model-invocation-{}", invocation.attempt_id))?,
-            1,
-            serde_json::to_value(&invocation).map_err(|_| revision_error())?,
-        );
-        let event = RunEvent {
-            schema_version: RunEventSchemaVersion::V1,
-            event_id: Id::new(format!("model-route-{}", invocation.attempt_id))?,
-            scope: budget.scope().clone(),
-            run_id: budget.run_id().clone(),
-            session_id: snapshot.request.session_id.clone(),
-            seq: snapshot
-                .last_event_seq
-                .try_into()
-                .map_err(|_| revision_error())?,
-            timestamp_ms: now,
-            payload: RunEventPayload::ModelRouteSelected {
-                invocation_ref: record.reference().clone(),
-                route_digest: invocation.route.digest(),
-            },
-        };
-        snapshot.model_ledger.push(invocation);
-        let mut records = vec![record];
-        records.extend(inspection);
-        budget
-            .store()
-            .commit(
-                budget.scope(),
-                budget.run_id(),
-                CommitInput {
-                    expected_revision,
-                    lease: budget.lease().clone(),
-                    now_ms: now,
-                    snapshot,
-                    messages: vec![],
-                    events: vec![event],
-                    records,
-                },
-            )
-            .await?;
-        Ok(())
     }
 
     async fn record_end(

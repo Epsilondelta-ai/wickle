@@ -221,3 +221,8 @@ pub use context_fragment::{
 
 mod context_lineage;
 pub use context_lineage::ContextLineage;
+
+mod prepared_step;
+pub use prepared_step::{
+    PreparedModelProjection, ProjectionProvenance, ResolvedToolSet, ResolvedToolSetEntry,
+};

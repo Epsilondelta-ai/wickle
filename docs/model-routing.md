@@ -47,7 +47,9 @@ Use `ModelExchange::with_dispatcher`, configure a bounded inspector with
 
 The routed entry point pins `RunSnapshot.routing_snapshot_ref` before the first
 physical call. It also stores the logical step input as an immutable protected
-record. Agent-purpose logical options must match the top-level merge of
+record with its original transcript boundary. The final
+[prepared model step](prepared-model-steps.md) is committed before dispatch.
+Agent-purpose logical options must match the top-level merge of
 `AgentProfile.model_options` and `RunRequest.model_options`. Purpose-specific helper
 settings remain Host inputs and are fixed for that logical step.
 Supply an empty `previous_route` and `previous_failure`: this entry point reads
@@ -91,8 +93,8 @@ settled results with unknown external effects, block routed generation. Unresolv
 model attempts require explicit recovery and are never silently resent.
 
 Repeating a completed logical step reuses its saved response after checking the
-original projected-request identity and current permission. It makes no new model
-call. A changed routing snapshot or changed step options fails rather than
+stored projected-request identity and current permission. The projector and
+schema compiler are not called again, and no new model call is made. A changed routing snapshot or changed step options fails rather than
 silently upgrading the resumed run.
 
 This is the model execution boundary. The agent driver owns transcript advancement,

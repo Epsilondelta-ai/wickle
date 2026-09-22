@@ -298,6 +298,7 @@ impl Fixture {
         let store = Arc::new(SourceStore {
             inner: base.base.base.store.clone(),
             failure: AtomicUsize::new(0),
+            preparation_failure: AtomicUsize::new(0),
         });
         Self {
             base,
@@ -489,6 +490,7 @@ impl PolicyPort for Policy {
 pub struct SourceStore {
     pub inner: Arc<MemoryStateStore>,
     pub failure: AtomicUsize,
+    pub preparation_failure: AtomicUsize,
 }
 impl StateStore for SourceStore {
     fn capabilities(&self) -> StateStoreCapabilities {
@@ -588,6 +590,24 @@ impl StateStore for SourceStore {
     ) -> PortFuture<'a, StoredRun> {
         Box::pin(async move {
             let saved = self.inner.load(s, r).await?;
+            if input.snapshot.prepared_steps.len() > saved.snapshot.prepared_steps.len() {
+                match self.preparation_failure.swap(0, Ordering::SeqCst) {
+                    1 => {
+                        return Err(ContractError::new(
+                            ErrorCode::PersistenceUnavailable,
+                            "prepared.commit",
+                        ));
+                    }
+                    2 => {
+                        self.inner.commit(s, r, input).await?;
+                        return Err(ContractError::new(
+                            ErrorCode::PersistenceUnavailable,
+                            "prepared.ack",
+                        ));
+                    }
+                    _ => {}
+                }
+            }
             if input.snapshot.context_batches.len() > saved.snapshot.context_batches.len() {
                 match self.failure.swap(0, Ordering::SeqCst) {
                     1 => {

@@ -521,6 +521,8 @@ async fn compaction_preserves_typed_artifact_and_evidence_anchors_from_removed_r
         serde_json::to_value(content).unwrap()
     );
     assert!(f.model.requests.lock().unwrap().last().unwrap().messages.iter().flat_map(|message|&message.content).any(|item|matches!(item,ModelContent::Json {value} if value["origin"]=="compaction"&&value["content"].as_array().is_some_and(|items|items.iter().any(|item|item["type"]=="evidence"&&item["content_hash"]==json!(evidence.content_hash))))));
+    let image = serde_json::to_value(f.base.store.export_checkpoint(&scope()).unwrap()).unwrap();
+    assert_prepared_corruption_rejected(&image, "artifacts");
 }
 struct PausedSummary {
     entered: Notify,
@@ -2181,6 +2183,18 @@ async fn compacted_source_history_keeps_immutable_lineage_and_rechecks_current_a
             "run_id":handle.run_id(), "batch_ref":saved.snapshot.context_batches[0]
         }])
     );
+    let image = serde_json::to_value(f.base.store.export_checkpoint(&scope()).unwrap()).unwrap();
+    for corruption in [
+        "lineage",
+        "boundary",
+        "fragments",
+        "source-selection",
+        "tool-set",
+        "compiler",
+        "fingerprint",
+    ] {
+        assert_prepared_corruption_rejected(&image, corruption);
+    }
     // The second Run has an empty fresh selection, so only the summary's old
     // source can cause this denial; no second provider inference is allowed.
     source.revoked.store(true, Ordering::SeqCst);
@@ -2202,5 +2216,302 @@ async fn compacted_source_history_keeps_immutable_lineage_and_rechecks_current_a
             .any(|request| request.derived
                 && request.consumer_run_id == *second.run_id()
                 && request.request.run_id == *handle.run_id())
+    );
+}
+
+struct PresenceCompiler(AtomicUsize);
+impl ProviderToolSchemaCompiler for PresenceCompiler {
+    fn reference(&self) -> VersionedRef {
+        reference("presence-compiler")
+    }
+    fn compile(
+        &self,
+        tool: &ModelTool,
+        _: &ProviderToolTarget,
+    ) -> Result<ProviderToolProjection, ContractError> {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        let mut properties = serde_json::Map::new();
+        let mut fields = vec![];
+        for name in tool.model_input_schema["properties"]
+            .as_object()
+            .unwrap()
+            .keys()
+        {
+            let wire_name = format!("p_{name}");
+            properties.insert(wire_name.clone(), json!({"type":"object","properties":{"present":{"type":"boolean"},"value":{}},"required":["present","value"],"additionalProperties":false}));
+            fields.push(ArgumentFieldMapping {
+                canonical_name: name.clone(),
+                wire_name,
+                encoding: ArgumentValueEncoding::Presence {
+                    present_key: "present".into(),
+                    value_key: "value".into(),
+                },
+            });
+        }
+        let required: Vec<_> = properties.keys().cloned().collect();
+        Ok(ProviderToolProjection {
+            wire_tool: ModelTool {
+                name: id(&format!("wire_{}", tool.name)),
+                description: tool.description.clone(),
+                model_input_schema: json!({"type":"object","properties":properties,"required":required,"additionalProperties":false}),
+            },
+            decode_plan: ArgumentDecodePlan::Fields { fields },
+        })
+    }
+}
+struct WireModel {
+    binding: ModelPortBinding,
+    compiler: Arc<PresenceCompiler>,
+    requests: Mutex<Vec<ModelRequest>>,
+    retry_first: bool,
+    unadvertised_name: bool,
+}
+impl ModelPort for WireModel {
+    fn binding(&self) -> ModelPortBinding {
+        self.binding.clone()
+    }
+    fn tool_schema_compiler(&self) -> Arc<dyn ProviderToolSchemaCompiler> {
+        self.compiler.clone()
+    }
+    fn generate<'a>(
+        &'a self,
+        request: &'a ModelRequest,
+        _: &'a ModelCallContext,
+    ) -> PortStream<'a, ModelEvent> {
+        let mut requests = self.requests.lock().unwrap();
+        let index = requests.len();
+        requests.push(request.clone());
+        drop(requests);
+        if self.retry_first && index == 0 {
+            return Box::pin(stream::iter([Ok(ModelEvent::ResponseError {
+                kind: ModelFailureKind::Transport,
+                metadata: Default::default(),
+            })]));
+        }
+        if index == usize::from(self.retry_first) {
+            let (name, args) = if self.unadvertised_name {
+                ("read", json!({"query":"records"}))
+            } else {
+                (
+                    "wire_read",
+                    json!({"p_query":{"present":true,"value":"records"},"p_limit":{"present":false,"value":null}}),
+                )
+            };
+            Box::pin(stream::iter([
+                Ok(ModelEvent::ToolArgumentsDelta {
+                    index: 0,
+                    provider_call_id: Some("wire-call".into()),
+                    name: Some(name.into()),
+                    delta: args.to_string(),
+                }),
+                Ok(ModelEvent::ResponseCompleted {
+                    finish: ModelFinish::ToolCalls,
+                    metadata: Default::default(),
+                    continuation: vec![],
+                }),
+            ]))
+        } else {
+            Box::pin(stream::iter([
+                Ok(ModelEvent::TextDelta {
+                    text: "Completed".into(),
+                }),
+                Ok(ModelEvent::ResponseCompleted {
+                    finish: ModelFinish::Stop,
+                    metadata: Default::default(),
+                    continuation: vec![],
+                }),
+            ]))
+        }
+    }
+}
+#[tokio::test]
+async fn provider_presence_codec_executes_canonical_inputs_and_reencodes_history_without_recompiling_retry()
+ {
+    for unadvertised in [false, true] {
+        let mut f = Fixture::new(vec![], Behavior::Success);
+        f.profile.limits.max_recovery_attempts = 1;
+        f.profile.limits.max_repair_attempts = 1;
+        let mut bindings = f.bindings();
+        let compiler = Arc::new(PresenceCompiler(AtomicUsize::new(0)));
+        let model = Arc::new(WireModel {
+            binding: f.model.binding(),
+            compiler: compiler.clone(),
+            requests: Mutex::new(vec![]),
+            retry_first: !unadvertised,
+            unadvertised_name: unadvertised,
+        });
+        bindings.model_exchange = Arc::new(
+            ModelExchange::new(model.clone(), bindings.policy.clone())
+                .with_route_inspector(f.base.inspector.clone(), Duration::from_secs(5))
+                .unwrap()
+                .with_retry_policy(ModelRetryPolicy {
+                    max_retries: 1,
+                    backoff_ms: 0,
+                }),
+        );
+        let agent = create_agent(f.profile.clone(), bindings).unwrap();
+        let handle = f.start(&agent).await;
+        assert_eq!(
+            f.outcome(&handle).await.result.status(),
+            RunStatus::Succeeded
+        );
+        assert_eq!(
+            f.tools[0].calls.load(Ordering::SeqCst),
+            usize::from(!unadvertised)
+        );
+        assert_eq!(f.tools[1].calls.load(Ordering::SeqCst), 0);
+        let saved = f.base.store.load(&scope(), handle.run_id()).await.unwrap();
+        assert_eq!(saved.snapshot.prepared_steps.len(), 2);
+        assert_eq!(compiler.0.load(Ordering::SeqCst), 4);
+        let requests = model.requests.lock().unwrap();
+        assert!(
+            requests.iter().all(|request| request
+                .tools
+                .iter()
+                .all(|tool| tool.model_input_schema["properties"]
+                    .get("workspace_id")
+                    .is_none()))
+        );
+        if !unadvertised {
+            assert_eq!(
+                saved.snapshot.model_ledger[0].prepared_step_ref,
+                saved.snapshot.model_ledger[1].prepared_step_ref
+            );
+            assert_ne!(
+                saved.snapshot.model_ledger[1].prepared_step_ref,
+                saved.snapshot.model_ledger[2].prepared_step_ref
+            );
+            assert_eq!(
+                f.tools[0].arguments.lock().unwrap()[0],
+                object(json!({"query":"records","limit":10,"workspace_id":WORKSPACE}))
+            );
+            assert!(requests.last().unwrap().messages.iter().flat_map(|message| &message.content).any(|content|
+                matches!(content, ModelContent::ToolCall { name, arguments, .. } if name == &id("wire_read") && arguments == &object(json!({"p_query":{"present":true,"value":"records"},"p_limit":{"present":false,"value":null}})))));
+            assert!(
+                saved.snapshot.tool_ledger[0]
+                    .call
+                    .provider_arguments
+                    .as_ref()
+                    .unwrap()
+                    .compiled_contract_ref
+                    .is_some()
+            );
+        } else {
+            let ToolCallState::Settled { result } = &saved.snapshot.tool_ledger[0].state else {
+                panic!("settled unknown call")
+            };
+            assert_eq!(result.error.as_ref().unwrap().code, id("unknown_tool"));
+            assert_eq!(saved.snapshot.usage.repair_attempts, 1);
+        }
+    }
+}
+
+fn checkpoint_record_mut<'a>(image: &'a mut Value, reference: &Value) -> &'a mut Value {
+    &mut image["records"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|record| &record["reference"] == reference)
+        .unwrap()["value"]
+}
+fn replace_checkpoint_reference(value: &mut Value, old: &Value, new: &Value) {
+    if value == old {
+        *value = new.clone();
+        return;
+    }
+    match value {
+        Value::Array(values) => values
+            .iter_mut()
+            .for_each(|value| replace_checkpoint_reference(value, old, new)),
+        Value::Object(values) => values
+            .values_mut()
+            .for_each(|value| replace_checkpoint_reference(value, old, new)),
+        _ => {}
+    }
+}
+fn rehash_checkpoint(image: &mut Value) {
+    for _ in 0..16 {
+        let changes: Vec<_> = image["records"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|record| {
+                let digest = serde_json::to_value(canonical_digest(&record["value"])).unwrap();
+                if record["reference"]["digest"] == digest {
+                    return None;
+                }
+                let old = record["reference"].clone();
+                let mut new = old.clone();
+                new["digest"] = digest;
+                Some((old, new))
+            })
+            .collect();
+        if changes.is_empty() {
+            return;
+        }
+        for (old, new) in changes {
+            replace_checkpoint_reference(image, &old, &new);
+        }
+    }
+    panic!("checkpoint reference cycle");
+}
+fn assert_prepared_corruption_rejected(image: &Value, corruption: &str) {
+    StateStoreCheckpoint::from_json(&image.to_string(), &scope(), &canonical_digest(image))
+        .unwrap();
+    let mut changed = image.clone();
+    let root_ref = changed["runs"][0]["snapshot"]["prepared_steps"]
+        .as_array()
+        .unwrap()
+        .last()
+        .unwrap()
+        .clone();
+    let root = checkpoint_record_mut(&mut changed, &root_ref).clone();
+    match corruption {
+        "artifacts" => {
+            checkpoint_record_mut(&mut changed, &root["context_projection"])["provenance"]["artifacts"] =
+                json!([])
+        }
+        "lineage" => {
+            checkpoint_record_mut(&mut changed, &root["context_projection"])["provenance"]["source_lineage"] =
+                json!([])
+        }
+        "boundary" => {
+            let projection = checkpoint_record_mut(&mut changed, &root["context_projection"]);
+            projection["provenance"]["through_sequence"] = json!(0);
+            projection["provenance"]["source_lineage"] = json!([]);
+        }
+        "fragments" => {
+            checkpoint_record_mut(&mut changed, &root["context_projection"])["provenance"]["fragments"] =
+                json!([])
+        }
+        "source-selection" => {
+            let projection = checkpoint_record_mut(&mut changed, &root["context_projection"]);
+            projection["provenance"]["source_batches"] = json!([]);
+            projection["provenance"]["fragments"] = json!([]);
+        }
+        "tool-set" => {
+            checkpoint_record_mut(&mut changed, &root["tool_set"])["entries"][0]["manifest"]["compiled_digest"] =
+                json!(canonical_digest(&json!("different contract")))
+        }
+        "compiler" => {
+            let contract = checkpoint_record_mut(&mut changed, &root["compiled_tools"][0]);
+            contract["data"]["canonical_name"] = json!("unregistered");
+            contract["digest"] = json!(canonical_digest(&contract["data"]));
+        }
+        "fingerprint" => {
+            checkpoint_record_mut(&mut changed, &root_ref)["projection_fingerprint"] =
+                json!(canonical_digest(&json!("different input")))
+        }
+        _ => panic!("unknown corruption"),
+    }
+    rehash_checkpoint(&mut changed);
+    assert!(
+        StateStoreCheckpoint::from_json(
+            &changed.to_string(),
+            &scope(),
+            &canonical_digest(&changed)
+        )
+        .is_err(),
+        "accepted {corruption} omission or mismatch with all containing record hashes recomputed"
     );
 }
