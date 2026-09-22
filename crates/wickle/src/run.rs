@@ -626,6 +626,19 @@ pub struct SourceExecutionState {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RunSnapshot {
+    /// Immutable logical-step submissions and their transcript boundaries.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub model_step_inputs: Vec<RecordRef>,
+    /// Append-only prepared inputs, including auxiliary model purposes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub prepared_steps: Vec<RecordRef>,
+    /// Current Agent preparation; cleared when a new logical step begins.
+    #[serde(
+        default,
+        deserialize_with = "optional",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub active_prepared_step: Option<RecordRef>,
     /// Checkpoint document version.
     pub schema_version: RunSnapshotSchemaVersion,
     /// Run identity.

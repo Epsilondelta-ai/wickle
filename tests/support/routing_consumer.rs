@@ -239,6 +239,9 @@ impl ModelRequestProjector for ExampleProjector {
     ) -> PortFuture<'a, ProjectedModelRequest> {
         Box::pin(async move {
             Ok(ProjectedModelRequest {
+                tool_set: vec![],
+                compiled_tools: vec![],
+                provenance: Default::default(),
                 input_tokens: 32,
                 request: ModelRequest {
                     request_id: input.model_step_id.clone(),
@@ -300,6 +303,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ProtectedRecord::new(id("request-record"), 1, serde_json::to_value(&request)?);
     let prompt = ProtectedRecord::new(id("prompt"), 1, json!({"text":"Use evidence"}));
     let snapshot = RunSnapshot {
+        model_step_inputs: vec![],
+        prepared_steps: vec![],
+        active_prepared_step: None,
         schema_version: RunSnapshotSchemaVersion::V1,
         run_id: id("run"),
         request_digest: admission_digest(&request, &profile, None),

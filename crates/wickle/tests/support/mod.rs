@@ -102,6 +102,9 @@ pub async fn admission(
         json!({"instructions":"Use evidence"}),
     );
     let snapshot = RunSnapshot {
+        model_step_inputs: vec![],
+        prepared_steps: vec![],
+        active_prepared_step: None,
         schema_version: RunSnapshotSchemaVersion::V1,
         run_id: id(run),
         request_digest: admission_digest(&request, &profile, None),

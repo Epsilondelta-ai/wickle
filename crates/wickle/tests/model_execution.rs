@@ -706,7 +706,8 @@ async fn failed_invocation_or_response_persistence_never_causes_an_untracked_ret
         );
         assert_eq!(model.observed.lock().unwrap().len(), expected_calls);
         let saved = fixture.saved().await;
-        assert_eq!(saved.usage.model_calls, 1);
+        assert_eq!(saved.usage.model_calls, expected_calls as u64);
+        assert_eq!(saved.reservations.len(), expected_calls);
         assert_eq!(saved.usage.recovery_attempts, 0);
         assert_eq!(saved.model_ledger.len(), expected_calls);
         if expected_calls == 1 {

@@ -236,6 +236,13 @@ pub enum ModelAttemptState {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ModelInvocationRecord {
+    /// Exact immutable input used by this physical attempt. Absent only on legacy records.
+    #[serde(
+        default,
+        deserialize_with = "optional",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub prepared_step_ref: Option<RecordRef>,
     /// Frozen routed inference settings; absent for legacy or explicitly unrouted calls.
     #[serde(
         default,

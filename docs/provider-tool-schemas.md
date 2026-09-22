@@ -54,10 +54,11 @@ with the original `CompiledTool`, the pinned target, and an independently truste
 expected digest. Restoration uses the saved codec and does not run a newer
 compiler. Send only `wire_tool()` and `constraint_fragments()` to the model.
 
-This module provides the compilation and restoration boundary. Agent driver
-integration and provider-specific projection policies are separate from this
-standalone API; creating a contract does not automatically change an Agent's
-registered Tool set.
+The Agent obtains the compiler through `ModelPort::tool_schema_compiler` and
+stores its output in an immutable [prepared model step](prepared-model-steps.md).
+It submits the wire schema and explanations, decodes completed calls with the
+saved contract, and uses `encode_arguments` for historical calls sent to another
+provider. Creating a standalone contract does not change the registered Tool set.
 
 Numeric arguments that cannot round-trip through the current JSON value type without
 changing their exact decimal value are rejected with `InvalidArguments` at

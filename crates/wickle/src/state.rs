@@ -12,6 +12,7 @@ mod checkpoint;
 mod context_state;
 mod execution;
 mod hook_state;
+mod prepared_state;
 mod reconciliation_state;
 mod recovery_state;
 mod skill_state;
@@ -452,6 +453,9 @@ impl StateStore for MemoryStateStore {
                 || input.snapshot.status != RunStatus::Running
                 || input.snapshot.phase != RunPhase::Admission
                 || !input.snapshot.model_ledger.is_empty()
+                || !input.snapshot.model_step_inputs.is_empty()
+                || !input.snapshot.prepared_steps.is_empty()
+                || input.snapshot.active_prepared_step.is_some()
                 || !input.snapshot.tool_ledger.is_empty()
                 || !input.snapshot.reservations.is_empty()
                 || !input.snapshot.resume_receipts.is_empty()
@@ -884,6 +888,7 @@ fn validate_snapshot_refs(
     snapshot: &RunSnapshot,
 ) -> Result<(), ContractError> {
     recovery_state::validate(state, additions, snapshot)?;
+    prepared_state::validate(state, additions, snapshot)?;
     validate_source_snapshot(state, additions, snapshot)?;
     skill_state::validate_skill_snapshot(state, additions, snapshot)?;
     context_state::validate_snapshot(state, additions, snapshot)?;
@@ -925,6 +930,8 @@ fn validate_snapshot_refs(
             struct SavedStep {
                 schema_version: String,
                 run_id: Id,
+                #[serde(default)]
+                through_sequence: Option<u64>,
                 input: crate::RoutedModelInput,
             }
             let key = (
@@ -944,7 +951,11 @@ fn validate_snapshot_refs(
                 .ok_or_else(|| error(ErrorCode::InvalidSnapshot, "routing.step_input"))?;
             let step: SavedStep = serde_json::from_value(value.clone())
                 .map_err(|_| error(ErrorCode::InvalidSnapshot, "routing.step_input"))?;
-            if step.schema_version != "wickle.model-step.v1"
+            if !matches!(
+                step.schema_version.as_str(),
+                "wickle.model-step.v1" | "wickle.model-step.v2"
+            ) || (step.schema_version == "wickle.model-step.v2"
+                && step.through_sequence.is_none())
                 || step.run_id != snapshot.run_id
                 || step.input.model_step_id != invocation.model_step_id
                 || step.input.routing.scope != snapshot.scope
@@ -1950,6 +1961,15 @@ fn validate_transition(previous: &RunSnapshot, next: &RunSnapshot) -> Result<(),
     next.validate()?;
     validate_hook_transition(previous, next)?;
     validate_source_transition(previous, next)?;
+    if !next
+        .model_step_inputs
+        .starts_with(&previous.model_step_inputs)
+        || next.model_step_inputs.len() > previous.model_step_inputs.len() + 1
+        || !next.prepared_steps.starts_with(&previous.prepared_steps)
+        || next.prepared_steps.len() > previous.prepared_steps.len() + 1
+    {
+        return Err(error(ErrorCode::InvalidTransition, "prepared.history"));
+    }
     if previous.skill_plan_ref != next.skill_plan_ref {
         return Err(error(ErrorCode::InvalidTransition, "skills.immutable_plan"));
     }
@@ -2115,6 +2135,7 @@ fn validate_transition(previous: &RunSnapshot, next: &RunSnapshot) -> Result<(),
                     || old.route != new.route
                     || old.selection_reason != new.selection_reason
                     || old.configuration != new.configuration
+                    || old.prepared_step_ref != new.prepared_step_ref
                     || old.request_digest != new.request_digest
                     || old.inspection_ref != new.inspection_ref
                     || (matches!(

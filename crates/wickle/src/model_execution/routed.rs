@@ -18,6 +18,9 @@ pub struct RoutedModelInput {
 
 /// Current Host context for a bounded route-specific projection.
 pub struct ModelProjectionContext {
+    /// Selected adapter compiler, present only while creating a new projection.
+    /// Saved-input authorization/replay receives None and must not recompile.
+    pub tool_schema_compiler: Option<Arc<dyn crate::ProviderToolSchemaCompiler>>,
     /// Validated settings for this exact destination.
     pub configuration: crate::ModelConfiguration,
     /// Exact authenticated namespace.
@@ -35,6 +38,12 @@ pub struct ModelProjectionContext {
 /// A fully prepared request and its route-specific input-token estimate.
 #[derive(Debug, Clone)]
 pub struct ProjectedModelRequest {
+    /// Original execution definitions corresponding to every advertised Tool.
+    pub tool_set: Vec<crate::ResolvedToolSetEntry>,
+    /// Provider schemas and reversible argument plans for this projection.
+    pub compiled_tools: Vec<crate::CompiledToolContract>,
+    /// Saved selection and current-access dependencies.
+    pub provenance: crate::ProjectionProvenance,
     /// Exact selected route, purpose, logical step, options and output budget.
     pub request: ModelRequest,
     /// Host/tokenizer estimate for this final projection, not a byte count.
@@ -51,6 +60,17 @@ pub trait ModelRequestProjector: Send + Sync {
         input: &'a RoutedModelInput,
         context: &'a ModelProjectionContext,
     ) -> PortFuture<'a, ProjectedModelRequest>;
+    /// Authorize an immutable stored projection, including after process recovery.
+    /// Implementations may use its provenance but must not regenerate its input.
+    fn authorize_prepared<'a>(
+        &'a self,
+        _prepared: &'a crate::PreparedModelProjection,
+        selection: &'a RouteSelection,
+        input: &'a RoutedModelInput,
+        context: &'a ModelProjectionContext,
+    ) -> PortFuture<'a, ()> {
+        self.authorize_use(selection, input, context)
+    }
     /// Recheck access to already projected context without fetching or changing
     /// its contents. Called for every physical attempt, including same-route
     /// retries, and before a saved model response is reused.
@@ -66,6 +86,8 @@ pub trait ModelRequestProjector: Send + Sync {
 
 pub(super) struct ContextUseGate<'a> {
     pub projector: &'a dyn ModelRequestProjector,
+    pub prepared: &'a crate::PreparedModelProjection,
+    pub prepared_step_ref: &'a crate::RecordRef,
     pub selection: &'a RouteSelection,
     pub input: &'a RoutedModelInput,
     pub configuration: &'a crate::ModelConfiguration,
@@ -77,6 +99,7 @@ impl ContextUseGate<'_> {
         budget: &RunBudget,
     ) -> Result<(), ContractError> {
         let controls = ModelProjectionContext {
+            tool_schema_compiler: None,
             configuration: self.configuration.clone(),
             scope: budget.scope().clone(),
             principal_ref: context.data.principal_ref.clone(),
@@ -88,7 +111,7 @@ impl ContextUseGate<'_> {
         external(
             async {
                 self.projector
-                    .authorize_use(self.selection, self.input, &controls)
+                    .authorize_prepared(self.prepared, self.selection, self.input, &controls)
                     .await
             },
             context,
@@ -196,6 +219,26 @@ impl ModelExchange {
             .rev()
             .find(|attempt| attempt.model_step_id == input.model_step_id)
             .cloned();
+        let mut prepared_route = None;
+        for reference in saved.snapshot.prepared_steps.iter().rev() {
+            let record = budget
+                .store()
+                .read_record(budget.scope(), reference)
+                .await?;
+            let root: crate::PreparedStepRecord =
+                serde_json::from_value(record.value().clone()).map_err(|_| revision_error())?;
+            if root.model_step_id == input.model_step_id && root.purpose == input.routing.purpose {
+                let projection = budget
+                    .store()
+                    .read_record(budget.scope(), &root.context_projection)
+                    .await?;
+                let projection: crate::PreparedModelProjection =
+                    serde_json::from_value(projection.value().clone())
+                        .map_err(|_| revision_error())?;
+                prepared_route = Some(projection.request.route);
+                break;
+            }
+        }
         let mut routing = input.routing.clone();
         let mut replay = None;
         let mut interrupted = None;
@@ -216,6 +259,17 @@ impl ModelExchange {
                         ErrorCode::ModelAttemptUnresolved,
                         "routing.attempt",
                     ));
+                }
+            }
+        }
+        // Preparation of a fallback is durable even if the process stopped before
+        // its first physical reservation. Resume that target without charging
+        // the same fallback again or consulting its predecessor's provider.
+        if replay.is_none() && interrupted.is_none() {
+            if let Some(route) = prepared_route {
+                if routing.previous_route.as_ref() != Some(&route) {
+                    routing.previous_route = Some(route);
+                    routing.previous_failure = None;
                 }
             }
         }
@@ -263,7 +317,23 @@ impl ModelExchange {
                 ),
                 input.routing.max_output_tokens,
             )?;
+            let restored = crate::future::boxed(|| {
+                self.load_preparation(input, &selection.route, &configuration, budget)
+            })
+            .await?;
+            let tool_schema_compiler = if restored.is_none() {
+                let port = self.resolve_route(budget.scope(), &selection.route)?;
+                Some(
+                    std::panic::catch_unwind(AssertUnwindSafe(|| port.tool_schema_compiler()))
+                        .map_err(|_| {
+                            failure(ErrorCode::InvalidContract, "model.schema_compiler")
+                        })?,
+                )
+            } else {
+                None
+            };
             let projection_context = ModelProjectionContext {
+                tool_schema_compiler,
                 configuration: configuration.clone(),
                 scope: budget.scope().clone(),
                 principal_ref: context.data.principal_ref.clone(),
@@ -272,17 +342,27 @@ impl ModelExchange {
                 deadline: budget.call_deadline()?,
             };
             let _cancel = projection_context.cancellation.clone().drop_guard();
-            let prepared = external(
-                async {
-                    projector
-                        .project(&selection, input, &projection_context)
-                        .await
-                },
-                context,
-                budget,
-                ErrorCode::ModelContextIncompatible,
-            )
-            .await?;
+            let prepared = if let Some(stored) = &restored {
+                ProjectedModelRequest {
+                    request: stored.projection.request.clone(),
+                    input_tokens: stored.projection.input_tokens,
+                    provenance: stored.projection.provenance.clone(),
+                    tool_set: vec![],
+                    compiled_tools: vec![],
+                }
+            } else {
+                external(
+                    async {
+                        projector
+                            .project(&selection, input, &projection_context)
+                            .await
+                    },
+                    context,
+                    budget,
+                    ErrorCode::ModelContextIncompatible,
+                )
+                .await?
+            };
             projection_context.cancellation.cancel();
             validate_projection(&prepared.request, input, &selection, &configuration)?;
             // Validate the final route-specific estimate, not the earlier candidate estimate.
@@ -297,6 +377,16 @@ impl ModelExchange {
             final_selection.reason = RouteSelectionReason::Reuse;
             final_selection.request_digest = final_requirements.digest();
             pinned.validate_selection(&final_requirements, &final_selection)?;
+            let stored = match restored {
+                Some(stored) => stored,
+                None => {
+                    crate::future::boxed(|| {
+                        self.save_preparation(prepared, &configuration, &selection, budget)
+                    })
+                    .await?
+                }
+            };
+            let prepared = &stored.projection;
             if let Some(previous) = interrupted.take() {
                 let mut physical = prepared.request.clone();
                 physical.request_id = previous.attempt_id;
@@ -332,6 +422,8 @@ impl ModelExchange {
                     .map_err(|_| failure(ErrorCode::InvalidSnapshot, "routing.response"))?;
                 ContextUseGate {
                     projector,
+                    prepared: &stored.projection,
+                    prepared_step_ref: &stored.reference,
                     selection: &selection,
                     configuration: &configuration,
                     input,
@@ -370,6 +462,8 @@ impl ModelExchange {
                     Some((&selection, version_policy)),
                     Some(ContextUseGate {
                         projector,
+                        prepared: &stored.projection,
+                        prepared_step_ref: &stored.reference,
                         selection: &selection,
                         configuration: &configuration,
                         input,
@@ -481,25 +575,50 @@ impl ModelExchange {
         context: &ExecutionContext,
         budget: &RunBudget,
     ) -> Result<(), ContractError> {
+        let saved = budget.store().load(budget.scope(), budget.run_id()).await?;
+        for reference in &saved.snapshot.model_step_inputs {
+            let record = budget
+                .store()
+                .read_record(budget.scope(), reference)
+                .await?;
+            let prior: RoutedModelInput = serde_json::from_value(record.value()["input"].clone())
+                .map_err(|_| revision_error())?;
+            if prior.model_step_id == input.model_step_id {
+                if crate::serialization::data_digest(&prior)
+                    != crate::serialization::data_digest(input)
+                {
+                    return Err(failure(ErrorCode::RequestConflict, "routing.step_input"));
+                }
+                return Ok(());
+            }
+        }
         let key =
             crate::canonical_digest(&serde_json::json!([budget.run_id(), input.model_step_id]));
-        let record = ProtectedRecord::new(
+        let legacy = ProtectedRecord::new(
             Id::new(format!("model-step-{key}"))?,
             1,
             serde_json::json!({"schema_version":"wickle.model-step.v1", "run_id":budget.run_id(), "input":input}),
         );
         match budget
             .store()
-            .read_record(budget.scope(), record.reference())
+            .read_record(budget.scope(), legacy.reference())
             .await
         {
-            Ok(_) => return Ok(()),
             Err(error) if error.code == ErrorCode::StateNotFound => {}
-            Err(error) if error.code == ErrorCode::RecordConflict => {
-                return Err(failure(ErrorCode::RequestConflict, "routing.step_input"));
-            }
             Err(error) => return Err(error),
+            Ok(_) => {
+                return Err(failure(
+                    ErrorCode::ContextMismatch,
+                    "prepared.legacy_step_boundary",
+                ));
+            }
         }
+        let record = ProtectedRecord::new(
+            Id::new(format!("model-step-{key}"))?,
+            1,
+            serde_json::json!({"schema_version":"wickle.model-step.v2", "run_id":budget.run_id(),
+                "through_sequence":saved.session.transcript_revision,"input":input}),
+        );
         budget.check_boundary().await?;
         if context.cancellation.is_cancelled() {
             return Err(cancelled());
@@ -517,6 +636,7 @@ impl ModelExchange {
             .ok_or_else(revision_error)?;
         snapshot.usage.elapsed_ms = elapsed;
         snapshot.timing.last_observed_at_ms = now;
+        snapshot.model_step_inputs.push(record.reference().clone());
         budget
             .store()
             .commit(

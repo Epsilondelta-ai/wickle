@@ -815,7 +815,46 @@ impl ModelRequestProjector for ReviewProjector<'_> {
                 limits: self.bindings.settings.response_limits.clone(),
             };
             let input_tokens = self.bindings.token_estimator.estimate(&request)?;
+            let mut provenance = ProjectionProvenance::default();
+            if let Some(sources) = self.sources {
+                let saved = self
+                    .bindings
+                    .state
+                    .load(&context.scope, self.run_id)
+                    .await?;
+                let record = self
+                    .bindings
+                    .state
+                    .read_record(&context.scope, self.candidate_ref)
+                    .await?;
+                let candidate: VerificationCandidate =
+                    serde_json::from_value(record.value().clone())
+                        .map_err(|_| fail(ErrorCode::InvalidSnapshot, "verification.candidate"))?;
+                let messages = candidate_lineage_messages(&saved, &candidate)?;
+                let current = ExecutionContext::new(
+                    ExecutionContextData {
+                        scope: context.scope.clone(),
+                        principal_ref: context.principal_ref.clone(),
+                        capability_grant_ref: context.capability_grant_ref.clone(),
+                        trace_context: None,
+                        system_inputs: None,
+                    },
+                    context.cancellation.clone(),
+                );
+                provenance.source_lineage = crate::future::boxed(|| {
+                    sources.lineage_for_messages(
+                        &saved.snapshot.request.session_id,
+                        &messages,
+                        &current,
+                        context.deadline,
+                    )
+                })
+                .await?;
+            }
             Ok(ProjectedModelRequest {
+                tool_set: vec![],
+                compiled_tools: vec![],
+                provenance,
                 request,
                 input_tokens,
             })

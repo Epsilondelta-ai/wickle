@@ -85,6 +85,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let started_at = clock.now()?.utc_ms;
     let run_id = id("run");
     let snapshot = RunSnapshot {
+        model_step_inputs: vec![],
+        prepared_steps: vec![],
+        active_prepared_step: None,
         schema_version: RunSnapshotSchemaVersion::V1,
         run_id: run_id.clone(),
         request_digest: admission_digest(&request, &profile, None),

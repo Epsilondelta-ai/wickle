@@ -698,6 +698,9 @@ async fn snapshot() -> RunSnapshot {
         ..BudgetUsage::default()
     };
     RunSnapshot {
+        model_step_inputs: vec![],
+        prepared_steps: vec![],
+        active_prepared_step: None,
         schema_version: RunSnapshotSchemaVersion::V1,
         run_id: id("run"),
         request_digest: admission_digest(&request, &profile, system_inputs.as_ref()),

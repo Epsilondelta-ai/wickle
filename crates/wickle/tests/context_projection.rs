@@ -205,6 +205,7 @@ impl Fixture {
         opaque: &'a [ScopedOpaque],
     ) -> ProjectionInput<'a> {
         ProjectionInput {
+            tool_contracts: &[],
             profile: &self.profile,
             scope: &self.scope,
             run_id: &self.run_id,
