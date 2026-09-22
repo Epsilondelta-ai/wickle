@@ -275,10 +275,21 @@ impl Fixture {
     }
     async fn outcome(&self, handle: &RunHandle) -> RunOutcome {
         completed(
-            tokio::time::timeout(Duration::from_secs(3), handle.outcome(&context()))
-                .await
-                .unwrap()
-                .unwrap(),
+            // Let the engine's own deadline settle before the test watchdog.
+            // This suite checks Skill semantics, not runner-specific CPU latency.
+            tokio::time::timeout(
+                Duration::from_millis(
+                    self.profile
+                        .limits
+                        .max_elapsed_ms
+                        .get()
+                        .saturating_add(2000),
+                ),
+                handle.outcome(&context()),
+            )
+            .await
+            .unwrap()
+            .unwrap(),
         )
     }
 }
