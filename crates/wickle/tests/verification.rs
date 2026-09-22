@@ -929,3 +929,50 @@ async fn a_verifier_can_use_its_own_explicit_logical_model_binding() {
     );
     assert_eq!(model.calls.load(Ordering::SeqCst), 2);
 }
+
+#[tokio::test]
+async fn replay_precedes_current_verifier_lookup_and_new_request_limits() {
+    let (fixture, profile, bindings, model, checks) =
+        setup(&["checked"], vec![Ok(VerificationDecision::Pass {})]);
+    let agent = create_agent(profile.clone(), bindings).unwrap();
+    let first = fixture.started(&agent, "stored").await;
+    let original = completed(first.outcome(&context()).await.unwrap());
+    let mut changed = fixture.bindings();
+    changed.settings.max_request_bytes = 1;
+    let restarted = create_agent(profile.clone(), changed).unwrap();
+    let replay = completed(restarted.start(request("stored"), context()).await.unwrap());
+    assert_eq!(replay.run_id(), first.run_id());
+    assert_eq!(
+        completed(replay.outcome(&context()).await.unwrap()),
+        original
+    );
+    assert_eq!(model.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(checks.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(fixture.catalog.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(fixture.model.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        restarted
+            .start(request("new-too-large"), context())
+            .await
+            .unwrap_err()
+            .code,
+        ErrorCode::InvalidContract
+    );
+    let missing_verifier = create_agent(profile, fixture.bindings()).unwrap();
+    assert_eq!(
+        missing_verifier
+            .start(request("new-no-verifier"), context())
+            .await
+            .unwrap_err()
+            .code,
+        ErrorCode::ComponentUnavailable
+    );
+    assert!(
+        fixture
+            .store
+            .find_request(&scope(), &id("session"), &id("new-no-verifier"))
+            .await
+            .unwrap()
+            .is_none()
+    );
+}

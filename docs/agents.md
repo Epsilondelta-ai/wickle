@@ -367,3 +367,24 @@ foreign continuation. The original session prompt remains pinned.
 Replaying `start` retrieves the original Run; it does not consume a saved wait or
 restart an interrupted running worker. Use a matching `ResumeCommand` for the
 supported waits described above.
+
+## Replaying a submitted request
+
+Construction checks profile structure, finite runtime settings and binding scopes.
+It does not require the current Tool, context-strategy or verifier registry to
+resolve every profile reference. New-request admission performs those checks.
+This allows a facade to retrieve an already accepted request after runtime
+registrations have changed or become unavailable.
+
+Start checks current authorization and scope before looking up the request key.
+An existing request is compared against its saved submitted-input snapshot and
+normalization version, without current registry resolution or another model call.
+New request limits and current verifier planning apply only when the key is new.
+A changed submitted payload is a conflict; an existing key never bypasses revoked
+permission. Atomic admission repeats the identity comparison against the winning
+stored snapshot when concurrent submissions race.
+
+The submitted snapshot records caller options and Host-provided system inputs,
+not newly resolved catalog defaults. Current effective configuration remains in
+the separate execution snapshot. Older records without submitted-input evidence
+use their historical comparison path rather than fabricated new metadata.

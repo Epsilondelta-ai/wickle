@@ -288,13 +288,19 @@ async fn classified_model_failure_is_saved_with_its_partial_output_instead_of_su
 }
 
 #[tokio::test]
-async fn unsupported_profile_modes_are_rejected_before_any_callbacks_or_model_calls() {
+async fn unsupported_profile_modes_are_rejected_before_resolution_or_model_calls() {
     let fixture = Fixture::new(Response::Text, false);
     let mut verified = profile();
     verified.completion_policy = CompletionPolicy::Verified {
         verifier_ref: reference("verifier"),
     };
-    assert!(create_agent(verified, fixture.bindings()).is_err());
+    assert!(
+        create_agent(verified, fixture.bindings())
+            .unwrap()
+            .start(request("request"), context())
+            .await
+            .is_err()
+    );
     let mut tools = profile();
     tools.tools = vec![ToolBindingRef::Catalog(CatalogToolRef {
         tool_id: id("search"),
@@ -302,7 +308,13 @@ async fn unsupported_profile_modes_are_rejected_before_any_callbacks_or_model_ca
         bindings: None,
         config: None,
     })];
-    assert!(create_agent(tools, fixture.bindings()).is_err());
+    assert!(
+        create_agent(tools, fixture.bindings())
+            .unwrap()
+            .start(request("request"), context())
+            .await
+            .is_err()
+    );
     let mut hooks = profile();
     hooks.hooks = Some(vec![HookRef::Catalog(CatalogHookRef {
         hook_id: id("hook"),
@@ -310,7 +322,12 @@ async fn unsupported_profile_modes_are_rejected_before_any_callbacks_or_model_ca
         position: HookPosition::BeforeModel,
     })]);
     assert_eq!(
-        create_agent(hooks, fixture.bindings()).unwrap_err().code,
+        create_agent(hooks, fixture.bindings())
+            .unwrap()
+            .start(request("request"), context())
+            .await
+            .unwrap_err()
+            .code,
         ErrorCode::CapabilityUnsupported
     );
     let mut sources = profile();
@@ -327,7 +344,12 @@ async fn unsupported_profile_modes_are_rejected_before_any_callbacks_or_model_ca
         max_tokens: 128.try_into().unwrap(),
     }]);
     assert_eq!(
-        create_agent(sources, fixture.bindings()).unwrap_err().code,
+        create_agent(sources, fixture.bindings())
+            .unwrap()
+            .start(request("request"), context())
+            .await
+            .unwrap_err()
+            .code,
         ErrorCode::CapabilityUnsupported
     );
     assert_eq!(fixture.catalog.calls.load(Ordering::SeqCst), 0);
@@ -1084,4 +1106,61 @@ async fn another_session_finishes_while_the_first_run_waits_on_model_io() {
     })
     .await
     .unwrap();
+}
+
+#[tokio::test]
+async fn saved_submission_survives_catalog_outage_but_not_revoked_authorization() {
+    struct Offline(std::sync::atomic::AtomicUsize);
+    impl ProfileResolver for Offline {
+        fn resolve<'a>(
+            &'a self,
+            _: &'a ComponentRef,
+            _: &'a Scope,
+        ) -> PortFuture<'a, ComponentMetadata> {
+            Box::pin(async move {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Err(ContractError::new(
+                    ErrorCode::ComponentUnavailable,
+                    "offline.catalog",
+                ))
+            })
+        }
+    }
+    let fixture = Fixture::new(Response::Text, false);
+    let first_agent = fixture.agent();
+    let first = fixture.started(&first_agent, "original").await;
+    completed(first.outcome(&context()).await.unwrap());
+    let offline = std::sync::Arc::new(Offline(std::sync::atomic::AtomicUsize::new(0)));
+    let mut bindings = fixture.bindings();
+    bindings.profile_resolver = offline.clone();
+    let restarted = create_agent(profile(), bindings).unwrap();
+    let replay = completed(
+        restarted
+            .start(request("original"), context())
+            .await
+            .unwrap(),
+    );
+    assert_eq!(replay.run_id(), first.run_id());
+    assert_eq!(offline.0.load(Ordering::SeqCst), 0);
+    fixture.policy.deny.store(3, Ordering::SeqCst);
+    assert_eq!(
+        restarted
+            .start(request("original"), context())
+            .await
+            .unwrap_err()
+            .code,
+        ErrorCode::AccessDenied
+    );
+    assert_eq!(offline.0.load(Ordering::SeqCst), 0);
+    fixture.policy.deny.store(0, Ordering::SeqCst);
+    assert_eq!(
+        restarted
+            .start(request("new-offline"), context())
+            .await
+            .unwrap_err()
+            .code,
+        ErrorCode::ComponentUnavailable
+    );
+    assert!(offline.0.load(Ordering::SeqCst) > 0);
+    assert_eq!(fixture.model.calls.load(Ordering::SeqCst), 1);
 }

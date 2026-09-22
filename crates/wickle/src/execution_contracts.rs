@@ -139,6 +139,23 @@ impl RequestSnapshot {
         }
         Ok(())
     }
+    /// Compare another submission using this stored record's normalization and
+    /// canonicalization rules, not the newer candidate's computed digest.
+    pub fn matches_submission(
+        &self,
+        candidate: &Self,
+        limits: JsonTextLimits,
+    ) -> Result<bool, ContractError> {
+        self.validate(limits)?;
+        candidate.validate(limits)?;
+        Ok(Self::compute(
+            &candidate.profile_ref,
+            &candidate.request_json,
+            &candidate.system_inputs_json,
+            self.canonicalization,
+            limits,
+        )? == self.digest)
+    }
     /// Version that must be used when comparing a resubmission.
     pub fn canonicalization(&self) -> CanonicalizationVersion {
         self.canonicalization

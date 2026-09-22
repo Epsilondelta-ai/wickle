@@ -387,19 +387,9 @@ impl StateStore for MemoryStateStore {
         input: AdmissionInput,
     ) -> PortFuture<'a, AdmissionResult> {
         Box::pin(async move {
-            if input.require_durable {
-                return Err(error(ErrorCode::CapabilityUnsupported, "store.durable"));
-            }
             check_scope(scope, &input.snapshot.scope)?;
-            if scope != input.snapshot.profile.scope()
-                || input.snapshot.request_digest
-                    != admission_digest(
-                        &input.snapshot.request,
-                        &input.snapshot.profile,
-                        input.snapshot.system_inputs.as_ref(),
-                    )
-            {
-                return Err(error(ErrorCode::InvalidSnapshot, "request_digest"));
+            if scope != input.snapshot.profile.scope() {
+                return Err(error(ErrorCode::InvalidSnapshot, "request_scope"));
             }
             let mut scopes = self.lock()?;
             let empty = ScopeState::default();
@@ -410,13 +400,44 @@ impl StateStore for MemoryStateStore {
             );
             if let Some(run_id) = state.requests.get(&request_key) {
                 let previous = stored_run(state, run_id)?;
-                if previous.snapshot.request_digest != input.snapshot.request_digest {
+                let same = match state
+                    .executions
+                    .get(run_id)
+                    .and_then(|h| h.submitted.as_ref())
+                {
+                    Some(stored) => match &input.submitted {
+                        Some(candidate) => stored
+                            .matches_submission(candidate, crate::JsonTextLimits::default())?,
+                        None => false,
+                    },
+                    None => {
+                        previous.snapshot.request_digest
+                            == admission_digest(
+                                &input.snapshot.request,
+                                &input.snapshot.profile,
+                                input.snapshot.system_inputs.as_ref(),
+                            )
+                    }
+                };
+                if !same {
                     return Err(error(ErrorCode::RequestConflict, "request"));
                 }
                 return Ok(AdmissionResult {
                     created: false,
                     state: previous,
                 });
+            }
+            if input.require_durable {
+                return Err(error(ErrorCode::CapabilityUnsupported, "store.durable"));
+            }
+            if input.snapshot.request_digest
+                != admission_digest(
+                    &input.snapshot.request,
+                    &input.snapshot.profile,
+                    input.snapshot.system_inputs.as_ref(),
+                )
+            {
+                return Err(error(ErrorCode::InvalidSnapshot, "request_digest"));
             }
             if state.runs.iter().any(|(id, run)| {
                 !run.snapshot.status.is_terminal() && !state.executions.contains_key(id)

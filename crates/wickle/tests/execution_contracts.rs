@@ -136,3 +136,48 @@ fn output_cap_preserves_omission_and_rejects_null_zero_or_fraction() {
         42
     );
 }
+
+#[test]
+fn replay_uses_stored_canonicalization_instead_of_candidate_digest() {
+    let original = RequestSnapshot::capture(
+        profile(),
+        r#"{"model_options":{"temperature":1e3}}"#,
+        None,
+        JsonTextLimits::default(),
+    )
+    .unwrap();
+    let envelope = format!(
+        "{{\"profile_ref\":{},\"request\":{},\"system_inputs\":{{}}}}",
+        serde_json::to_string(&profile()).unwrap(),
+        original.request_json()
+    );
+    let mut stored = serde_json::to_value(&original).unwrap();
+    stored["canonicalization"] = json!("sorted-json-v1");
+    stored["digest"] = json!(
+        versioned_digest_json(
+            &envelope,
+            CanonicalizationVersion::SortedJsonV1,
+            JsonTextLimits::default()
+        )
+        .unwrap()
+    );
+    let stored: RequestSnapshot = serde_json::from_value(stored).unwrap();
+    let candidate = RequestSnapshot::capture(
+        profile(),
+        r#"{"model_options":{"temperature":1000.0}}"#,
+        Some("{}"),
+        JsonTextLimits::default(),
+    )
+    .unwrap();
+    assert_ne!(stored.digest(), candidate.digest());
+    assert!(
+        stored
+            .matches_submission(&candidate, JsonTextLimits::default())
+            .unwrap()
+    );
+    assert!(
+        !original
+            .matches_submission(&candidate, JsonTextLimits::default())
+            .unwrap()
+    );
+}

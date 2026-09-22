@@ -26,6 +26,10 @@ impl ContextRewriteLimits {
     }
 }
 impl ContextRuntime {
+    pub(crate) fn scope(&self) -> &Scope {
+        &self.scope
+    }
+
     pub(crate) fn validate_router(&self, routing: &RoutingSnapshot) -> Result<(), ContractError> {
         if routing.scope() != &self.scope {
             return Err(context_error(

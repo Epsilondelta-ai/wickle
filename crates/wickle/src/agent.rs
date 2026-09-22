@@ -217,7 +217,8 @@ impl fmt::Debug for Agent {
     }
 }
 
-/// Validate the configured runtime without invoking any Host callback.
+/// Validate structural settings and binding scopes without invoking Host callbacks.
+/// Profile requirements are resolved only when admitting a new request.
 /// Tools, adapters, skills, context strategies, and verifiers use existing Host bindings.
 /// Instruction asset loading and generic extension execution remain unsupported.
 pub fn create_agent(
@@ -226,20 +227,13 @@ pub fn create_agent(
 ) -> Result<Agent, ContractError> {
     profile.validate_structure()?;
     bindings.settings.validate()?;
-    if !matches!(profile.instructions, Instructions::Text(_))
-        || (!profile.skills.is_empty() && bindings.skills.is_none())
-        || (bindings.components.is_none()
-            && (!profile.connectors.is_empty()
-                || profile.adapters.as_ref().is_some_and(|v| !v.is_empty())))
-        || profile.extensions.as_ref().is_some_and(|v| !v.is_empty())
-    {
-        return Err(fail(ErrorCode::CapabilityUnsupported, "agent.profile"));
-    }
     let context = match &bindings.context_runtime {
         Some(context) => context.clone(),
         None => Arc::new(ContextRuntime::bounded(bindings.scope.clone())?),
     };
-    context.plan(&profile, &bindings.scope)?;
+    if context.scope() != &bindings.scope {
+        return Err(fail(ErrorCode::AccessDenied, "agent.context_scope"));
+    }
     let verification = match &bindings.verification {
         Some(runtime) => runtime.clone(),
         None => Arc::new(VerificationRuntime::text(bindings.scope.clone())?),
@@ -247,14 +241,24 @@ pub fn create_agent(
     if verification.scope != bindings.scope {
         return Err(fail(ErrorCode::AccessDenied, "agent.verification_scope"));
     }
-    verification.plan(&profile, None)?;
-
     if bindings
         .skills
         .as_ref()
-        .is_some_and(|skills| skills.scope() != &bindings.scope)
+        .is_some_and(|value| value.scope() != &bindings.scope)
+        || bindings
+            .tools
+            .as_ref()
+            .is_some_and(|value| value.scope() != &bindings.scope)
+        || bindings
+            .hooks
+            .as_ref()
+            .is_some_and(|value| value.scope() != &bindings.scope)
+        || bindings
+            .context_sources
+            .as_ref()
+            .is_some_and(|value| value.scope() != &bindings.scope)
     {
-        return Err(fail(ErrorCode::AccessDenied, "agent.skills_scope"));
+        return Err(fail(ErrorCode::AccessDenied, "agent.binding_scope"));
     }
     if bindings.components.is_some()
         && (bindings.tools.is_some()
@@ -264,64 +268,6 @@ pub fn create_agent(
         return Err(fail(
             ErrorCode::InvalidConfiguration,
             "agent.component_authority",
-        ));
-    }
-    if bindings.components.is_none() {
-        match &bindings.context_sources {
-            Some(sources) => {
-                if sources.scope() != &bindings.scope {
-                    return Err(fail(ErrorCode::AccessDenied, "agent.sources_scope"));
-                }
-                sources.plan(&profile)?;
-            }
-            None if profile
-                .context_sources
-                .as_ref()
-                .is_some_and(|sources| !sources.is_empty()) =>
-            {
-                return Err(fail(ErrorCode::CapabilityUnsupported, "agent.sources"));
-            }
-            None => {}
-        }
-        match &bindings.hooks {
-            Some(hooks) => {
-                if hooks.scope() != &bindings.scope {
-                    return Err(fail(ErrorCode::AccessDenied, "agent.hooks_scope"));
-                }
-                hooks.plan(&profile)?;
-            }
-            None if profile
-                .hooks
-                .as_ref()
-                .is_some_and(|hooks| !hooks.is_empty()) =>
-            {
-                return Err(fail(ErrorCode::CapabilityUnsupported, "agent.hooks"));
-            }
-            None => {}
-        }
-        match &bindings.tools {
-            Some(registry) => {
-                if registry.scope() != &bindings.scope {
-                    return Err(fail(ErrorCode::AccessDenied, "agent.tools_scope"));
-                }
-                registry.prompt_bindings(&profile)?;
-            }
-            None if !profile.tools.is_empty() => {
-                return Err(fail(ErrorCode::CapabilityUnsupported, "agent.tools"));
-            }
-            None => {}
-        }
-    }
-    if bindings.components.is_some()
-        && profile
-            .context_sources
-            .as_ref()
-            .is_some_and(|sources| !sources.is_empty())
-        && bindings.context_token_estimator.is_none()
-    {
-        return Err(fail(
-            ErrorCode::InvalidConfiguration,
-            "agent.source_estimator",
         ));
     }
     let observed = Arc::new(persistence::ObservedState::default());
@@ -933,5 +879,106 @@ async fn caller_read<T>(
         _ = context.cancellation.cancelled() => Err(fail(ErrorCode::Cancelled, "agent.read")),
         _ = deadline => Err(fail(ErrorCode::DeadlineExceeded, "agent.read")),
         result = future => result,
+    }
+}
+
+impl Agent {
+    pub(super) fn validate_new_configuration(&self) -> Result<(), ContractError> {
+        let profile = &self.inner.profile;
+        let bindings = &self.inner.bindings;
+        let context = &self.inner.context;
+        let verification = &self.inner.verification;
+        if !matches!(profile.instructions, Instructions::Text(_))
+            || (!profile.skills.is_empty() && bindings.skills.is_none())
+            || (bindings.components.is_none()
+                && (!profile.connectors.is_empty()
+                    || profile.adapters.as_ref().is_some_and(|v| !v.is_empty())))
+            || profile.extensions.as_ref().is_some_and(|v| !v.is_empty())
+        {
+            return Err(fail(ErrorCode::CapabilityUnsupported, "agent.profile"));
+        }
+        context.plan(profile, &bindings.scope)?;
+        if verification.scope != bindings.scope {
+            return Err(fail(ErrorCode::AccessDenied, "agent.verification_scope"));
+        }
+        verification.plan(profile, None)?;
+
+        if bindings
+            .skills
+            .as_ref()
+            .is_some_and(|skills| skills.scope() != &bindings.scope)
+        {
+            return Err(fail(ErrorCode::AccessDenied, "agent.skills_scope"));
+        }
+        if bindings.components.is_some()
+            && (bindings.tools.is_some()
+                || bindings.hooks.is_some()
+                || bindings.context_sources.is_some())
+        {
+            return Err(fail(
+                ErrorCode::InvalidConfiguration,
+                "agent.component_authority",
+            ));
+        }
+        if bindings.components.is_none() {
+            match &bindings.context_sources {
+                Some(sources) => {
+                    if sources.scope() != &bindings.scope {
+                        return Err(fail(ErrorCode::AccessDenied, "agent.sources_scope"));
+                    }
+                    sources.plan(profile)?;
+                }
+                None if profile
+                    .context_sources
+                    .as_ref()
+                    .is_some_and(|sources| !sources.is_empty()) =>
+                {
+                    return Err(fail(ErrorCode::CapabilityUnsupported, "agent.sources"));
+                }
+                None => {}
+            }
+            match &bindings.hooks {
+                Some(hooks) => {
+                    if hooks.scope() != &bindings.scope {
+                        return Err(fail(ErrorCode::AccessDenied, "agent.hooks_scope"));
+                    }
+                    hooks.plan(profile)?;
+                }
+                None if profile
+                    .hooks
+                    .as_ref()
+                    .is_some_and(|hooks| !hooks.is_empty()) =>
+                {
+                    return Err(fail(ErrorCode::CapabilityUnsupported, "agent.hooks"));
+                }
+                None => {}
+            }
+            match &bindings.tools {
+                Some(registry) => {
+                    if registry.scope() != &bindings.scope {
+                        return Err(fail(ErrorCode::AccessDenied, "agent.tools_scope"));
+                    }
+                    registry.prompt_bindings(profile)?;
+                }
+                None if !profile.tools.is_empty() => {
+                    return Err(fail(ErrorCode::CapabilityUnsupported, "agent.tools"));
+                }
+                None => {}
+            }
+        }
+        if bindings.components.is_some()
+            && profile
+                .context_sources
+                .as_ref()
+                .is_some_and(|sources| !sources.is_empty())
+            && bindings.context_token_estimator.is_none()
+        {
+            return Err(fail(
+                ErrorCode::InvalidConfiguration,
+                "agent.source_estimator",
+            ));
+        }
+
+        Ok(())
     }
 }

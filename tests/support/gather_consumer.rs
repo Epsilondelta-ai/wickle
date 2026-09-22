@@ -613,9 +613,11 @@ mod host {
                     .is_err()
             );
             let error = scenario
-                .build(invalid_profile)
+                .build(invalid_profile)?
+                .start(request("unregistered"), execution.clone())
+                .await
                 .err()
-                .ok_or("unregistered tool was accepted")?;
+                .ok_or("unregistered tool execution was accepted")?;
             assert_eq!(error.code, ErrorCode::ComponentUnavailable);
             let mut escalation = scenario.profile();
             escalation["capability_grant_ref"] = json!("administrator");
