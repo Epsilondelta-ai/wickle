@@ -145,6 +145,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     invalid_full.insert("workspace_id".into(), json!("an-invented-hash"));
     assert!(compiled.validate_execution_inputs(&invalid_full).is_err());
     assert!(compiled.validate_execution_inputs(&model_inputs).is_err());
+    let target = ProviderToolTarget {
+        provider: id("example-provider"),
+        api_contract: ApiContract { operation: id("messages"), version: id("1") },
+        capability_revision: id("capabilities"),
+    };
+    let limits = ProviderToolSchemaLimits::default();
+    let projected = CompiledToolContract::compile(&compiled, target.clone(), &NativeToolSchemaCompiler, limits)?;
+    let persisted = serde_json::to_string(&projected)?;
+    let reopened = CompiledToolContract::restore(&persisted, &compiled, &target, projected.digest(), limits)?;
+    let decoded = reopened.decode_arguments(&serde_json::to_string(&model_inputs)?, limits)?;
+    compiled.validate_model_inputs(&decoded)?;
+    assert_eq!(decoded, model_inputs);
+    assert_eq!(reopened.canonical_name(), &id("search_reports"));
     let request = model_request(compiled.to_model_tool());
     assert_eq!(
         propose(&request, &model_inputs).await?.tool_calls[0].validation,

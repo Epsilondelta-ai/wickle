@@ -409,10 +409,58 @@ impl SchemaCompiler {
                 "properties" | "required" | "$defs" | "definitions" => {}
                 "patternProperties" => return Err(unsupported("input_schema.patternProperties")),
                 key if root_constraint(key) => {
-                    if mixed {
-                        return Err(unsupported("input_schema.cross_parameter_constraint"));
+                    if !mixed {
+                        projected.insert(key.into(), value.clone());
+                    } else if key == "allOf" {
+                        let parts: Vec<_> = value
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .filter_map(|part| {
+                                model_only_condition(part, &exposed, &descriptor.input_schema, 0)
+                            })
+                            .collect();
+                        if !parts.is_empty() {
+                            projected
+                                .entry(key)
+                                .or_insert_with(|| Value::Array(Vec::new()))
+                                .as_array_mut()
+                                .expect("allOf array")
+                                .extend(parts);
+                        }
+                    } else if matches!(key, "if" | "then" | "else") {
+                        let safe = ["if", "then", "else"].iter().all(|part| {
+                            root.get(*part).is_none_or(|node| {
+                                model_only_condition(node, &exposed, &descriptor.input_schema, 0)
+                                    .is_some()
+                            })
+                        });
+                        if safe {
+                            projected.insert(
+                                key.into(),
+                                model_only_condition(value, &exposed, &descriptor.input_schema, 0)
+                                    .expect("checked condition"),
+                            );
+                        }
+                    } else {
+                        let wrapper = Value::Object(Map::from_iter([(key.into(), value.clone())]));
+                        if let Some(Value::Object(mut condition)) =
+                            model_only_condition(&wrapper, &exposed, &descriptor.input_schema, 0)
+                        {
+                            if key == "$ref" {
+                                if let Some(Value::Array(parts)) = condition.remove("allOf") {
+                                    projected
+                                        .entry("allOf")
+                                        .or_insert_with(|| Value::Array(Vec::new()))
+                                        .as_array_mut()
+                                        .expect("allOf array")
+                                        .extend(parts);
+                                }
+                            } else if let Some(value) = condition.remove(key) {
+                                projected.insert(key.into(), value);
+                            }
+                        }
                     }
-                    projected.insert(key.into(), value.clone());
                 }
                 // Root annotations can contain full execution examples, so they are
                 // never copied. Selected field annotations remain explicitly visible.
@@ -716,4 +764,118 @@ pub(crate) fn compile_validator(schema: &Value) -> Result<jsonschema::Validator,
         .with_retriever(NoSchemaRetrieval)
         .build(schema)
         .map_err(|_| invalid("schema"))
+}
+
+// A root predicate is model-only only if hidden properties cannot change its truth.
+// Conditions that depend on system fields stay in the full execution validator.
+fn model_only_condition(
+    node: &Value,
+    exposed: &BTreeSet<&str>,
+    document: &Value,
+    depth: usize,
+) -> Option<Value> {
+    if depth > 64 {
+        return None;
+    }
+    if node.is_boolean() {
+        return Some(node.clone());
+    }
+    let map = node.as_object()?;
+    let mut result = Map::new();
+    for (key, value) in map {
+        match key.as_str() {
+            "properties" => {
+                let props = value.as_object()?;
+                if props.keys().any(|name| !exposed.contains(name.as_str())) {
+                    return None;
+                }
+                result.insert(key.clone(), value.clone());
+            }
+            "required" => {
+                if value
+                    .as_array()?
+                    .iter()
+                    .any(|name| name.as_str().is_none_or(|name| !exposed.contains(name)))
+                {
+                    return None;
+                }
+                result.insert(key.clone(), value.clone());
+            }
+            "allOf" | "anyOf" | "oneOf" => {
+                let parts: Option<Vec<_>> = value
+                    .as_array()?
+                    .iter()
+                    .map(|part| model_only_condition(part, exposed, document, depth + 1))
+                    .collect();
+                let parts = parts?;
+                if key == "allOf" {
+                    result
+                        .entry(key.clone())
+                        .or_insert_with(|| Value::Array(Vec::new()))
+                        .as_array_mut()?
+                        .extend(parts);
+                } else {
+                    result.insert(key.clone(), Value::Array(parts));
+                }
+            }
+            "not" | "if" | "then" | "else" => {
+                result.insert(
+                    key.clone(),
+                    model_only_condition(value, exposed, document, depth + 1)?,
+                );
+            }
+            "dependentRequired" => {
+                let dependencies = value.as_object()?;
+                for (name, required) in dependencies {
+                    if !exposed.contains(name.as_str())
+                        || required
+                            .as_array()?
+                            .iter()
+                            .any(|name| name.as_str().is_none_or(|name| !exposed.contains(name)))
+                    {
+                        return None;
+                    }
+                }
+                result.insert(key.clone(), value.clone());
+            }
+            "dependentSchemas" => {
+                let mut dependencies = Map::new();
+                for (name, schema) in value.as_object()? {
+                    if !exposed.contains(name.as_str()) {
+                        return None;
+                    }
+                    dependencies.insert(
+                        name.clone(),
+                        model_only_condition(schema, exposed, document, depth + 1)?,
+                    );
+                }
+                result.insert(key.clone(), Value::Object(dependencies));
+            }
+            "$ref" => {
+                let reference = value.as_str()?.strip_prefix('#')?;
+                let resolved = model_only_condition(
+                    document.pointer(reference)?,
+                    exposed,
+                    document,
+                    depth + 1,
+                )?;
+                result
+                    .entry("allOf")
+                    .or_insert_with(|| Value::Array(Vec::new()))
+                    .as_array_mut()?
+                    .push(resolved);
+            }
+            "type" => {
+                result.insert(key.clone(), value.clone());
+            }
+            key if root_constraint(key)
+                || matches!(key, "additionalProperties" | "patternProperties") =>
+            {
+                return None;
+            }
+            // Root annotations may describe full execution inputs, so do not expose them.
+            _ => {}
+        }
+    }
+    Some(Value::Object(result))
 }

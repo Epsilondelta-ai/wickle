@@ -95,3 +95,8 @@ that an external storage operation was rolled back.
 The [independent binding consumer](../tests/support/input_binding_consumer.rs)
 shows Run inputs, optional model defaults, unused-key exclusion, and a changing
 report resolver whose value stays fixed for an already-bound call.
+
+Provider-specific schema representation and reversible argument codecs are described
+in [Provider Tool schema contracts](provider-tool-schemas.md). These operate on the
+model-visible projection; full execution validation and system input binding remain
+separate boundaries.

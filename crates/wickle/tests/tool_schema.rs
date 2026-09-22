@@ -365,7 +365,7 @@ fn unsupported_reference_forms_fail_instead_of_being_silently_projected() {
 }
 
 #[test]
-fn mixed_sources_reject_cross_parameter_conditions_but_all_agent_conditions_are_preserved() {
+fn mixed_conditions_stay_in_execution_validation_and_model_only_conditions_are_preserved() {
     for (keyword, condition) in [
         ("allOf", json!([{"required":["workspace_id"]}])),
         (
@@ -382,7 +382,15 @@ fn mixed_sources_reject_cross_parameter_conditions_but_all_agent_conditions_are_
     ] {
         let mut tool = descriptor();
         tool.input_schema[keyword] = condition;
-        assert!(SchemaCompiler::new().compile(tool, &registry()).is_err());
+        let result = SchemaCompiler::new().compile(tool, &registry());
+        if keyword == "patternProperties" {
+            assert!(result.is_err());
+        } else {
+            let compiled = result.unwrap();
+            compiled
+                .validate_model_inputs(&object(json!({"query":"ordinary"})))
+                .unwrap();
+        }
     }
     let mut conditional = descriptor();
     conditional.input_schema["if"] = json!({"properties":{"query":{"const":"strict"}}});
@@ -391,9 +399,20 @@ fn mixed_sources_reject_cross_parameter_conditions_but_all_agent_conditions_are_
     conditional.input_schema["examples"] =
         json!([{"query":"root annotation","workspace_id":WORKSPACE}]);
     conditional.input_schema["default"] = json!({"query":"root default","workspace_id":WORKSPACE});
+    let mixed = SchemaCompiler::new()
+        .compile(conditional.clone(), &registry())
+        .unwrap();
     assert!(
-        SchemaCompiler::new()
-            .compile(conditional.clone(), &registry())
+        mixed
+            .validate_model_inputs(&object(json!({"query":"strict"})))
+            .is_err()
+    );
+    mixed
+        .validate_model_inputs(&object(json!({"query":"strict","limit":2})))
+        .unwrap();
+    assert!(
+        mixed
+            .validate_execution_inputs(&object(json!({"query":"strict","limit":2})))
             .is_err()
     );
     conditional.agent_parameters.push("workspace_id".into());
@@ -631,4 +650,54 @@ fn declared_execution_safety_cannot_mark_writes_as_parallel_or_read_only_retries
     let compiled = compiler.compile(tool, &registry()).unwrap();
     assert_eq!(compiled.descriptor().side_effect, ToolSideEffect::Write);
     assert_eq!(compiled.descriptor().retry, ToolRetryPolicy::Idempotent);
+}
+
+#[test]
+fn system_dependent_condition_is_enforced_only_after_binding_without_leaking_its_branch() {
+    let mut tool = descriptor();
+    tool.input_schema["if"] = json!({"properties":{"workspace_id":{"const":WORKSPACE}}});
+    tool.input_schema["then"] = json!({"properties":{"limit":{"maximum":5}},"required":["limit"]});
+    tool.input_schema["allOf"] =
+        json!([{"properties":{"query":{"minLength":3}}},{"required":["workspace_id"]}]);
+    let compiled = SchemaCompiler::new().compile(tool, &registry()).unwrap();
+    assert!(compiled.model_input_schema().get("if").is_none());
+    assert!(compiled.model_input_schema().get("then").is_none());
+    assert!(
+        compiled
+            .validate_model_inputs(&object(json!({"query":"ab"})))
+            .is_err()
+    );
+    compiled
+        .validate_model_inputs(&object(json!({"query":"abc","limit":20})))
+        .unwrap();
+    assert!(
+        compiled
+            .validate_execution_inputs(&object(
+                json!({"query":"abc","limit":20,"workspace_id":WORKSPACE})
+            ))
+            .is_err()
+    );
+    compiled
+        .validate_execution_inputs(&object(
+            json!({"query":"abc","limit":3,"workspace_id":WORKSPACE}),
+        ))
+        .unwrap();
+}
+
+#[test]
+fn model_only_root_reference_and_sibling_conjunction_both_survive_mixed_projection() {
+    let mut tool = descriptor();
+    tool.input_schema["$defs"] = json!({"QueryCondition":{"properties":{"query":{"minLength":3}}}});
+    tool.input_schema["$ref"] = json!("#/$defs/QueryCondition");
+    tool.input_schema["allOf"] = json!([{"properties":{"limit":{"maximum":5}}}]);
+    let compiled = SchemaCompiler::new().compile(tool, &registry()).unwrap();
+    for invalid in [
+        json!({"query":"ab","limit":2}),
+        json!({"query":"abc","limit":9}),
+    ] {
+        assert!(compiled.validate_model_inputs(&object(invalid)).is_err());
+    }
+    compiled
+        .validate_model_inputs(&object(json!({"query":"abc","limit":2})))
+        .unwrap();
 }

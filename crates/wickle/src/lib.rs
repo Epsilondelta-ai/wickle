@@ -203,3 +203,11 @@ pub use tool_execution::ToolReconciliation;
 
 mod recovery;
 pub use recovery::RecoveryReceipt;
+
+mod provider_tool_schema;
+pub use provider_tool_schema::{
+    ArgumentDecodePlan, ArgumentFieldMapping, ArgumentValueEncoding, CompiledToolContract,
+    NativeToolSchemaCompiler, ProviderToolProjection, ProviderToolSchemaCompiler,
+    ProviderToolSchemaLimits, ProviderToolTarget, ToolConstraintEnforcement,
+    ToolConstraintFragment,
+};
