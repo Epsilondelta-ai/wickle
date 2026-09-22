@@ -53,24 +53,6 @@ jobs:
       - name: Check the core without test feature unification
         run: cargo check -p wickle --lib --no-default-features --locked
       - run: cargo test --workspace --locked
-      - name: Capture Linux recovery stack on failure
-        if: failure() && matrix.os == 'ubuntu-24.04' && matrix.toolchain == '1.98.1'
-        run: |
-          if ! command -v gdb >/dev/null; then
-            sudo apt-get update -qq
-            sudo apt-get install -y gdb
-          fi
-          python3 - <<'PYDEBUG'
-          import os, pathlib, subprocess
-          target = "interrupted_model_recovery_reuses_saved_batches_with_new_scoped_instances_and_current_access"
-          for binary in pathlib.Path("target/debug/deps").glob("context_sources-*"):
-              if not binary.is_file() or not os.access(binary, os.X_OK):
-                  continue
-              listing = subprocess.run([str(binary), "--list"], capture_output=True, text=True)
-              if target not in listing.stdout:
-                  continue
-              subprocess.run(["gdb", "--batch", "-ex", "set pagination off", "-ex", "set disable-randomization off", "-ex", "run", "-ex", "thread apply all bt 200", "--args", str(binary), target, "--exact", "--nocapture"], check=False)
-          PYDEBUG
       - run: cargo test --workspace --doc --locked
       - name: Verify packaging and the independent consumer
         run: python3 scripts/check-package.py
