@@ -74,6 +74,7 @@ fn routing_snapshot(scope: &Scope) -> Result<RoutingSnapshot, ContractError> {
             evidence: vec![],
         };
         let mut binding = ModelBinding {
+            default_options: Default::default(),
             binding: reference(name),
             model: model.reference(),
             requested_model: model.model_id.clone(),
@@ -234,7 +235,7 @@ impl ModelRequestProjector for ExampleProjector {
         &'a self,
         selection: &'a RouteSelection,
         input: &'a RoutedModelInput,
-        _: &'a ModelProjectionContext,
+        context: &'a ModelProjectionContext,
     ) -> PortFuture<'a, ProjectedModelRequest> {
         Box::pin(async move {
             Ok(ProjectedModelRequest {
@@ -251,8 +252,8 @@ impl ModelRequestProjector for ExampleProjector {
                     }],
                     tools: vec![],
                     output: ModelOutput::Text {},
-                    max_output_tokens: input.routing.max_output_tokens,
-                    options: input.routing.options.clone(),
+                    max_output_tokens: context.configuration.max_output_tokens,
+                    options: context.configuration.effective.clone(),
                     limits: ModelResponseLimits {
                         max_input_bytes: 8192,
                         max_response_bytes: 4096,
@@ -450,6 +451,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         id("fallback_rate_limited")
     );
     for invocation in &saved.snapshot.model_ledger {
+        let configuration = invocation.configuration.as_ref().expect("pinned options");
+        assert_eq!(configuration.effective["reasoning_effort"], json!("high"));
+        assert_eq!(configuration.sources["reasoning_effort"], ModelOptionSource::Run);
+
         assert!(invocation.reported_model_version.is_none());
         let reference = invocation
             .inspection_ref

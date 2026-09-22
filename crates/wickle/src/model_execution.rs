@@ -190,6 +190,7 @@ impl ModelExchange {
                 })
                 .transpose()?;
             let invocation = ModelInvocationRecord {
+                configuration: context_use.as_ref().map(|gate| gate.configuration.clone()),
                 run_id: budget.run_id().clone(),
                 model_step_id: request.request_id.clone(),
                 attempt_id: reservation.attempt_id.clone(),

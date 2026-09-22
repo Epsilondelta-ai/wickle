@@ -501,6 +501,7 @@ async fn model_review_shares_budget_and_does_not_replace_the_agent_step() {
         let (fixture, mut profile, mut bindings, model, _) =
             setup(&["candidate", r#"{"verdict":"pass"}"#], vec![]);
         configure_router(&mut bindings, false, true);
+        profile.model_options.insert("effort".into(), json!("high"));
         profile.limits.max_model_calls = capacity.try_into().unwrap();
         bindings.verification = Some(Arc::new(
             VerificationRuntime::new(
@@ -539,6 +540,23 @@ async fn model_review_shares_budget_and_does_not_replace_the_agent_step() {
         );
         assert_eq!(outcome.usage.model_calls, capacity);
         if capacity == 2 {
+            assert_eq!(
+                saved.snapshot.model_ledger[0]
+                    .configuration
+                    .as_ref()
+                    .unwrap()
+                    .effective["effort"],
+                json!("high")
+            );
+            assert!(
+                saved.snapshot.model_ledger[1]
+                    .configuration
+                    .as_ref()
+                    .unwrap()
+                    .effective
+                    .is_empty()
+            );
+
             assert_eq!(
                 saved.snapshot.model_ledger[1].purpose,
                 ModelPurpose::Verification

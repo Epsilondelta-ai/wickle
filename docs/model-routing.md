@@ -47,13 +47,15 @@ Use `ModelExchange::with_dispatcher`, configure a bounded inspector with
 
 The routed entry point pins `RunSnapshot.routing_snapshot_ref` before the first
 physical call. It also stores the logical step input as an immutable protected
-record. Agent-purpose options must match `RunRequest.model_options`; purpose-
-specific helper settings remain Host inputs and are fixed for that logical step.
+record. Agent-purpose logical options must match the top-level merge of
+`AgentProfile.model_options` and `RunRequest.model_options`. Purpose-specific helper
+settings remain Host inputs and are fixed for that logical step.
 Supply an empty `previous_route` and `previous_failure`: this entry point reads
 the previous physical attempt from the saved ledger.
 
-The projector must return the exact selected route, step, purpose, options, and
-output limit. Final request byte/protocol checks and the returned route-specific
+The projector must return the exact selected route, step, and purpose, using
+`ModelProjectionContext.configuration.effective` for options and
+`configuration.max_output_tokens` for the output limit. Final request byte/protocol checks and the returned route-specific
 token estimate are validated before sending. Required context must be preserved.
 The core derives `text`, `tool_calling`, and `json_output` requirements from the
 prepared request so omitted Host feature declarations cannot bypass these checks.
@@ -100,3 +102,30 @@ adapters and live deployment probes are supplied separately.
 The [standalone consumer](../tests/support/routing_consumer.rs) uses synthetic
 adapters and metadata observations to exercise fallback, accounting, and completed
 step reuse after checkpoint restoration. It does not verify a live provider.
+
+## Inference options and output caps
+
+The selected binding's `default_options` are overridden by Profile options, then
+Run options. Each top-level key replaces its entire value, including objects;
+there is no recursive merge. Both model and binding schemas validate the result.
+Unknown or unsupported values fail rather than being dropped or coerced.
+Transport settings, credentials, retries, and provider output-limit aliases cannot
+be supplied through this map.
+
+For example, a binding default `{"reasoning":{"effort":"low","summary":true}}`
+and a Run override `{"reasoning":{"effort":"high"}}` produce
+`{"reasoning":{"effort":"high"}}`. The summary flag is not inherited.
+
+Every routed physical invocation stores a `ModelConfiguration` with the requested
+and effective maps, per-key source, both schema revisions, and output cap. Retry
+keeps this configuration; fallback recomputes it against the pinned destination's
+defaults and schemas. Historical or direct, unrouted invocations can have no
+configuration evidence. Do not infer evidence for them.
+
+Agent output is bounded by the minimum of `AgentSettings.max_output_tokens`,
+optional Profile `limits.max_output_tokens`, optional Run `max_output_tokens`, and
+the selected model/binding capabilities. Verification and compaction use their
+own purpose-specific options and output budgets, still bounded by Host/Profile/Run
+output caps; they never inherit the agent's inference map.
+All built-in HTTP adapters disable automatic transport retries. The core reserves
+a fresh physical attempt for every retry and charges the shared Run budgets.

@@ -79,6 +79,7 @@ fn proof(binding: &mut ModelBinding, model: &ModelDefinition) {
 }
 fn binding(name: &str, version: &str, model: &ModelDefinition) -> ModelBinding {
     let mut binding = ModelBinding {
+        default_options: Default::default(),
         binding: reference(name, version),
         model: model_ref(model),
         requested_model: model.model_id.clone(),
@@ -440,7 +441,8 @@ async fn each_binding_checks_its_own_features_options_and_token_limits() {
     request.features = features(&["text"]);
     request.max_output_tokens = 96.try_into().unwrap();
     first.validate(&request).unwrap();
-    assert!(second.validate(&request).is_err());
+    // The request supplies an upper bound; the selected binding lowers it to 64.
+    second.validate(&request).unwrap();
     request = requirements();
     request.input_tokens = 1000;
     assert!(first.validate(&request).is_err());

@@ -47,6 +47,17 @@ async fn retry_and_fallback_share_saved_budgets_and_keep_exact_accounts_and_insp
     assert_eq!(saved.usage.recovery_attempts, 2);
     assert_eq!(saved.model_ledger.len(), 3);
     assert_eq!(
+        saved.model_ledger[0].configuration,
+        saved.model_ledger[1].configuration
+    );
+    for attempt in &saved.model_ledger {
+        let config = attempt.configuration.as_ref().unwrap();
+        assert_eq!(config.effective, options());
+        assert_eq!(config.sources["effort"], ModelOptionSource::Run);
+        assert_eq!(config.model_schema_revision, id("capabilities"));
+    }
+
+    assert_eq!(
         saved
             .model_ledger
             .iter()

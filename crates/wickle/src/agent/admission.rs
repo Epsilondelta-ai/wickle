@@ -49,14 +49,6 @@ impl Agent {
         {
             return Err(fail(ErrorCode::InvalidContract, "agent.request_size"));
         }
-        // The request contract exists before its purpose-specific routing integration.
-        // Never silently accept an output cap that this driver cannot yet enforce.
-        if request.max_output_tokens.is_some() {
-            return Err(fail(
-                ErrorCode::CapabilityUnsupported,
-                "agent.request_output_cap",
-            ));
-        }
         if request
             .input
             .iter()

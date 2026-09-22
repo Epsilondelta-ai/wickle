@@ -25,8 +25,9 @@ bindings.context_runtime = Some(std::sync::Arc::new(wickle::ContextRuntime::new(
 The selected logical binding needs a routing rule for `ModelPurpose::Compaction`.
 The Agent rejects a missing rule before execution. Compression uses the same
 ModelExchange, route inspection, current policy, and Run model-call budget as
-other inference. `options: None` inherits the admitted request's model options;
-an explicit map supplies a Host override subject to the target schemas.
+other inference. `options: None` uses only the selected binding defaults;
+an explicit map supplies purpose-specific overrides subject to both target schemas.
+Agent Profile and Run options are never inherited by compaction.
 Compaction calls do not replace the Agent's current step, invoke Agent context
 Hooks, or become the final user response.
 

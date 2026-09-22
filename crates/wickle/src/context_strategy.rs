@@ -148,7 +148,7 @@ pub trait HostContextCompactor: Send + Sync {
 pub struct ModelCompactorConfig {
     /// Logical binding with an explicit Compaction routing rule.
     pub model_binding: Id,
-    /// Optional Host override; None inherits the admitted Run's model options.
+    /// Purpose-specific Host override; None uses only the selected binding defaults.
     pub options: Option<JsonObject>,
     /// Reserved output tokens for the summary.
     pub max_output_tokens: std::num::NonZeroU64,
