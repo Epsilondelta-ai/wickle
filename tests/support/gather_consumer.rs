@@ -12,6 +12,7 @@ mod host {
         value: serde_json::Value,
     ) -> ContextResult {
         ContextResult::Ready {
+                item_revisions: Default::default(),
             items: vec![ContextItem::new(
                 id("row-1"),
                 origin,

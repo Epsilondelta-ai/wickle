@@ -212,3 +212,12 @@ pub use provider_tool_schema::{
     ProviderToolSchemaLimits, ProviderToolTarget, ToolConstraintEnforcement,
     ToolConstraintFragment,
 };
+
+mod context_fragment;
+pub use context_fragment::{
+    CONTEXT_FRAGMENT_ASSEMBLER, ContextFragment, FragmentIdentity, FragmentOwner, FragmentValue,
+    select_context_fragments,
+};
+
+mod context_lineage;
+pub use context_lineage::ContextLineage;

@@ -204,6 +204,7 @@ impl ContextSource for Source {
                 });
             }
             Ok(ContextResult::Ready {
+                item_revisions: Default::default(),
                 items: vec![ContextItem::new(
                     id("row-1"),
                     ContextOrigin::Retrieval,

@@ -156,6 +156,7 @@ impl ContextSourceRuntime {
                 continue;
             }
             // A committed query cannot be queried again merely by dropping its slot.
+            let mut history = Vec::new();
             for reference in &current.snapshot.context_batches {
                 let record = bounded(
                     context,
@@ -171,6 +172,7 @@ impl ContextSourceRuntime {
                         "context_source.missing_slot",
                     ));
                 }
+                history.push(prior);
             }
             let result = self.provide(&request, context, budget).await?;
             budget.check_boundary().await?;
@@ -181,6 +183,7 @@ impl ContextSourceRuntime {
                 self.clock.now()?.utc_ms,
                 self.estimator_version.clone(),
                 self.estimator.as_ref(),
+                &history,
             )?;
             budget.check_boundary().await?;
             let mut snapshot = bounded(
@@ -313,6 +316,10 @@ impl ContextSourceRuntime {
                 ));
             }
             required_available(&batch)?;
+            crate::future::boxed(|| {
+                self.check_deletions(&batch, &saved.snapshot, &plan, context, deadline)
+            })
+            .await?;
             let remaining = saved
                 .snapshot
                 .timing
@@ -348,6 +355,15 @@ impl ContextSourceRuntime {
                 let call =
                     self.call_context(&batch.request, context, cancellation.clone(), use_deadline);
                 let request = ContextUseRequest {
+                    consumer_run_id: run_id.clone(),
+                    derived: false,
+                    item_revisions: if let ContextResult::Ready { item_revisions, .. } =
+                        &batch.result
+                    {
+                        item_revisions.clone()
+                    } else {
+                        Default::default()
+                    },
                     batch_ref: reference.clone(),
                     request: batch.request.clone(),
                     items: batch.result.items().to_vec(),
@@ -389,9 +405,60 @@ impl ContextSourceRuntime {
                     "context_source.use",
                 ));
             }
-            items.extend(batch.items);
+            if batch.fragments.is_empty() {
+                items.extend(batch.items);
+            } else {
+                items.extend(select_context_fragments(&batch.fragments, self.scope())?);
+            }
         }
         Ok(items)
+    }
+    // Deletion is source-native provenance, not a trigger-specific fragment
+    // identity. Committed order also works for legacy batches without revisions.
+    async fn check_deletions(
+        &self,
+        batch: &ContextBatch,
+        observed: &RunSnapshot,
+        plan: &ContextSourcePlan,
+        context: &ExecutionContext,
+        deadline: tokio::time::Instant,
+    ) -> Result<(), ContractError> {
+        if batch.result.items().is_empty() {
+            return Ok(());
+        }
+        let start = if observed.run_id == batch.request.run_id {
+            observed
+                .context_batches
+                .iter()
+                .position(|reference| reference == &batch.reference())
+                .ok_or_else(|| {
+                    source_error(ErrorCode::InvalidSnapshot, "context_source.deletion_order")
+                })?
+                + 1
+        } else {
+            0
+        };
+        for reference in &observed.context_batches[start..] {
+            let record = bounded(
+                context,
+                None,
+                deadline,
+                self.store.read_record(self.scope(), reference),
+            )
+            .await?;
+            let later = ContextBatch::restore(&record, plan, self.scope(), &observed.run_id)?;
+            if later.request.binding.source == batch.request.binding.source
+                && later.request.definition == batch.request.definition
+                && matches!(&later.result, ContextResult::Deleted { item_ids, .. }
+                    if batch.result.items().iter().any(|item| item_ids.contains(&item.item_id)))
+            {
+                return Err(source_error(
+                    ErrorCode::InvalidContext,
+                    "context_source.withdrawn_lineage",
+                ));
+            }
+        }
+        Ok(())
     }
     fn check_scope(&self, context: &ExecutionContext) -> Result<(), ContractError> {
         if &context.data.scope != self.scope() {
@@ -533,5 +600,241 @@ async fn bounded<T>(
         stopped=run_stopped(budget)=>Err(stopped),
         _=tokio::time::sleep_until(deadline)=>Err(source_error(ErrorCode::DeadlineExceeded,"context_source.operation")),
         result=operation=>result,
+    }
+}
+
+impl ContextSourceRuntime {
+    /// Resolve exact source dependencies of historical conversation, without fetching data.
+    pub async fn lineage_for_messages(
+        &self,
+        session_id: &Id,
+        messages: &[Message],
+        context: &ExecutionContext,
+        deadline: tokio::time::Instant,
+    ) -> Result<Vec<ContextLineage>, ContractError> {
+        self.check_scope(context)?;
+        let mut runs = std::collections::BTreeMap::new();
+        let mut batches = Vec::new();
+        for message in messages.iter().filter(|message| {
+            matches!(
+                message.visibility,
+                Visibility::Model | Visibility::UserAndModel
+            ) && matches!(message.origin, MessageOrigin::Model | MessageOrigin::Tool)
+        }) {
+            if runs.contains_key(&message.run_id) {
+                continue;
+            }
+            let saved = bounded(
+                context,
+                None,
+                deadline,
+                self.store.load(self.scope(), &message.run_id),
+            )
+            .await?;
+            if &saved.snapshot.request.session_id != session_id {
+                return Err(source_error(
+                    ErrorCode::AccessDenied,
+                    "context_source.lineage_session",
+                ));
+            }
+            if saved.snapshot.source_plan_ref.is_some() {
+                let plan = bounded(
+                    context,
+                    None,
+                    deadline,
+                    self.pinned_plan(&saved.snapshot, self.store.as_ref()),
+                )
+                .await?;
+                for reference in &saved.snapshot.context_batches {
+                    let record = bounded(
+                        context,
+                        None,
+                        deadline,
+                        self.store.read_record(self.scope(), reference),
+                    )
+                    .await?;
+                    batches.push(ContextBatch::restore(
+                        &record,
+                        &plan,
+                        self.scope(),
+                        &message.run_id,
+                    )?);
+                }
+            }
+            runs.insert(message.run_id.clone(), saved.snapshot);
+        }
+        crate::context_lineage::derive_lineage(
+            messages,
+            &runs.values().collect::<Vec<_>>(),
+            &batches,
+        )
+    }
+    /// Reauthorize original batch contents for a current consumer. Historical
+    /// ownership and external versions are retained; no query or revision is invented.
+    pub async fn authorize_lineage(
+        &self,
+        consumer_run_id: &Id,
+        lineage: &[ContextLineage],
+        route: Option<&ResolvedModelRoute>,
+        context: &ExecutionContext,
+        deadline: tokio::time::Instant,
+    ) -> Result<(), ContractError> {
+        self.check_scope(context)?;
+        let consumer = bounded(
+            context,
+            None,
+            deadline,
+            self.store.load(self.scope(), consumer_run_id),
+        )
+        .await?;
+        for dependency in lineage {
+            let original = bounded(
+                context,
+                None,
+                deadline,
+                self.store.load(self.scope(), &dependency.run_id),
+            )
+            .await?;
+            if original.snapshot.request.session_id != consumer.snapshot.request.session_id
+                || !original
+                    .snapshot
+                    .context_batches
+                    .contains(&dependency.batch_ref)
+            {
+                return Err(source_error(
+                    ErrorCode::AccessDenied,
+                    "context_source.lineage_owner",
+                ));
+            }
+            let plan = bounded(
+                context,
+                None,
+                deadline,
+                self.pinned_plan(&original.snapshot, self.store.as_ref()),
+            )
+            .await?;
+            let record = bounded(
+                context,
+                None,
+                deadline,
+                self.store.read_record(self.scope(), &dependency.batch_ref),
+            )
+            .await?;
+            let batch = ContextBatch::restore(&record, &plan, self.scope(), &dependency.run_id)?;
+            // User admission messages retain even failed Runs. Scan all later
+            // observations in this session, including Runs with no model reply.
+            let mut later_runs = Vec::new();
+            let mut reached_origin = false;
+            for message in &consumer.messages {
+                reached_origin |= message.run_id == dependency.run_id;
+                if reached_origin && !later_runs.contains(&message.run_id) {
+                    later_runs.push(message.run_id.clone());
+                }
+            }
+            if !later_runs.contains(&dependency.run_id) {
+                later_runs.insert(0, dependency.run_id.clone());
+            }
+            if !later_runs.contains(consumer_run_id) {
+                later_runs.push(consumer_run_id.clone());
+            }
+            for run_id in later_runs {
+                let observed = bounded(
+                    context,
+                    None,
+                    deadline,
+                    self.store.load(self.scope(), &run_id),
+                )
+                .await?;
+                if observed.snapshot.request.session_id != consumer.snapshot.request.session_id {
+                    return Err(source_error(
+                        ErrorCode::AccessDenied,
+                        "context_source.lineage_session",
+                    ));
+                }
+                if observed.snapshot.source_plan_ref.is_none() {
+                    continue;
+                }
+                let observed_plan = bounded(
+                    context,
+                    None,
+                    deadline,
+                    self.pinned_plan(&observed.snapshot, self.store.as_ref()),
+                )
+                .await?;
+                crate::future::boxed(|| {
+                    self.check_deletions(
+                        &batch,
+                        &observed.snapshot,
+                        &observed_plan,
+                        context,
+                        deadline,
+                    )
+                })
+                .await?;
+            }
+            let use_deadline = deadline.min(
+                tokio::time::Instant::now()
+                    + Duration::from_millis(batch.request.binding.timeout_ms.get()),
+            );
+            self.authorize(
+                &PolicyRequest {
+                    owner_scope: self.scope().clone(),
+                    resource_id: consumer_run_id.clone(),
+                    action: PolicyAction::UseSourceContext {
+                        source: batch.request.binding.source.clone(),
+                        definition_digest: batch.request.definition.digest(),
+                        batch_ref: dependency.batch_ref.clone(),
+                        route: route.cloned().map(Box::new),
+                    },
+                },
+                context,
+                None,
+                use_deadline,
+            )
+            .await?;
+            if batch.items.is_empty() {
+                continue;
+            }
+            let entry = self
+                .registry
+                .get(&batch.request.binding.source)
+                .filter(|entry| entry.definition == batch.request.definition)
+                .ok_or_else(|| {
+                    source_error(
+                        ErrorCode::ComponentUnavailable,
+                        "context_source.lineage_provider",
+                    )
+                })?;
+            let cancellation = context.cancellation.child_token();
+            let _cancel = cancellation.clone().drop_guard();
+            let mut call =
+                self.call_context(&batch.request, context, cancellation.clone(), use_deadline);
+            call.run_id = consumer_run_id.clone();
+            let request = ContextUseRequest {
+                consumer_run_id: consumer_run_id.clone(),
+                derived: true,
+                item_revisions: if let ContextResult::Ready { item_revisions, .. } = &batch.result {
+                    item_revisions.clone()
+                } else {
+                    Default::default()
+                },
+                batch_ref: dependency.batch_ref.clone(),
+                request: batch.request.clone(),
+                items: batch.result.items().to_vec(),
+                source_revision: batch.result.source_revision().cloned(),
+                route: route.cloned(),
+            };
+            bounded(context, None, use_deadline, async {
+                AssertUnwindSafe(async { entry.source.authorize_use(&request, &call).await })
+                    .catch_unwind()
+                    .await
+                    .map_err(|_| {
+                        source_error(ErrorCode::InvalidContract, "context_source.lineage_use")
+                    })?
+                    .map_err(|error| source_error(error.code, "context_source.lineage_use"))
+            })
+            .await?;
+        }
+        Ok(())
     }
 }

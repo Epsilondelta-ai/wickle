@@ -88,3 +88,23 @@ new rewrite behavior during recovery.
 The [independent compaction consumer](../tests/support/compaction_consumer.rs)
 exercises model-budget accounting, complete-group summaries, SQLite restoration,
 and fresh Host replay using synthetic model ports.
+
+## Recheck source access for derived data
+
+Context revisions preserve `source_lineage`: immutable original Run and batch
+references for the covered conversation. Each batch preserves its fragment
+versions. Model messages also retain `source_model_request_id` when known, so a
+later inference cannot change which observation produced an earlier answer.
+Legacy terminal history without an attempt anchor conservatively depends on
+all observations from its original Run. An active legacy Run with unanchored
+source-derived text stops with `context.unanchored_active_history`; finish it
+with its original engine before migrating. The core does not invent an attempt
+association and later reinterpret an already stored summary.
+
+Before projection, compression, and each physical model attempt (including
+verification), the core checks current access to the original sources. This also
+protects retained historical responses and summaries reused by another Run in
+the same session. An explicit deletion or denied access stops use; the core does
+not silently resend the summary or regenerate it from revoked material. A Host
+can start a fresh authorized session when the previous history is no longer
+usable.

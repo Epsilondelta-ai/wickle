@@ -278,6 +278,7 @@ pub async fn populate_protected_run(store: Arc<dyn StateStore>) -> Value {
         },
     ));
     update.messages.push(Message {
+        source_model_request_id: None,
         message_id: id("call-message"),
         run_id: id("run"),
         sequence: 2.try_into().unwrap(),
@@ -340,6 +341,7 @@ pub async fn populate_protected_run(store: Arc<dyn StateStore>) -> Value {
         },
     ));
     settled.messages.push(Message {
+        source_model_request_id: None,
         message_id: id("result-message"),
         run_id: id("run"),
         sequence: 3.try_into().unwrap(),

@@ -197,6 +197,7 @@ impl Agent {
             records.push(record);
         }
         let message = Message {
+            source_model_request_id: Some(response.request_id.clone()),
             message_id: bindings.ids.next_id()?,
             run_id: budget.run_id().clone(),
             sequence: saved

@@ -226,6 +226,7 @@ impl ContextSource for MemorySource {
                     reported_usage: None,
                 },
                 Some(value) => ContextResult::Ready {
+                item_revisions: Default::default(),
                     items: vec![ContextItem::new(
                         id("memory-row"),
                         ContextOrigin::Memory,

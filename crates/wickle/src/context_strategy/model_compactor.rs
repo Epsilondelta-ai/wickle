@@ -3,11 +3,45 @@ use super::*;
 use std::collections::BTreeSet;
 
 struct SummaryProjector<'a> {
+    sources: Option<&'a ContextSourceRuntime>,
+    lineage: Vec<ContextLineage>,
     request: &'a CompactionRequest,
     estimator: &'a dyn ModelTokenEstimator,
     limits: ModelResponseLimits,
 }
 impl ModelRequestProjector for SummaryProjector<'_> {
+    fn authorize_use<'a>(
+        &'a self,
+        selection: &'a RouteSelection,
+        _: &'a RoutedModelInput,
+        context: &'a ModelProjectionContext,
+    ) -> PortFuture<'a, ()> {
+        Box::pin(async move {
+            if let Some(sources) = self.sources {
+                let current = ExecutionContext::new(
+                    ExecutionContextData {
+                        scope: context.scope.clone(),
+                        principal_ref: context.principal_ref.clone(),
+                        capability_grant_ref: context.capability_grant_ref.clone(),
+                        trace_context: None,
+                        system_inputs: None,
+                    },
+                    context.cancellation.clone(),
+                );
+                sources
+                    .authorize_lineage(
+                        &self.request.run_id,
+                        &self.lineage,
+                        Some(&selection.route),
+                        &current,
+                        context.deadline,
+                    )
+                    .await?;
+            }
+            Ok(())
+        })
+    }
+
     fn project<'a>(
         &'a self,
         selection: &'a RouteSelection,
@@ -95,7 +129,23 @@ impl ContextRuntime {
         limits.max_input_bytes = limits
             .max_input_bytes
             .max(self.limits.max_compactor_input_bytes);
+        let lineage = if let Some(sources) = services.sources {
+            let deadline = services.budget.call_deadline()?;
+            crate::future::boxed(|| {
+                sources.lineage_for_messages(
+                    &saved.snapshot.request.session_id,
+                    &saved.messages,
+                    services.context,
+                    deadline,
+                )
+            })
+            .await?
+        } else {
+            vec![]
+        };
         let projector = SummaryProjector {
+            sources: services.sources,
+            lineage,
             request,
             estimator: services.bindings.token_estimator.as_ref(),
             limits,

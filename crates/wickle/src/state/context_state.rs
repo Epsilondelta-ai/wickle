@@ -31,13 +31,28 @@ pub(super) fn revision(
         .sessions
         .get(&snapshot.request.session_id)
         .ok_or_else(not_found)?;
-    ContextRevision::restore(
+    let restored = ContextRevision::restore(
         &record,
         &plan,
         &snapshot.scope,
         &snapshot.request.session_id,
         &session.messages,
-    )
+    )?;
+    if restored.schema_version == "wickle.context-revision.v2" {
+        let messages: Vec<_> = session
+            .messages
+            .iter()
+            .filter(|message| restored.covered_message_ids.contains(&message.message_id))
+            .cloned()
+            .collect();
+        let expected = source_lineage(state, additions, snapshot, &messages)?;
+        if restored.source_lineage != expected {
+            return Err(error(ErrorCode::InvalidSnapshot, "context.summary_lineage"));
+        }
+    } else if !restored.source_lineage.is_empty() {
+        return Err(error(ErrorCode::InvalidSnapshot, "context.legacy_lineage"));
+    }
+    Ok(restored)
 }
 pub(super) fn validate_snapshot(
     state: &ScopeState,
@@ -354,4 +369,62 @@ pub(super) fn validate_session(
         }
     }
     Ok(())
+}
+
+fn source_lineage(
+    state: &ScopeState,
+    additions: &BTreeMap<RecordKey, ProtectedRecord>,
+    current: &RunSnapshot,
+    messages: &[Message],
+) -> Result<Vec<crate::ContextLineage>, ContractError> {
+    let mut runs = BTreeMap::new();
+    let mut batches = Vec::new();
+    for message in messages.iter().filter(|message| {
+        matches!(
+            message.visibility,
+            crate::Visibility::Model | crate::Visibility::UserAndModel
+        ) && matches!(
+            message.origin,
+            crate::MessageOrigin::Model | crate::MessageOrigin::Tool
+        )
+    }) {
+        if runs.contains_key(&message.run_id) {
+            continue;
+        }
+        let snapshot = if message.run_id == current.run_id {
+            current
+        } else {
+            &state
+                .runs
+                .get(&message.run_id)
+                .ok_or_else(not_found)?
+                .snapshot
+        };
+        if snapshot.request.session_id != current.request.session_id {
+            return Err(error(ErrorCode::InvalidSnapshot, "context.lineage_session"));
+        }
+        if let Some(reference) = &snapshot.source_plan_ref {
+            let value = record_value(state, additions, reference)?;
+            let plan = crate::ContextSourcePlan::restore(
+                &serde_json::to_string(value)
+                    .map_err(|_| error(ErrorCode::InvalidJson, "context.lineage_plan"))?,
+                &snapshot.scope,
+                &reference.digest,
+            )?;
+            for reference in &snapshot.context_batches {
+                batches.push(crate::ContextBatch::restore(
+                    &record(state, additions, reference)?,
+                    &plan,
+                    &snapshot.scope,
+                    &snapshot.run_id,
+                )?);
+            }
+        }
+        runs.insert(message.run_id.clone(), snapshot);
+    }
+    crate::context_lineage::derive_lineage(
+        messages,
+        &runs.values().copied().collect::<Vec<_>>(),
+        &batches,
+    )
 }

@@ -134,6 +134,7 @@ fn admission(
         prompt_snapshot: prompt.reference().clone(),
         require_durable: false,
         messages: vec![Message {
+            source_model_request_id: None,
             message_id: id(&format!("user-{run}")),
             run_id: id(run),
             sequence: first_sequence.try_into().unwrap(),
@@ -253,6 +254,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "Review the available evidence",
     );
     first_input.messages.push(Message {
+        source_model_request_id: None,
         message_id: id("private-state"),
         run_id: id("first"),
         sequence: 2.try_into()?,

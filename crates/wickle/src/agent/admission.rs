@@ -554,6 +554,7 @@ impl Agent {
             last_event_seq: 1,
         };
         let message = Message {
+            source_model_request_id: None,
             message_id: bindings.ids.next_id()?,
             run_id: run_id.clone(),
             sequence: sequence

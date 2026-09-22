@@ -683,6 +683,7 @@ impl Agent {
             skills: bindings.skills.clone(),
             artifacts: bindings.artifacts.clone(),
             projected_artifacts: Mutex::new(vec![]),
+            projected_lineage: Mutex::new(vec![]),
             source_batch_refs,
         };
         bindings
@@ -949,6 +950,15 @@ impl Agent {
             vec![]
         } else {
             vec![Message {
+                source_model_request_id: snapshot
+                    .model_ledger
+                    .iter()
+                    .rev()
+                    .find(|entry| {
+                        entry.purpose == ModelPurpose::Agent
+                            && matches!(entry.state, ModelAttemptState::Completed {})
+                    })
+                    .map(|entry| entry.attempt_id.clone()),
                 message_id: bindings.ids.next_id()?,
                 run_id: run_id.clone(),
                 sequence: saved
@@ -1053,6 +1063,7 @@ struct Projector<'a> {
     skills: Option<Arc<SkillRuntime>>,
     artifacts: Option<Arc<ArtifactRuntime>>,
     projected_artifacts: Mutex<Vec<ArtifactRef>>,
+    projected_lineage: Mutex<Vec<ContextLineage>>,
 }
 impl ModelRequestProjector for Projector<'_> {
     fn authorize_use<'a>(
@@ -1083,6 +1094,27 @@ impl ModelRequestProjector for Projector<'_> {
                         deadline,
                     )
                     .await?;
+            }
+            let lineage = self
+                .projected_lineage
+                .lock()
+                .map_err(|_| fail(ErrorCode::InvalidContract, "agent.lineage"))?
+                .clone();
+            if !lineage.is_empty() {
+                let sources = self
+                    .sources
+                    .as_ref()
+                    .ok_or_else(|| fail(ErrorCode::ComponentUnavailable, "agent.lineage_source"))?;
+                crate::future::boxed(|| {
+                    sources.authorize_lineage(
+                        &self.saved.snapshot.run_id,
+                        &lineage,
+                        Some(&selection.route),
+                        &current,
+                        deadline,
+                    )
+                })
+                .await?;
             }
             if self.saved.snapshot.skill_plan_ref.is_some() {
                 let skills = self
@@ -1176,6 +1208,7 @@ impl ModelRequestProjector for Projector<'_> {
                     &self.prompt,
                     seed,
                     crate::context_strategy::ContextServices {
+                        sources: self.sources.as_deref(),
                         bindings: self.bindings,
                         budget: self.budget,
                         context: &current,
@@ -1183,6 +1216,11 @@ impl ModelRequestProjector for Projector<'_> {
                 )
             })
             .await?;
+            *self
+                .projected_lineage
+                .lock()
+                .map_err(|_| fail(ErrorCode::InvalidContract, "agent.lineage"))? =
+                prepared.lineage.clone();
             let mut references = artifacts::selected(
                 &prepared.projection.request,
                 &self.saved,

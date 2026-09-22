@@ -182,6 +182,7 @@ impl Fixture {
     }
     fn current_message(&self, sequence: u64) -> Message {
         Message {
+            source_model_request_id: None,
             message_id: self.request_message_id.clone(),
             run_id: self.run_id.clone(),
             sequence: sequence.try_into().unwrap(),
@@ -258,6 +259,7 @@ fn message(
     content: Vec<ContentBlock>,
 ) -> Message {
     Message {
+        source_model_request_id: None,
         message_id: id(&format!("message-{sequence}")),
         run_id: id(run),
         sequence: sequence.try_into().unwrap(),

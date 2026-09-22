@@ -252,6 +252,8 @@ pub struct ContextRevision {
     pub(crate) through_sequence: u64,
     pub(crate) covered_message_ids: Vec<Id>,
     pub(crate) covered_digest: JsonDigest,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) source_lineage: Vec<ContextLineage>,
     pub(crate) summary: Option<String>,
     pub(crate) anchors: Vec<InputContent>,
     pub(crate) previews: Vec<ContextPreview>,

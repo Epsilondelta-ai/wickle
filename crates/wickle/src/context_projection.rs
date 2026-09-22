@@ -478,7 +478,7 @@ impl ContextItem {
             priority_class,
         }
     }
-    fn valid_digest(&self) -> bool {
+    pub(crate) fn valid_digest(&self) -> bool {
         self.digest
             == data_digest(&(
                 &self.item_id,

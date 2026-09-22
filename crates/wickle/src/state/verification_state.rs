@@ -381,6 +381,15 @@ pub(super) fn transition(
             || answer.origin != crate::MessageOrigin::Model
             || answer.visibility != crate::Visibility::Model
             || answer_content != candidate.output
+            || answer
+                .source_model_request_id
+                .as_ref()
+                .is_some_and(|attempt| {
+                    !next.model_ledger.iter().any(|entry| {
+                        &entry.attempt_id == attempt
+                            && entry.response_ref.as_ref() == Some(&candidate.response_ref)
+                    })
+                })
             || revision.role != MessageRole::User
             || revision.origin != crate::MessageOrigin::Verification
             || revision.visibility != crate::Visibility::Model
@@ -466,6 +475,15 @@ pub(super) fn history(
         if answer.run_id != snapshot.run_id
             || answer.origin != crate::MessageOrigin::Model
             || output != candidate.output
+            || answer
+                .source_model_request_id
+                .as_ref()
+                .is_some_and(|attempt| {
+                    !snapshot.model_ledger.iter().any(|entry| {
+                        &entry.attempt_id == attempt
+                            && entry.response_ref.as_ref() == Some(&candidate.response_ref)
+                    })
+                })
             || revision.run_id != snapshot.run_id
             || revision.origin != crate::MessageOrigin::Verification
             || revision.visibility != crate::Visibility::Model

@@ -3,6 +3,15 @@
 #[path = "support/agent.rs"]
 #[allow(dead_code)]
 mod agent_support;
+#[path = "support/agent_hooks.rs"]
+#[allow(dead_code)]
+mod hooks_support;
+#[path = "support/agent_resume.rs"]
+#[allow(dead_code)]
+mod resume_support;
+#[path = "support/context_sources.rs"]
+#[allow(dead_code, unused_imports)]
+mod source_support;
 use agent_support::{completed, context, id, profile, reference, request, scope};
 use futures_util::stream;
 use serde_json::{Value, json};
@@ -2091,4 +2100,107 @@ async fn verifier_repair_does_not_repeat_an_applied_business_write() {
     let replay = fixture.start(&agent).await;
     assert_eq!(fixture.outcome(&replay).await, outcome);
     assert_eq!(fixture.tools[1].applied.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn compacted_source_history_keeps_immutable_lineage_and_rechecks_current_acl() {
+    let mut f = Fixture::new(
+        vec![("read", object(json!({"query":"chunk"})))],
+        Behavior::Success,
+    );
+    f.model.rounds.store(3, Ordering::SeqCst);
+    let (mut bindings, _) = long_bindings(&f, 3500);
+    let mut source_fixture = source_support::Fixture::new();
+    let source = source_fixture.add(
+        "records",
+        ContextTrigger::RunStart,
+        true,
+        vec![source_support::Reply::Ready, source_support::Reply::Empty],
+    );
+    f.profile.context_sources = Some(source_fixture.bindings.clone());
+    let registry = Arc::new(
+        ContextSourceRegistry::new(
+            scope(),
+            vec![ContextSourceRegistration {
+                selection: source.selection.clone(),
+                definition: source.definition.clone(),
+                source: source.clone(),
+            }],
+        )
+        .unwrap(),
+    );
+    bindings.context_sources = Some(Arc::new(
+        ContextSourceRuntime::new(
+            bindings.state.clone(),
+            bindings.policy.clone(),
+            bindings.clock.clone(),
+            bindings.ids.clone(),
+            registry,
+            source_fixture.estimator.clone(),
+        )
+        .unwrap(),
+    ));
+    bindings.context_token_estimator = Some(source_fixture.estimator.clone());
+    let summary = Arc::new(Summary {
+        calls: AtomicUsize::new(0),
+        requests: Mutex::new(vec![]),
+        bad: false,
+    });
+    bindings.context_runtime = Some(Arc::new(
+        ContextRuntime::new(
+            scope(),
+            Arc::new(BoundedContextStrategy),
+            Some(ContextCompactor::Host {
+                definition: reference("summary"),
+                compressor: summary.clone(),
+            }),
+            ContextRewriteLimits::default(),
+        )
+        .unwrap(),
+    ));
+    let agent = create_agent(f.profile.clone(), bindings).unwrap();
+    let handle = f.start(&agent).await;
+    assert_eq!(
+        f.outcome(&handle).await.result.status(),
+        RunStatus::Succeeded
+    );
+    assert!(summary.calls.load(Ordering::SeqCst) > 0);
+    let saved = f.base.store.load(&scope(), handle.run_id()).await.unwrap();
+    let record = f
+        .base
+        .store
+        .read_record(
+            &scope(),
+            saved.snapshot.context_revision_ref.as_ref().unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        record.value()["source_lineage"],
+        json!([{
+            "run_id":handle.run_id(), "batch_ref":saved.snapshot.context_batches[0]
+        }])
+    );
+    // The second Run has an empty fresh selection, so only the summary's old
+    // source can cause this denial; no second provider inference is allowed.
+    source.revoked.store(true, Ordering::SeqCst);
+    let before = f.model.calls.load(Ordering::SeqCst);
+    let second = completed(
+        agent
+            .start(request("next-source-run"), context())
+            .await
+            .unwrap(),
+    );
+    assert_eq!(f.outcome(&second).await.result.status(), RunStatus::Failed);
+    assert_eq!(f.model.calls.load(Ordering::SeqCst), before);
+    assert!(
+        source
+            .use_requests
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|request| request.derived
+                && request.consumer_run_id == *second.run_id()
+                && request.request.run_id == *handle.run_id())
+    );
 }

@@ -3,11 +3,13 @@ use futures_util::FutureExt;
 use std::{panic::AssertUnwindSafe, time::Duration};
 
 pub(crate) struct ContextServices<'a> {
+    pub sources: Option<&'a ContextSourceRuntime>,
     pub bindings: &'a AgentBindings,
     pub budget: &'a RunBudget,
     pub context: &'a ExecutionContext,
 }
 pub(crate) struct PreparedContext {
+    pub lineage: Vec<ContextLineage>,
     pub projection: ContextProjection,
     pub input_tokens: u64,
     pub artifacts: Vec<ArtifactRef>,
@@ -224,6 +226,40 @@ impl ContextRuntime {
             .load(&self.scope, services.budget.run_id())
             .await?;
         let (plan, previous) = self.active(&saved, &services).await?;
+        let lineage_deadline = services.budget.call_deadline()?;
+        let lineage = if let Some(sources) = services.sources {
+            let lineage = crate::future::boxed(|| {
+                sources.lineage_for_messages(
+                    &saved.snapshot.request.session_id,
+                    &saved.messages,
+                    services.context,
+                    lineage_deadline,
+                )
+            })
+            .await?;
+            crate::future::boxed(|| {
+                sources.authorize_lineage(
+                    &saved.snapshot.run_id,
+                    &lineage,
+                    Some(&seed.route),
+                    services.context,
+                    lineage_deadline,
+                )
+            })
+            .await?;
+            lineage
+        } else {
+            if previous
+                .as_ref()
+                .is_some_and(|revision| !revision.source_lineage.is_empty())
+            {
+                return Err(context_error(
+                    ErrorCode::ComponentUnavailable,
+                    "context.lineage_source",
+                ));
+            }
+            vec![]
+        };
         let mut view = records::apply(&saved.messages, previous.as_ref())?;
         let mut items = Self::items(seed.context_items, previous.as_ref(), &plan)?;
         match self
@@ -235,6 +271,7 @@ impl ContextRuntime {
                 if self.token_fit(&projection.request, input_tokens, &services)? =>
             {
                 return Ok(PreparedContext {
+                    lineage: lineage.clone(),
                     artifacts: Self::artifact_refs(&projection, previous.as_ref(), &plan)?,
                     projection,
                     input_tokens,
@@ -268,7 +305,7 @@ impl ContextRuntime {
         self.authorize(&saved, &seed.route, &controls, &services)
             .await?;
         let mut candidate = previous.clone().unwrap_or(ContextRevision {
-            schema_version: "wickle.context-revision.v1".into(),
+            schema_version: "wickle.context-revision.v2".into(),
             scope: self.scope.clone(),
             session_id: saved.snapshot.request.session_id.clone(),
             run_id: saved.snapshot.run_id.clone(),
@@ -281,6 +318,7 @@ impl ContextRuntime {
                 .expect("validated plan"),
             through_sequence: saved.session.transcript_revision,
             covered_message_ids: vec![],
+            source_lineage: vec![],
             covered_digest: records::covered_digest(&saved.messages, &[]),
             summary: None,
             anchors: vec![],
@@ -292,6 +330,24 @@ impl ContextRuntime {
         });
         candidate.run_id = saved.snapshot.run_id.clone();
         candidate.model_step_id = seed.model_step_id.clone();
+        candidate.schema_version = "wickle.context-revision.v2".into();
+        if let Some(sources) = services.sources {
+            let covered: Vec<_> = saved
+                .messages
+                .iter()
+                .filter(|message| candidate.covered_message_ids.contains(&message.message_id))
+                .cloned()
+                .collect();
+            candidate.source_lineage = crate::future::boxed(|| {
+                sources.lineage_for_messages(
+                    &saved.snapshot.request.session_id,
+                    &covered,
+                    services.context,
+                    lineage_deadline,
+                )
+            })
+            .await?;
+        }
         candidate.parent = saved.snapshot.context_revision_ref.clone();
         candidate.plan_ref = saved
             .snapshot
@@ -321,6 +377,7 @@ impl ContextRuntime {
                     .await?;
                 self.commit(&saved, &candidate, None, &services).await?;
                 return Ok(PreparedContext {
+                    lineage: lineage.clone(),
                     artifacts: Self::artifact_refs(&projection, Some(&candidate), &plan)?,
                     projection,
                     input_tokens: tokens,
@@ -337,6 +394,7 @@ impl ContextRuntime {
                 saved: &saved,
                 plan: &plan,
                 candidate,
+                lineage,
                 view: &view,
                 controls: &controls,
             },
