@@ -69,7 +69,7 @@ jobs:
               listing = subprocess.run([str(binary), "--list"], capture_output=True, text=True)
               if target not in listing.stdout:
                   continue
-              subprocess.run(["gdb", "--batch", "-ex", "set pagination off", "-ex", "set disable-randomization off", "-ex", "run", "-ex", "thread apply all bt 50", "--args", str(binary), target, "--exact", "--nocapture"], check=False)
+              subprocess.run(["gdb", "--batch", "-ex", "set pagination off", "-ex", "set disable-randomization off", "-ex", "run", "-ex", "thread apply all bt 200", "--args", str(binary), target, "--exact", "--nocapture"], check=False)
           PYDEBUG
       - run: cargo test --workspace --doc --locked
       - name: Verify packaging and the independent consumer
