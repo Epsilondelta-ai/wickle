@@ -119,6 +119,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         visibility: Visibility::UserAndModel,
     };
     let input = AdmissionInput {
+        execution_principal_ref: id("execution-principal"),
+        submitted: None,
         snapshot,
         prompt_snapshot: prompt.reference().clone(),
         messages: vec![message],

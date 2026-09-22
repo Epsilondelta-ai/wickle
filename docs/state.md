@@ -76,3 +76,35 @@ The [independent consumer](../tests/support/state_consumer.rs) exercises admissi
 idempotent replay, lease acquisition, terminal commit, event replay, and a foreign
 scope lookup. It is built against the extracted package by
 `python3 scripts/check-package.py`.
+
+## Atomic execution transactions
+
+StateStore implementations also implement `ExecutionTransactions`. Admission
+stores the original authenticated `execution_principal_ref`, an initial segment
+identity, and an optional validated submitted-request snapshot. A later reviewer
+or worker does not replace the execution principal.
+
+`begin_segment` accepts initial ownership or a resume/control transition in one
+transaction. The caller proposes checkpoint/messages/events/records, but the
+store validates them and supplies the lease itself. A failed validation rolls
+back lease acquisition and command consumption too. Replaying an accepted command
+returns its original segment with no new lease; it must not start another driver.
+The result's Run state may be newer than that historical segment.
+
+`submit_control_command` durably records an authenticated command without changing
+Run status. Reusing its ID with a different payload is a conflict. Cancel/expire
+processing requires a matching terminal transition, and expiry requires the Run
+deadline to have elapsed. Terminal control submissions are no-ops. Stop intent can
+be stored, but consuming it remains unsupported until interrupted checkpoint and
+driver integration is enabled; it is never reported as a completed stop.
+
+`read_execution` returns protected segment and command history. Apply current Host
+authorization before exposing it. Past segment outcomes are immutable; a later
+resume or idle terminal control creates another segment. Application-state and
+policy execution remain driver responsibilities.
+
+The memory reference implementation validates a private scope working copy under
+its mutex and publishes it only after all checks pass. SQLite executes the same
+operation inside its existing immediate transaction, persisting history,
+checkpoint, records and events together. This correctness-oriented reference path
+copies scope state; it is not a claim of constant-time mutation for large histories.

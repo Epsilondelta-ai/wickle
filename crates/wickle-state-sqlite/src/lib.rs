@@ -625,3 +625,43 @@ fn error(code: ErrorCode, path: &str) -> ContractError {
 fn storage_error<E>(_: E) -> ContractError {
     error(ErrorCode::PersistenceUnavailable, "sqlite.storage")
 }
+
+impl wickle::ExecutionTransactions for SqliteStateStore {
+    fn read_execution<'a>(
+        &'a self,
+        scope: &'a Scope,
+        run_id: &'a Id,
+    ) -> PortFuture<'a, wickle::ExecutionHistory> {
+        let id = run_id.clone();
+        self.transact(scope, false, move |state, scope, runtime| {
+            runtime.block_on(state.read_execution(scope, &id))
+        })
+    }
+    fn submit_control_command<'a>(
+        &'a self,
+        scope: &'a Scope,
+        run_id: &'a Id,
+        command: wickle::ControlCommand,
+    ) -> PortFuture<'a, wickle::ControlReceipt> {
+        let id = run_id.clone();
+        self.transact(scope, true, move |state, scope, runtime| {
+            runtime.block_on(state.submit_control_command(scope, &id, command))
+        })
+    }
+    fn begin_segment<'a>(
+        &'a self,
+        scope: &'a Scope,
+        mut request: wickle::BeginSegmentRequest,
+    ) -> PortFuture<'a, wickle::BeginSegmentResult> {
+        let submitted = std::time::Instant::now();
+        self.transact(scope, true, move |state, scope, runtime| {
+            let elapsed = i64::try_from(submitted.elapsed().as_millis())
+                .map_err(|_| error(ErrorCode::InvalidContract, "sqlite.elapsed"))?;
+            request.now_ms = request
+                .now_ms
+                .checked_add(elapsed)
+                .ok_or_else(|| error(ErrorCode::InvalidContract, "sqlite.clock"))?;
+            runtime.block_on(state.begin_segment(scope, request))
+        })
+    }
+}

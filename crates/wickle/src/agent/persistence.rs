@@ -207,3 +207,32 @@ impl StateStore for ObservedStore {
         self.inner.read_hook_observations(scope, run_id)
     }
 }
+
+impl crate::ExecutionTransactions for ObservedStore {
+    fn read_execution<'a>(
+        &'a self,
+        scope: &'a crate::Scope,
+        run_id: &'a crate::Id,
+    ) -> crate::PortFuture<'a, crate::ExecutionHistory> {
+        self.inner.read_execution(scope, run_id)
+    }
+    fn submit_control_command<'a>(
+        &'a self,
+        scope: &'a crate::Scope,
+        run_id: &'a crate::Id,
+        command: crate::ControlCommand,
+    ) -> crate::PortFuture<'a, crate::ControlReceipt> {
+        self.inner.submit_control_command(scope, run_id, command)
+    }
+    fn begin_segment<'a>(
+        &'a self,
+        scope: &'a crate::Scope,
+        request: crate::BeginSegmentRequest,
+    ) -> crate::PortFuture<'a, crate::BeginSegmentResult> {
+        Box::pin(async move {
+            let result = self.inner.begin_segment(scope, request).await?;
+            self.observed.observe(&result.state.snapshot);
+            Ok(result)
+        })
+    }
+}
