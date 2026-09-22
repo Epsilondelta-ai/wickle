@@ -38,6 +38,22 @@ impl ResolvedToolSetEntry {
             compiled: serde_json::to_value(tool).map_err(|_| invalid("prepared.tool"))?,
         })
     }
+    pub(crate) fn restore_cached(
+        &self,
+        cache: &mut BTreeMap<String, CompiledTool>,
+    ) -> Result<CompiledTool, ContractError> {
+        let key = self.manifest.compiled_digest.to_string();
+        if let Some(tool) = cache.get(&key) {
+            // A digest hit never substitutes for checking the complete saved value.
+            if Self::new(self.manifest.clone(), tool)? != *self {
+                return Err(invalid("prepared.tool_cache_identity"));
+            }
+            return Ok(tool.clone());
+        }
+        let tool = self.restore_tool()?;
+        cache.insert(key, tool.clone());
+        Ok(tool)
+    }
     /// Restore the saved contract, not a current registry replacement.
     pub fn restore_tool(&self) -> Result<CompiledTool, ContractError> {
         let bindings: BTreeMap<String, SystemInputDefinition> = serde_json::from_value(
@@ -82,12 +98,18 @@ pub struct ResolvedToolSet {
 impl ResolvedToolSet {
     /// Validate every cached contract and reject ambiguous model names.
     pub fn validate(&self) -> Result<(), ContractError> {
+        self.validate_shape()?;
+        for entry in &self.entries {
+            entry.restore_tool()?;
+        }
+        Ok(())
+    }
+    pub(crate) fn validate_shape(&self) -> Result<(), ContractError> {
         if self.schema_version != "wickle.resolved-tool-set.v1" {
             return Err(invalid("prepared.tool_set_version"));
         }
         let mut names = std::collections::BTreeSet::new();
         for entry in &self.entries {
-            entry.restore_tool()?;
             if !names.insert(&entry.manifest.model_tool.name) {
                 return Err(invalid("prepared.tool_set_names"));
             }

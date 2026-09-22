@@ -2190,6 +2190,8 @@ async fn compacted_source_history_keeps_immutable_lineage_and_rechecks_current_a
         "fragments",
         "source-selection",
         "tool-set",
+        "cached-tool",
+        "cached-provider-contract",
         "compiler",
         "fingerprint",
     ] {
@@ -2492,6 +2494,14 @@ fn assert_prepared_corruption_rejected(image: &Value, corruption: &str) {
         "tool-set" => {
             checkpoint_record_mut(&mut changed, &root["tool_set"])["entries"][0]["manifest"]["compiled_digest"] =
                 json!(canonical_digest(&json!("different contract")))
+        }
+        "cached-tool" => {
+            checkpoint_record_mut(&mut changed, &root["tool_set"])["entries"][0]["compiled"]["descriptor"]
+                ["description"] = json!("changed cached definition");
+        }
+        "cached-provider-contract" => {
+            checkpoint_record_mut(&mut changed, &root["compiled_tools"][0])["data"]["wire_tool"]
+                ["description"] = json!("changed cached wire definition");
         }
         "compiler" => {
             let contract = checkpoint_record_mut(&mut changed, &root["compiled_tools"][0]);

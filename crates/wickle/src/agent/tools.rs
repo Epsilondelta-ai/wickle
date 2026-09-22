@@ -122,7 +122,7 @@ impl Agent {
                 .await?;
             let tool_set: ResolvedToolSet = serde_json::from_value(tool_record.value().clone())
                 .map_err(|_| fail(ErrorCode::InvalidSnapshot, "agent.prepared_tool_set"))?;
-            tool_set.validate()?;
+            tool_set.validate_shape()?;
             if tool_set.entries.len() != root.compiled_tools.len() {
                 return Err(fail(ErrorCode::InvalidSnapshot, "agent.prepared_tool_set"));
             }

@@ -38,6 +38,25 @@ pub(super) fn validate(
             return Err(invalid("prepared.step_input"));
         }
     }
+    // These caches live only for this validation call. Immutable contracts are
+    // compiled once; every repeated serialized value is still checked exactly.
+    let mut tool_cache = BTreeMap::new();
+    let mut contract_cache: BTreeMap<(String, String), (CompiledToolContract, Value)> =
+        BTreeMap::new();
+    let routing = if snapshot.prepared_steps.is_empty() {
+        None
+    } else {
+        let reference = snapshot
+            .routing_snapshot_ref
+            .as_ref()
+            .ok_or_else(|| invalid("prepared.routing"))?;
+        Some(RoutingSnapshot::restore(
+            &record_value(state, additions, reference)?.to_string(),
+            &snapshot.scope,
+            &reference.digest,
+        )?)
+    };
+    let mut prompt_cache = None;
     let mut revisions = BTreeMap::new();
     let mut roots = BTreeMap::new();
     let mut unique = BTreeSet::new();
@@ -65,7 +84,7 @@ pub(super) fn validate(
         }
         let projection: PreparedModelProjection = read(state, additions, &root.context_projection)?;
         let tools: ResolvedToolSet = read(state, additions, &root.tool_set)?;
-        tools.validate()?;
+        tools.validate_shape()?;
         let configuration_value = record_value(state, additions, &root.model_configuration)?;
         let route: ResolvedModelRoute =
             serde_json::from_value(configuration_value["route"].clone())
@@ -90,15 +109,7 @@ pub(super) fn validate(
             return Err(invalid("prepared.projection"));
         }
         projection.request.validate()?;
-        let routing_ref = snapshot
-            .routing_snapshot_ref
-            .as_ref()
-            .ok_or_else(|| invalid("prepared.routing"))?;
-        let routing = RoutingSnapshot::restore(
-            &record_value(state, additions, routing_ref)?.to_string(),
-            &snapshot.scope,
-            &routing_ref.digest,
-        )?;
+        let routing = routing.as_ref().expect("nonempty preparation history");
         routing.validate_route(&route)?;
         if !snapshot.model_step_inputs.contains(&root.step_input) {
             return Err(invalid("prepared.step_reference"));
@@ -129,18 +140,15 @@ pub(super) fn validate(
             .sessions
             .get(&snapshot.request.session_id)
             .ok_or_else(not_found)?;
-        let manifests = if tools.entries.is_empty() {
-            vec![]
-        } else {
-            PromptSnapshot::restore(
+        if !tools.entries.is_empty() && prompt_cache.is_none() {
+            prompt_cache = Some(PromptSnapshot::restore(
                 &record_value(state, additions, &session.snapshot.prompt_snapshot)?.to_string(),
                 &session.snapshot.prompt_snapshot.digest,
                 &snapshot.profile,
                 &snapshot.scope,
-            )?
-            .tools()
-            .to_vec()
-        };
+            )?);
+        }
+        let manifests = prompt_cache.as_ref().map_or(&[][..], PromptSnapshot::tools);
         if root.purpose != ModelPurpose::Agent && !tools.entries.is_empty() {
             return Err(invalid("prepared.auxiliary_tools"));
         }
@@ -221,17 +229,30 @@ pub(super) fn validate(
             if !manifests.any(|manifest| manifest == &entry.manifest) {
                 return Err(invalid("prepared.tool_manifest"));
             }
-            let tool = entry.restore_tool()?;
+            let tool = entry.restore_cached(&mut tool_cache)?;
             let value = record_value(state, additions, reference)?;
             let digest: JsonDigest = serde_json::from_value(value["digest"].clone())
                 .map_err(|_| invalid("prepared.contract_digest"))?;
-            let contract = CompiledToolContract::restore(
-                &value.to_string(),
-                &tool,
-                &target,
-                &digest,
-                ProviderToolSchemaLimits::default(),
-            )?;
+            let cache_key = (
+                digest.to_string(),
+                entry.manifest.compiled_digest.to_string(),
+            );
+            let contract = if let Some((contract, expected)) = contract_cache.get(&cache_key) {
+                if expected != value || contract.target() != &target {
+                    return Err(invalid("prepared.contract_cache_identity"));
+                }
+                contract.clone()
+            } else {
+                let contract = CompiledToolContract::restore(
+                    &value.to_string(),
+                    &tool,
+                    &target,
+                    &digest,
+                    ProviderToolSchemaLimits::default(),
+                )?;
+                contract_cache.insert(cache_key, (contract.clone(), value.clone()));
+                contract
+            };
             if contract.wire_tool() != wire {
                 return Err(invalid("prepared.wire_tool"));
             }

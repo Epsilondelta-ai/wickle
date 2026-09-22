@@ -130,7 +130,7 @@ impl ModelExchange {
             run_id: budget.run_id().clone(),
             entries: prepared.tool_set,
         };
-        tool_set.validate()?;
+        tool_set.validate_shape()?;
         if prepared.compiled_tools.len() != tool_set.entries.len()
             || prepared.compiled_tools.len() != prepared.request.tools.len()
         {
