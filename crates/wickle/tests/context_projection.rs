@@ -172,6 +172,7 @@ impl Fixture {
                 }],
                 trigger: RunTrigger::User {},
                 model_options: JsonObject::new(),
+                max_output_tokens: None,
                 output_contract: None,
             },
             run_id: id("current-run"),

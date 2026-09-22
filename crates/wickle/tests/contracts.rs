@@ -692,6 +692,7 @@ fn request() -> RunRequest {
         }],
         trigger: RunTrigger::User {},
         model_options: JsonObject::new(),
+        max_output_tokens: None,
         output_contract: None,
     }
 }
@@ -1191,4 +1192,15 @@ fn route_roundtrip_keeps_model_api_deployment_and_adapter_versions_distinct() {
         serde_json::from_str(&serde_json::to_string(&record).unwrap()).unwrap();
     assert_eq!(restored.reported_model_version, None);
     assert_eq!(restored.usage, None);
+}
+
+#[tokio::test]
+async fn legacy_checkpoint_cannot_claim_interrupted_without_execution_evidence() {
+    let mut saved = checkpoint().await;
+    saved.validate().unwrap();
+    saved.status = RunStatus::Interrupted;
+    assert_eq!(
+        saved.validate().unwrap_err().code,
+        ErrorCode::InvalidSnapshot
+    );
 }

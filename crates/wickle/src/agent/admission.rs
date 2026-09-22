@@ -8,6 +8,14 @@ impl Agent {
         context: ExecutionContext,
     ) -> Result<Guarded<RunHandle>, ContractError> {
         self.check_scope(&context)?;
+        // The request contract exists before its purpose-specific routing integration.
+        // Never silently accept an output cap that this driver cannot yet enforce.
+        if request.max_output_tokens.is_some() {
+            return Err(fail(
+                ErrorCode::CapabilityUnsupported,
+                "agent.request_output_cap",
+            ));
+        }
         let bindings = &self.inner.bindings;
         if serde_json::to_vec(&request)
             .map_err(|_| fail(ErrorCode::InvalidJson, "agent.request"))?

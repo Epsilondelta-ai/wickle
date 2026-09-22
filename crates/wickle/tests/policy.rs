@@ -685,6 +685,7 @@ async fn snapshot() -> RunSnapshot {
         }],
         trigger: RunTrigger::User {},
         model_options: JsonObject::new(),
+        max_output_tokens: None,
         output_contract: None,
     };
     let system_inputs = Some(SystemInputSnapshotRef {

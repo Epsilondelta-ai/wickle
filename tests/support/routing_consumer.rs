@@ -292,6 +292,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }],
         trigger: RunTrigger::User {},
         model_options: JsonObject::from([("reasoning_effort".into(), json!("high"))]),
+        max_output_tokens: None,
         output_contract: None,
     };
     let request_record =

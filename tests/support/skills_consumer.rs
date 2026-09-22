@@ -228,7 +228,7 @@ async fn main()->Result<(),Box<dyn std::error::Error>> {
  profile.tools.push(SkillRuntime::catalog_loader());profile.skills.push(SkillRef {skill_id:id("calculation"),version:id("1"),config:None});
  let model=Arc::new(Model(AtomicUsize::new(0)));
  let agent=make_agent(profile.clone(),&context,store.clone(),skills.clone(),artifacts.clone(),model.clone(),policy.clone())?;
- let request=RunRequest {request_id:id("request"),session_id:id("session"),input:vec![InputContent::Text {text:"Apply the calculation procedure to 6.".into()}],trigger:RunTrigger::User{},model_options:Default::default(),output_contract:None};
+ let request=RunRequest {request_id:id("request"),session_id:id("session"),input:vec![InputContent::Text {text:"Apply the calculation procedure to 6.".into()}],trigger:RunTrigger::User{},model_options:Default::default(),max_output_tokens:None,output_contract:None};
  let handle=completed(agent.start(request.clone(),context.clone()).await?)?;
  let outcome=completed(handle.outcome(&context).await?)?;
  assert_eq!(outcome.output,vec![InputContent::Text{text:"42".into()}]);assert_eq!(resolver.loads.load(Ordering::SeqCst),1);assert_eq!(model.0.load(Ordering::SeqCst),2);

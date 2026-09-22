@@ -87,7 +87,7 @@ mod host {
         })?;
         let context = ExecutionContext::new(ExecutionContextData { scope: scope.clone(), principal_ref: id("actor"), capability_grant_ref: id("grant"), trace_context: None, system_inputs: None }, Default::default());
         if interrupt {
-            let request = RunRequest { request_id: id("request"), session_id: id("session"), input: vec![InputContent::Text { text: "Retrieve the available result".into() }], trigger: RunTrigger::User {}, model_options: JsonObject::from([("reasoning_effort".into(), json!("high"))]), output_contract: None };
+            let request = RunRequest { request_id: id("request"), session_id: id("session"), input: vec![InputContent::Text { text: "Retrieve the available result".into() }], trigger: RunTrigger::User {}, model_options: JsonObject::from([("reasoning_effort".into(), json!("high"))]), max_output_tokens:None,output_contract: None };
             let handle = completed(agent.start(request, context.clone()).await?)?;
             // Regression: wall-time delay exceeds the fixture's short lease.
             std::thread::sleep(Duration::from_millis(1200));

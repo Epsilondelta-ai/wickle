@@ -16,6 +16,14 @@ mod agent;
 mod artifacts;
 mod budget;
 mod canonical;
+mod execution_contracts;
+pub use execution_contracts::{
+    AppState, BeginSegmentRequest, BeginSegmentResult, ControlAction, ControlCommand,
+    ControlReceipt, ExecutionRecordVersion, ExecutionSegment, ExecutionTransactions,
+    InterruptionAction, InterruptionCause, InterruptionDecision, InterruptionInfo,
+    InterruptionPolicy, InterruptionRecord, PreparedStepRecord, RequestSnapshot, SegmentOutcome,
+    SegmentStart,
+};
 mod clock;
 mod component_runtime;
 mod context;

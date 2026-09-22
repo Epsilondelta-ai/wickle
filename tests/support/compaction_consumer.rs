@@ -375,6 +375,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }],
         trigger: RunTrigger::User {},
         model_options: Default::default(),
+        max_output_tokens: None,
         output_contract: None,
     };
     let handle = completed(agent.start(request.clone(), context.clone()).await?)?;

@@ -127,6 +127,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         model_options: std::collections::BTreeMap::from([
             ("reasoning_effort".into(), json!("high")),
         ]),
+        max_output_tokens: None,
         output_contract: None,
     };
     let request_record =
