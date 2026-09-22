@@ -744,3 +744,19 @@ fn hidden_predicates_are_not_weakened_into_incorrect_model_conditions() {
         compiled.validate_model_inputs(&model).unwrap();
     }
 }
+
+#[test]
+fn model_only_predicate_keeps_an_impossible_branch_type() {
+    let mut tool = descriptor();
+    tool.input_schema["if"] = json!({"properties":{"query":{"const":"forbidden"}}});
+    tool.input_schema["then"] = json!({"type":"null"});
+    let compiled = SchemaCompiler::new().compile(tool, &registry()).unwrap();
+    assert!(
+        compiled
+            .validate_model_inputs(&object(json!({"query":"forbidden"})))
+            .is_err()
+    );
+    compiled
+        .validate_model_inputs(&object(json!({"query":"allowed"})))
+        .unwrap();
+}

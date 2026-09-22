@@ -865,6 +865,9 @@ fn project_model_conjunction(
     let mut conjuncts = Vec::new();
     for (key, value) in map {
         match key.as_str() {
+            "type" => {
+                result.insert(key.clone(), value.clone());
+            }
             "properties" => {
                 let selected = value
                     .as_object()
