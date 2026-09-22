@@ -287,6 +287,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .admit(
             &scope,
             AdmissionInput {
+                execution_principal_ref: id("execution-principal"),
+                submitted: None,
                 snapshot,
                 prompt_snapshot: prompt.reference().clone(),
                 messages: vec![Message {

@@ -18,11 +18,11 @@ mod budget;
 mod canonical;
 mod execution_contracts;
 pub use execution_contracts::{
-    AppState, BeginSegmentRequest, BeginSegmentResult, ControlAction, ControlCommand,
-    ControlReceipt, ExecutionRecordVersion, ExecutionSegment, ExecutionTransactions,
-    InterruptionAction, InterruptionCause, InterruptionDecision, InterruptionInfo,
-    InterruptionPolicy, InterruptionRecord, PreparedStepRecord, RequestSnapshot, SegmentOutcome,
-    SegmentStart,
+    AcceptedSegmentCommand, AppState, BeginSegmentRequest, BeginSegmentResult, ControlAction,
+    ControlCommand, ControlReceipt, ExecutionHistory, ExecutionRecordVersion, ExecutionSegment,
+    ExecutionTransactions, InterruptionAction, InterruptionCause, InterruptionDecision,
+    InterruptionInfo, InterruptionPolicy, InterruptionRecord, PreparedStepRecord, RequestSnapshot,
+    SegmentOutcome, SegmentStart, SegmentTransition, StoredControlCommand,
 };
 mod clock;
 mod component_runtime;

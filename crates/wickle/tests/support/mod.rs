@@ -161,6 +161,8 @@ pub async fn admission(
         visibility: Visibility::UserAndModel,
     };
     AdmissionInput {
+        execution_principal_ref: id("execution-principal"),
+        submitted: None,
         snapshot,
         prompt_snapshot: prompt_record.reference().clone(),
         messages: vec![message],

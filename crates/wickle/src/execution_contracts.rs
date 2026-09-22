@@ -308,8 +308,10 @@ pub enum SegmentStart {
     Control(Id),
 }
 /// Inputs for atomic command consumption, lease acquisition and segment creation.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct BeginSegmentRequest {
+    /// Proposed validated checkpoint/events for resume or control. Initial claim has None.
+    pub transition: Option<SegmentTransition>,
     /// Owning Run.
     pub run_id: Id,
     /// CAS revision before this transaction.
@@ -349,6 +351,13 @@ pub struct ControlReceipt {
 /// segment driver can be enabled. No default read/then/write emulation is safe.
 /// StateStore integration requires the same transaction as its snapshot/events.
 pub trait ExecutionTransactions: Send + Sync {
+    /// Read protected segment/command history without mutation; Host authorizes access.
+    fn read_execution<'a>(
+        &'a self,
+        scope: &'a Scope,
+        run_id: &'a Id,
+    ) -> PortFuture<'a, ExecutionHistory>;
+
     /// Atomically deduplicate/consume the command, check CAS and allocate ownership.
     fn begin_segment<'a>(
         &'a self,
@@ -432,5 +441,65 @@ impl ExecutionSegment {
             None => {}
         }
         Ok(())
+    }
+}
+
+/// A proposed checkpoint delta; the transaction supplies its own validated lease.
+#[derive(Clone)]
+pub struct SegmentTransition {
+    /// Next checkpoint at expected_revision + 1.
+    pub snapshot: crate::RunSnapshot,
+    /// New transcript messages.
+    pub messages: Vec<crate::Message>,
+    /// Matching durable events.
+    pub events: Vec<crate::RunEvent>,
+    /// Immutable records referenced by the new checkpoint/events.
+    pub records: Vec<crate::ProtectedRecord>,
+}
+/// Persisted control command and its optional processing result.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StoredControlCommand {
+    /// Original authenticated command payload.
+    pub command: ControlCommand,
+    /// Segment that consumed it; absent means pending, not failed.
+    pub processed_segment_id: Option<Id>,
+}
+/// Command deduplication evidence bound to an accepted segment.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AcceptedSegmentCommand {
+    /// Stable command identity.
+    pub command_id: Id,
+    /// Original normalized command payload digest.
+    pub payload_digest: JsonDigest,
+    /// Segment created by this command.
+    pub segment_id: Id,
+}
+/// Protected execution history stored atomically with a Run's checkpoint/events.
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionHistory {
+    /// Owning Run.
+    pub run_id: Id,
+    /// Authenticated original execution actor.
+    pub execution_principal_ref: Id,
+    /// Submitted request evidence, separate from effective configuration.
+    pub submitted: Option<RequestSnapshot>,
+    /// Initial segment has been claimed at least once. Retrying a claim is not recovery.
+    pub initial_claimed: bool,
+    /// Ordered immutable past segments and the current segment.
+    pub segments: Vec<ExecutionSegment>,
+    /// Accepted resume/control command identities.
+    pub accepted_commands: Vec<AcceptedSegmentCommand>,
+    /// Pending and processed durable controls.
+    pub controls: Vec<StoredControlCommand>,
+}
+impl fmt::Debug for ExecutionHistory {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ExecutionHistory")
+            .field("run_id", &self.run_id)
+            .field("segment_count", &self.segments.len())
+            .finish_non_exhaustive()
     }
 }

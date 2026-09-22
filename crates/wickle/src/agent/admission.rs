@@ -542,6 +542,8 @@ impl Agent {
         };
         Ok((
             AdmissionInput {
+                execution_principal_ref: context.data.principal_ref.clone(),
+                submitted: None,
                 snapshot,
                 prompt_snapshot: prompt_record.reference().clone(),
                 require_durable: bindings.settings.require_durable,

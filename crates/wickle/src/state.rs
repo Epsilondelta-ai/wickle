@@ -10,6 +10,7 @@ use serde_json::Value;
 
 mod checkpoint;
 mod context_state;
+mod execution;
 mod hook_state;
 mod reconciliation_state;
 mod recovery_state;
@@ -84,6 +85,10 @@ impl fmt::Debug for ProtectedRecord {
 /// Initial records accepted atomically for a newly admitted run.
 #[derive(Clone)]
 pub struct AdmissionInput {
+    /// Authenticated original execution principal, not the latest reviewer.
+    pub execution_principal_ref: Id,
+    /// Original submitted inputs when supplied by the versioned admission path.
+    pub submitted: Option<crate::RequestSnapshot>,
     /// Running/admission checkpoint at revision zero.
     pub snapshot: RunSnapshot,
     /// Session-pinned prompt record; reused unchanged by subsequent runs.
@@ -185,7 +190,7 @@ pub const MAX_EVENT_PAGE_SIZE: usize = 1_000;
 /// Trusted core storage port. Scope isolation is enforced by the store itself.
 /// The facade separately applies current PolicyGate authorization. No raw load or
 /// record reference grants permission to publish the returned data.
-pub trait StateStore: Send + Sync {
+pub trait StateStore: crate::ExecutionTransactions + Send + Sync {
     /// Describe storage and coordination guarantees.
     fn capabilities(&self) -> StateStoreCapabilities;
     /// Find the original request before re-resolving current profile or routing metadata.
@@ -308,6 +313,8 @@ struct ScopeState {
     event_ids: BTreeSet<Id>,
     message_ids: BTreeSet<Id>,
     hook_observations: BTreeMap<Id, Vec<crate::HookObservation>>,
+    executions: BTreeMap<Id, crate::ExecutionHistory>,
+    legacy_runs: BTreeSet<Id>,
 }
 
 #[derive(Clone)]
@@ -411,6 +418,14 @@ impl StateStore for MemoryStateStore {
                     state: previous,
                 });
             }
+            if state.runs.iter().any(|(id, run)| {
+                !run.snapshot.status.is_terminal() && !state.executions.contains_key(id)
+            }) {
+                return Err(error(
+                    ErrorCode::CapabilityUnsupported,
+                    "execution.legacy_drain_required",
+                ));
+            }
             input.snapshot.validate()?;
             if input.snapshot.revision != 0
                 || input.snapshot.status != RunStatus::Running
@@ -486,8 +501,16 @@ impl StateStore for MemoryStateStore {
                 session: session.clone(),
                 messages: messages.clone(),
             };
+            let execution = execution::initial_history(
+                &input.snapshot,
+                &input.execution_principal_ref,
+                input.submitted.as_ref(),
+            )?;
             // All fallible checks precede these mutations.
             let state = scopes.entry(scope_key(scope)).or_default();
+            state
+                .executions
+                .insert(input.snapshot.run_id.clone(), execution);
             state.records.extend(additions);
             state
                 .message_ids
@@ -569,31 +592,7 @@ impl StateStore for MemoryStateStore {
         now_ms: i64,
         ttl_ms: u64,
     ) -> PortFuture<'a, RunLease> {
-        Box::pin(async move {
-            let expires_at_ms = lease_expiry(now_ms, ttl_ms)?;
-            let mut scopes = self.lock()?;
-            let run = run_mut(&mut scopes, scope, run_id)?;
-            if run.snapshot.status.is_terminal() {
-                return Err(error(ErrorCode::InvalidTransition, "run.status"));
-            }
-            if run.lease.as_ref().is_some_and(|l| l.expires_at_ms > now_ms) {
-                return Err(error(ErrorCode::LeaseBusy, "lease"));
-            }
-            let fencing_token = run
-                .last_fencing_token
-                .checked_add(1)
-                .ok_or_else(|| error(ErrorCode::InvalidContract, "lease.fencing_token"))?;
-            let lease = RunLease {
-                scope: scope.clone(),
-                run_id: run_id.clone(),
-                owner: owner.clone(),
-                fencing_token,
-                expires_at_ms,
-            };
-            run.last_fencing_token = fencing_token;
-            run.lease = Some(lease.clone());
-            Ok(lease)
-        })
+        Box::pin(async move { self.acquire_lease_now(scope, run_id, owner, now_ms, ttl_ms) })
     }
 
     fn renew_lease<'a>(
@@ -640,136 +639,7 @@ impl StateStore for MemoryStateStore {
         run_id: &'a Id,
         input: CommitInput,
     ) -> PortFuture<'a, StoredRun> {
-        Box::pin(async move {
-            check_scope(scope, &input.snapshot.scope)?;
-            let mut scopes = self.lock()?;
-            let state = namespace(&scopes, scope)?;
-            let run = state.runs.get(run_id).ok_or_else(not_found)?;
-            validate_lease(run, scope, run_id, &input.lease, input.now_ms)?;
-            if run.snapshot.revision != input.expected_revision {
-                return Err(error(ErrorCode::RevisionConflict, "revision"));
-            }
-            validate_transition(&run.snapshot, &input.snapshot)?;
-            recovery_state::transition(&run.snapshot, &input.snapshot, &input.events)?;
-            if input.events.iter().any(|event| {
-                matches!(
-                    event.payload,
-                    RunEventPayload::RunResumed { .. } | RunEventPayload::RunRecovered { .. }
-                ) && event.timestamp_ms > input.now_ms
-            }) {
-                return Err(error(ErrorCode::InvalidEvent, "events.resume_time"));
-            }
-            if let Some(receipt) = input
-                .snapshot
-                .resume_receipts
-                .last()
-                .filter(|receipt| receipt.accepted_revision == input.snapshot.revision)
-            {
-                let expired = input.now_ms >= run.snapshot.timing.deadline_at_ms
-                    || run
-                        .snapshot
-                        .wait
-                        .as_ref()
-                        .and_then(|wait| wait.expires_at_ms)
-                        .is_some_and(|deadline| input.now_ms >= deadline);
-                // A durable adapter may advance the lease-check time after
-                // queue/lock delay. Crossing expiry must not turn a stale
-                // on-time decision into an accepted approval.
-                if receipt.expired != expired {
-                    return Err(error(
-                        ErrorCode::DeadlineExceeded,
-                        "resume.acceptance_expiry",
-                    ));
-                }
-            }
-            if let Some(receipt) = input
-                .snapshot
-                .recovery_receipts
-                .last()
-                .filter(|receipt| receipt.accepted_revision == input.snapshot.revision)
-            {
-                if receipt.expired != (input.now_ms >= run.snapshot.timing.deadline_at_ms) {
-                    return Err(error(
-                        ErrorCode::DeadlineExceeded,
-                        "recovery.acceptance_expiry",
-                    ));
-                }
-            }
-            let additions = validate_records(state, &input.records)?;
-            validate_snapshot_refs(state, &additions, &input.snapshot)?;
-            context_state::validate_update(&run.snapshot, &input.snapshot, &input.events)?;
-            verification_state::transition(
-                state,
-                &additions,
-                &run.snapshot,
-                &input.snapshot,
-                &input.messages,
-                &input.events,
-            )?;
-            validate_events(
-                state,
-                &additions,
-                &input.snapshot,
-                run.snapshot.last_event_seq,
-                &input.events,
-                false,
-                &input.messages,
-            )?;
-            let session = state
-                .sessions
-                .get(&run.snapshot.request.session_id)
-                .ok_or_else(not_found)?;
-            if session.snapshot.active_run_id.as_ref() != Some(run_id) {
-                return Err(error(ErrorCode::InvalidTransition, "session.active_run_id"));
-            }
-            let transcript_revision = validate_messages(
-                state,
-                &additions,
-                run_id,
-                session.snapshot.transcript_revision,
-                &input.messages,
-            )?;
-            let mut session_snapshot = session.snapshot.clone();
-            let history: Vec<_> = run.events.iter().chain(&input.events).collect();
-            let transcript: Vec<_> = session.messages.iter().chain(&input.messages).collect();
-            validate_resume_history(state, &additions, &input.snapshot, &history, &transcript)?;
-            session_snapshot.transcript_revision = transcript_revision;
-            session_snapshot.context_revision_ref = input.snapshot.context_revision_ref.clone();
-            if input.snapshot.status.is_terminal() {
-                session_snapshot.active_run_id = None;
-            }
-            let mut messages = session.messages.clone();
-            messages.extend(input.messages);
-            let result = StoredRun {
-                snapshot: input.snapshot.clone(),
-                session: session_snapshot.clone(),
-                messages: messages.clone(),
-            };
-            let state = scopes
-                .get_mut(&scope_key(scope))
-                .expect("validated namespace");
-            state.records.extend(additions);
-            state
-                .message_ids
-                .extend(messages.iter().map(|m| m.message_id.clone()));
-            state
-                .event_ids
-                .extend(input.events.iter().map(|e| e.event_id.clone()));
-            state.sessions.insert(
-                session_snapshot.session_id.clone(),
-                SessionState {
-                    snapshot: session_snapshot,
-                    messages,
-                },
-            );
-            let run = state.runs.get_mut(run_id).expect("validated run");
-            run.snapshot = input.snapshot;
-            run.events.extend(input.events);
-            if run.snapshot.status.is_terminal() {
-                run.lease = None;
-            }
-            Ok(result)
-        })
+        Box::pin(async move { self.commit_now(scope, run_id, input, None) })
     }
 
     fn read_events<'a>(
@@ -2177,4 +2047,194 @@ fn validate_transition(previous: &RunSnapshot, next: &RunSnapshot) -> Result<(),
         return Err(error(ErrorCode::InvalidTransition, "usage"));
     }
     Ok(())
+}
+
+impl MemoryStateStore {
+    fn acquire_lease_now(
+        &self,
+        scope: &Scope,
+        run_id: &Id,
+        owner: &Id,
+        now_ms: i64,
+        ttl_ms: u64,
+    ) -> Result<RunLease, ContractError> {
+        let expires_at_ms = lease_expiry(now_ms, ttl_ms)?;
+        let mut scopes = self.lock()?;
+        let run = run_mut(&mut scopes, scope, run_id)?;
+        if run.snapshot.status.is_terminal() {
+            return Err(error(ErrorCode::InvalidTransition, "run.status"));
+        }
+        if run.lease.as_ref().is_some_and(|l| l.expires_at_ms > now_ms) {
+            return Err(error(ErrorCode::LeaseBusy, "lease"));
+        }
+        let fencing_token = run
+            .last_fencing_token
+            .checked_add(1)
+            .ok_or_else(|| error(ErrorCode::InvalidContract, "lease.fencing_token"))?;
+        let lease = RunLease {
+            scope: scope.clone(),
+            run_id: run_id.clone(),
+            owner: owner.clone(),
+            fencing_token,
+            expires_at_ms,
+        };
+        run.last_fencing_token = fencing_token;
+        run.lease = Some(lease.clone());
+        Ok(lease)
+    }
+}
+
+impl MemoryStateStore {
+    fn commit_now(
+        &self,
+        scope: &Scope,
+        run_id: &Id,
+        input: CommitInput,
+        segment_override: Option<&Id>,
+    ) -> Result<StoredRun, ContractError> {
+        check_scope(scope, &input.snapshot.scope)?;
+        let mut scopes = self.lock()?;
+        let state = namespace(&scopes, scope)?;
+        let run = state.runs.get(run_id).ok_or_else(not_found)?;
+        validate_lease(run, scope, run_id, &input.lease, input.now_ms)?;
+        if run.snapshot.revision != input.expected_revision {
+            return Err(error(ErrorCode::RevisionConflict, "revision"));
+        }
+        validate_transition(&run.snapshot, &input.snapshot)?;
+        recovery_state::transition(&run.snapshot, &input.snapshot, &input.events)?;
+        if input.events.iter().any(|event| {
+            matches!(
+                event.payload,
+                RunEventPayload::RunResumed { .. } | RunEventPayload::RunRecovered { .. }
+            ) && event.timestamp_ms > input.now_ms
+        }) {
+            return Err(error(ErrorCode::InvalidEvent, "events.resume_time"));
+        }
+        if let Some(receipt) = input
+            .snapshot
+            .resume_receipts
+            .last()
+            .filter(|receipt| receipt.accepted_revision == input.snapshot.revision)
+        {
+            let expired = input.now_ms >= run.snapshot.timing.deadline_at_ms
+                || run
+                    .snapshot
+                    .wait
+                    .as_ref()
+                    .and_then(|wait| wait.expires_at_ms)
+                    .is_some_and(|deadline| input.now_ms >= deadline);
+            // A durable adapter may advance the lease-check time after
+            // queue/lock delay. Crossing expiry must not turn a stale
+            // on-time decision into an accepted approval.
+            if receipt.expired != expired {
+                return Err(error(
+                    ErrorCode::DeadlineExceeded,
+                    "resume.acceptance_expiry",
+                ));
+            }
+        }
+        if let Some(receipt) = input
+            .snapshot
+            .recovery_receipts
+            .last()
+            .filter(|receipt| receipt.accepted_revision == input.snapshot.revision)
+        {
+            if receipt.expired != (input.now_ms >= run.snapshot.timing.deadline_at_ms) {
+                return Err(error(
+                    ErrorCode::DeadlineExceeded,
+                    "recovery.acceptance_expiry",
+                ));
+            }
+        }
+        let additions = validate_records(state, &input.records)?;
+        validate_snapshot_refs(state, &additions, &input.snapshot)?;
+        context_state::validate_update(&run.snapshot, &input.snapshot, &input.events)?;
+        verification_state::transition(
+            state,
+            &additions,
+            &run.snapshot,
+            &input.snapshot,
+            &input.messages,
+            &input.events,
+        )?;
+        validate_events(
+            state,
+            &additions,
+            &input.snapshot,
+            run.snapshot.last_event_seq,
+            &input.events,
+            false,
+            &input.messages,
+        )?;
+        let session = state
+            .sessions
+            .get(&run.snapshot.request.session_id)
+            .ok_or_else(not_found)?;
+        if session.snapshot.active_run_id.as_ref() != Some(run_id) {
+            return Err(error(ErrorCode::InvalidTransition, "session.active_run_id"));
+        }
+        let transcript_revision = validate_messages(
+            state,
+            &additions,
+            run_id,
+            session.snapshot.transcript_revision,
+            &input.messages,
+        )?;
+        let mut session_snapshot = session.snapshot.clone();
+        let history: Vec<_> = run.events.iter().chain(&input.events).collect();
+        let transcript: Vec<_> = session.messages.iter().chain(&input.messages).collect();
+        validate_resume_history(state, &additions, &input.snapshot, &history, &transcript)?;
+        session_snapshot.transcript_revision = transcript_revision;
+        session_snapshot.context_revision_ref = input.snapshot.context_revision_ref.clone();
+        if input.snapshot.status.is_terminal() {
+            session_snapshot.active_run_id = None;
+        }
+        let mut messages = session.messages.clone();
+        messages.extend(input.messages);
+        let result = StoredRun {
+            snapshot: input.snapshot.clone(),
+            session: session_snapshot.clone(),
+            messages: messages.clone(),
+        };
+        let execution = state
+            .executions
+            .get(run_id)
+            .map(|history| {
+                execution::advance_history(
+                    history,
+                    &run.snapshot,
+                    &input.snapshot,
+                    segment_override,
+                )
+            })
+            .transpose()?;
+        let state = scopes
+            .get_mut(&scope_key(scope))
+            .expect("validated namespace");
+        if let Some(execution) = execution {
+            state.executions.insert(run_id.clone(), execution);
+        }
+
+        state.records.extend(additions);
+        state
+            .message_ids
+            .extend(messages.iter().map(|m| m.message_id.clone()));
+        state
+            .event_ids
+            .extend(input.events.iter().map(|e| e.event_id.clone()));
+        state.sessions.insert(
+            session_snapshot.session_id.clone(),
+            SessionState {
+                snapshot: session_snapshot,
+                messages,
+            },
+        );
+        let run = state.runs.get_mut(run_id).expect("validated run");
+        run.snapshot = input.snapshot;
+        run.events.extend(input.events);
+        if run.snapshot.status.is_terminal() {
+            run.lease = None;
+        }
+        Ok(result)
+    }
 }

@@ -82,3 +82,25 @@ python3 scripts/check-package.py --allow-dirty
 
 Process termination and restart are tested directly. Hardware power-loss behavior
 depends on SQLite and the underlying storage and is not simulated by those tests.
+
+## Execution-history checkpoint upgrade
+
+New admissions write `wickle.state-store.v2` scope checkpoints containing original
+execution actors, segments and control-command history. The SQL table layout is
+unchanged. Version-one checkpoints remain readable without rewriting them, and
+existing terminal outcomes/events remain intact when a later admission upgrades
+the scope in the same transaction. The v2 checkpoint explicitly lists inherited
+legacy Run IDs; missing history for an unmarked Run is corruption, including for
+terminal Runs. Accepted command evidence must match the saved recovery/resume
+receipt payload and segment revision.
+
+A legacy nonterminal Run has no trustworthy execution-history metadata. New
+admission into such a scope is rejected with `execution.legacy_drain_required`;
+new execution-transaction access returns `execution.legacy_checkpoint`. Finish or
+otherwise resolve these Runs using their original runtime before upgrading. The
+store does not invent actors, segment identities or command receipts for them.
+
+Back up the database before allowing the first new write. Do not run an older
+binary against a scope written in v2. Rollback means restoring a compatible backup
+and reconciling external effects, not simply switching the executable. Reads and
+failed transactions do not migrate a scope. See [runtime compatibility](compatibility.md).

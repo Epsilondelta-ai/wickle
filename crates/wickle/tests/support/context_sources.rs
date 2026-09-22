@@ -711,3 +711,28 @@ impl ModelRouter for FallbackRouter {
         })
     }
 }
+
+impl wickle::ExecutionTransactions for SourceStore {
+    fn read_execution<'a>(
+        &'a self,
+        scope: &'a wickle::Scope,
+        run_id: &'a wickle::Id,
+    ) -> wickle::PortFuture<'a, wickle::ExecutionHistory> {
+        self.inner.read_execution(scope, run_id)
+    }
+    fn submit_control_command<'a>(
+        &'a self,
+        scope: &'a wickle::Scope,
+        run_id: &'a wickle::Id,
+        command: wickle::ControlCommand,
+    ) -> wickle::PortFuture<'a, wickle::ControlReceipt> {
+        self.inner.submit_control_command(scope, run_id, command)
+    }
+    fn begin_segment<'a>(
+        &'a self,
+        scope: &'a wickle::Scope,
+        request: wickle::BeginSegmentRequest,
+    ) -> wickle::PortFuture<'a, wickle::BeginSegmentResult> {
+        self.inner.begin_segment(scope, request)
+    }
+}

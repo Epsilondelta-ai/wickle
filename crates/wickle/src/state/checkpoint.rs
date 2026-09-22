@@ -3,7 +3,8 @@ use crate::{JsonDigest, RunOutcome, RunRequest, serialization::data_digest};
 use serde::{Deserialize, Serialize, Serializer};
 
 /// Version of the protected, scope-local memory-store checkpoint format.
-pub const STATE_STORE_CHECKPOINT_VERSION: &str = "wickle.state-store.v1";
+pub const STATE_STORE_CHECKPOINT_VERSION: &str = "wickle.state-store.v2";
+const LEGACY_CHECKPOINT_VERSION: &str = "wickle.state-store.v1";
 
 /// An owned, validated scope graph. Explicit serialization contains protected
 /// transcript and input data and is intended only for authorized storage adapters.
@@ -33,6 +34,10 @@ struct CheckpointView<'a> {
     records: Vec<RecordView<'a>>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     hook_observations: Vec<&'a crate::HookObservation>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    executions: Vec<&'a crate::ExecutionHistory>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    legacy_runs: Vec<&'a Id>,
 }
 #[derive(Serialize)]
 struct SessionView<'a> {
@@ -55,7 +60,17 @@ struct RecordView<'a> {
 impl Serialize for StateStoreCheckpoint {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         CheckpointView {
-            schema_version: STATE_STORE_CHECKPOINT_VERSION,
+            schema_version: if self.state.executions.is_empty() {
+                LEGACY_CHECKPOINT_VERSION
+            } else {
+                STATE_STORE_CHECKPOINT_VERSION
+            },
+            executions: self.state.executions.values().collect(),
+            legacy_runs: if self.state.executions.is_empty() {
+                Vec::new()
+            } else {
+                self.state.legacy_runs.iter().collect()
+            },
             scope: &self.scope,
             sessions: self
                 .state
@@ -102,6 +117,10 @@ struct CheckpointData {
     records: Vec<RecordData>,
     #[serde(default)]
     hook_observations: Vec<crate::HookObservation>,
+    #[serde(default)]
+    executions: Vec<crate::ExecutionHistory>,
+    #[serde(default)]
+    legacy_runs: Vec<Id>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -173,9 +192,10 @@ impl StateStoreCheckpoint {
         expected_digest: &JsonDigest,
     ) -> Result<Self, ContractError> {
         let value = crate::parse_json(input)?;
-        if value.get("schema_version").and_then(Value::as_str)
-            != Some(STATE_STORE_CHECKPOINT_VERSION)
-        {
+        if !matches!(
+            value.get("schema_version").and_then(Value::as_str),
+            Some(STATE_STORE_CHECKPOINT_VERSION | LEGACY_CHECKPOINT_VERSION)
+        ) {
             return Err(error(
                 ErrorCode::UnsupportedSchemaVersion,
                 "checkpoint.schema_version",
@@ -220,9 +240,17 @@ impl MemoryStateStore {
 }
 
 fn restore_graph(data: CheckpointData) -> Result<StateStoreCheckpoint, ContractError> {
-    if data.schema_version != STATE_STORE_CHECKPOINT_VERSION {
+    if data.schema_version != STATE_STORE_CHECKPOINT_VERSION
+        && data.schema_version != LEGACY_CHECKPOINT_VERSION
+    {
         return Err(invalid("checkpoint.schema_version"));
     }
+    if data.schema_version == LEGACY_CHECKPOINT_VERSION
+        && (!data.executions.is_empty() || !data.legacy_runs.is_empty())
+    {
+        return Err(invalid("checkpoint.legacy_execution"));
+    }
+    let execution_records = data.executions.clone();
     let mut state = ScopeState::default();
     for record in data.records {
         if canonical_digest(&record.value) != record.reference.digest {
@@ -409,6 +437,56 @@ fn restore_graph(data: CheckpointData) -> Result<StateStoreCheckpoint, ContractE
     }
     state.message_ids = message_ids;
     state.event_ids = event_ids;
+    for execution in execution_records {
+        let run = state
+            .runs
+            .get(&execution.run_id)
+            .ok_or_else(|| invalid("checkpoint.execution_run"))?;
+        super::execution::validate_history(&execution, &run.snapshot)?;
+        for segment in &execution.segments {
+            let effects = match &segment.outcome {
+                Some(crate::SegmentOutcome::Interrupted { interruption }) => {
+                    &interruption.unresolved_effects
+                }
+                Some(crate::SegmentOutcome::Settled { outcome }) => &outcome.unresolved_effects,
+                None => continue,
+            };
+            for reference in effects {
+                record_value(&state, &BTreeMap::new(), reference)?;
+            }
+        }
+
+        if state
+            .executions
+            .insert(execution.run_id.clone(), execution)
+            .is_some()
+        {
+            return Err(invalid("checkpoint.duplicate_execution"));
+        }
+    }
+    if data.schema_version == LEGACY_CHECKPOINT_VERSION {
+        state.legacy_runs = state.runs.keys().cloned().collect();
+    } else {
+        for id in data.legacy_runs {
+            let run = state
+                .runs
+                .get(&id)
+                .ok_or_else(|| invalid("checkpoint.legacy_run"))?;
+            if !run.snapshot.status.is_terminal()
+                || state.executions.contains_key(&id)
+                || !state.legacy_runs.insert(id)
+            {
+                return Err(invalid("checkpoint.legacy_run"));
+            }
+        }
+        if state
+            .runs
+            .keys()
+            .any(|id| !state.executions.contains_key(id) && !state.legacy_runs.contains(id))
+        {
+            return Err(invalid("checkpoint.execution_missing"));
+        }
+    }
     Ok(StateStoreCheckpoint {
         scope: data.scope,
         state,

@@ -128,6 +128,8 @@ fn admission(
         last_event_seq: 1,
     };
     AdmissionInput {
+        execution_principal_ref: id("execution-principal"),
+        submitted: None,
         snapshot,
         prompt_snapshot: prompt.reference().clone(),
         require_durable: false,

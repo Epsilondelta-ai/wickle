@@ -74,6 +74,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let restored = store.load(&scope, &id("run")).await?;
         assert_eq!(restored.snapshot.status, RunStatus::Succeeded);
         assert_eq!(restored.snapshot.revision, 1);
+        let execution = store.read_execution(&scope, &id("run")).await?;
+        assert_eq!(execution.execution_principal_ref, id("execution-principal"));
+        assert!(matches!(execution.segments[0].outcome, Some(SegmentOutcome::Settled { .. })));
         assert_eq!(
             restored.snapshot.request.model_options.get("reasoning_effort"),
             Some(&json!("high"))
@@ -187,6 +190,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         visibility: Visibility::UserAndModel,
     };
     let input = AdmissionInput {
+        execution_principal_ref: id("execution-principal"),
+        submitted: None,
         snapshot,
         prompt_snapshot: prompt.reference().clone(),
         messages: vec![message],
@@ -206,9 +211,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "admission: created={}, retry_created={}, run={}",
         first.created, replay.created, replay.state.snapshot.run_id
     );
-    let lease = store
-        .acquire_lease(&scope, &id("run"), &id("worker"), 1000, 10_000)
-        .await?;
+    let execution = store.read_execution(&scope, &id("run")).await?;
+    let claim = BeginSegmentRequest {
+        run_id: id("run"), expected_revision: 0,
+        segment_id: execution.segments[0].segment_id.clone(), owner: id("worker"),
+        now_ms: 1000, lease_ttl_ms: 10_000.try_into()?,
+        start: SegmentStart::Initial, transition: None,
+    };
+    let accepted = store.begin_segment(&scope, claim.clone()).await?;
+    assert!(store.begin_segment(&scope, claim).await?.lease.is_none());
+    let lease = accepted.lease.ok_or("initial lease missing")?;
     let mut next = first.state.snapshot.clone();
     next.revision = 1;
     next.last_event_seq = 2;
