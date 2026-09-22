@@ -1007,9 +1007,11 @@ pub(crate) fn normalize_model_input_schema(
     Ok(normalized)
 }
 fn apply_model_defaults(schema: &Value, input: &JsonObject) -> Result<JsonObject, ContractError> {
-    let properties = schema
-        .get("properties")
-        .and_then(Value::as_object)
+    let Some(properties) = schema.get("properties") else {
+        return Ok(input.clone());
+    };
+    let properties = properties
+        .as_object()
         .ok_or_else(|| invalid("model_defaults.properties"))?;
     let mut normalized = input.clone();
     for (name, property) in properties {

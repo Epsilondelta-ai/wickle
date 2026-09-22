@@ -575,3 +575,33 @@ fn host_options_affect_request_identity_and_bounds_without_changing_empty_reques
         "model_request.input_size"
     );
 }
+
+#[tokio::test]
+async fn empty_object_schema_without_properties_accepts_an_empty_proposal() {
+    let mut input = request();
+    input.tools[0].model_input_schema = json!({"type":"object","additionalProperties":false});
+    input.validate().unwrap();
+    let response = collect(
+        &input,
+        vec![
+            tool(0, Some("call"), Some("search"), "{}"),
+            completed(ModelFinish::ToolCalls),
+        ],
+    )
+    .await
+    .unwrap();
+    assert_eq!(response.tool_calls[0].validation, ToolCallValidation::Valid);
+    let rejected = collect(
+        &input,
+        vec![
+            tool(0, Some("call"), Some("search"), r#"{"unexpected":true}"#),
+            completed(ModelFinish::ToolCalls),
+        ],
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        rejected.tool_calls[0].validation,
+        ToolCallValidation::InvalidArguments
+    );
+}

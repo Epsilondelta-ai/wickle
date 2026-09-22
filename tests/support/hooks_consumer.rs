@@ -420,7 +420,11 @@ impl HookHandler for Hooks {
                     model_inputs,
                     ..
                 } => {
-                    assert_eq!(model_inputs, original_model_inputs);
+                    assert_eq!(model_inputs, &match original_model_inputs["query"].as_str().unwrap() {
+                        "alpha" => object(json!({"query":"alpha","limit":2})),
+                        "beta" => object(json!({"query":"beta","limit":3})),
+                        other => panic!("unexpected query: {other}"),
+                    });
                     let mut inputs = model_inputs.clone();
                     inputs.insert(
                         "query".into(),

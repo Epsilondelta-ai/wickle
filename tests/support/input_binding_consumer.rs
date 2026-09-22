@@ -140,7 +140,7 @@ async fn plan(
         descriptor_digest: Some(compiled.descriptor_digest().clone()),
         bound_input_ref: None,
     };
-    call.provider_arguments = Some(ProviderToolArguments { name:call.tool_name.clone(),raw:serde_json::to_string(&call.model_inputs)?,compiled_contract_ref:None });
+    call.provider_arguments = Some(ProviderToolArguments { name:call.tool_name.clone(),raw:serde_json::to_string(&call.model_inputs).map_err(|_| ContractError::new(ErrorCode::InvalidJson, "example.arguments"))?,compiled_contract_ref:None });
     snapshot.tool_ledger.push(ToolLedgerEntry {
         call,
         state: ToolCallState::Planned {},

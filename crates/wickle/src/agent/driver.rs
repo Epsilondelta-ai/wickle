@@ -1165,15 +1165,19 @@ impl ModelRequestProjector for Projector<'_> {
                 },
                 context.cancellation.clone(),
             );
-            let prepared = Box::pin(self.context_runtime.prepare(
-                &self.prompt,
-                seed,
-                crate::context_strategy::ContextServices {
-                    bindings: self.bindings,
-                    budget: self.budget,
-                    context: &current,
-                },
-            ))
+            // Preparation can nest another routed model call for compaction.
+            // Construct its future outside this projector's poll stack frame.
+            let prepared = crate::future::boxed(|| {
+                self.context_runtime.prepare(
+                    &self.prompt,
+                    seed,
+                    crate::context_strategy::ContextServices {
+                        bindings: self.bindings,
+                        budget: self.budget,
+                        context: &current,
+                    },
+                )
+            })
             .await?;
             let mut references = artifacts::selected(
                 &prepared.projection.request,
