@@ -58,3 +58,9 @@ This module provides the compilation and restoration boundary. Agent driver
 integration and provider-specific projection policies are separate from this
 standalone API; creating a contract does not automatically change an Agent's
 registered Tool set.
+
+Numeric arguments that cannot round-trip through the current JSON value type without
+changing their exact decimal value are rejected with `InvalidArguments` at
+`provider_tool.numeric_precision`. Equivalent exponent/decimal spellings are
+accepted; large integers or high-precision decimals are never silently rounded.
+The historical JSON parser and digest rules remain unchanged.

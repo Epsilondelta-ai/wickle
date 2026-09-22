@@ -701,3 +701,46 @@ fn model_only_root_reference_and_sibling_conjunction_both_survive_mixed_projecti
         .validate_model_inputs(&object(json!({"query":"abc","limit":2})))
         .unwrap();
 }
+
+#[test]
+fn mixed_conjuncts_preserve_each_independent_exposed_constraint() {
+    for condition in [
+        json!({"properties":{"query":{"minLength":3},"workspace_id":{"const":WORKSPACE}}}),
+        json!({"properties":{"query":{"minLength":3}},"required":["query","workspace_id"]}),
+        json!({"allOf":[{"properties":{"query":{"minLength":3}}},{"required":["workspace_id"]}]}),
+    ] {
+        let mut tool = descriptor();
+        tool.input_schema["allOf"] = json!([condition]);
+        let compiled = SchemaCompiler::new().compile(tool, &registry()).unwrap();
+        assert!(
+            compiled
+                .validate_model_inputs(&object(json!({"query":"ab"})))
+                .is_err()
+        );
+        compiled
+            .validate_model_inputs(&object(json!({"query":"abc"})))
+            .unwrap();
+    }
+}
+
+#[test]
+fn hidden_predicates_are_not_weakened_into_incorrect_model_conditions() {
+    for (key, condition) in [
+        (
+            "not",
+            json!({"properties":{"query":{"minLength":3}},"required":["absent_system_field"]}),
+        ),
+        (
+            "oneOf",
+            json!([{"properties":{"query":{"minLength":3}}},{"required":["absent_system_field"]}]),
+        ),
+    ] {
+        let mut tool = descriptor();
+        tool.input_schema[key] = condition;
+        let compiled = SchemaCompiler::new().compile(tool, &registry()).unwrap();
+        let model = object(json!({"query":"abc"}));
+        let full = object(json!({"query":"abc","workspace_id":WORKSPACE}));
+        compiled.validate_execution_inputs(&full).unwrap();
+        compiled.validate_model_inputs(&model).unwrap();
+    }
+}

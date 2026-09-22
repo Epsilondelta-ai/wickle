@@ -362,6 +362,14 @@ impl CompiledToolContract {
             return Err(arguments());
         }
         let value = parse_json(raw).map_err(|_| arguments())?;
+        let original: &serde_json::value::RawValue =
+            serde_json::from_str(raw).map_err(|_| arguments())?;
+        if !numbers_preserved(original, &value) {
+            return Err(ContractError::new(
+                ErrorCode::InvalidArguments,
+                "provider_tool.numeric_precision",
+            ));
+        }
         let object = value.as_object().ok_or_else(arguments)?;
         match &self.data.decode_plan {
             ArgumentDecodePlan::Identity {} => Ok(object.clone().into_iter().collect()),
@@ -583,4 +591,59 @@ fn depth_bound(schema: &Value, max: usize) -> Result<(), ContractError> {
         }
     }
     Ok(())
+}
+
+// The legacy Value parser must remain unchanged for old digests. This new codec
+// refuses values it cannot represent, rather than silently rounding model input.
+fn numbers_preserved(raw: &serde_json::value::RawValue, parsed: &Value) -> bool {
+    use serde_json::value::RawValue;
+    match raw.get().as_bytes()[0] {
+        b'{' => {
+            let Ok(object) =
+                serde_json::from_str::<std::collections::BTreeMap<String, &RawValue>>(raw.get())
+            else {
+                return false;
+            };
+            object.into_iter().all(|(key, raw)| {
+                parsed
+                    .get(&key)
+                    .is_some_and(|value| numbers_preserved(raw, value))
+            })
+        }
+        b'[' => {
+            let Ok(array) = serde_json::from_str::<Vec<&RawValue>>(raw.get()) else {
+                return false;
+            };
+            array.into_iter().enumerate().all(|(index, raw)| {
+                parsed
+                    .get(index)
+                    .is_some_and(|value| numbers_preserved(raw, value))
+            })
+        }
+        b'-' | b'0'..=b'9' => parsed.as_number().is_some_and(|number| {
+            normalized_decimal(raw.get())
+                .is_some_and(|original| Some(original) == normalized_decimal(&number.to_string()))
+        }),
+        _ => true,
+    }
+}
+fn normalized_decimal(text: &str) -> Option<(bool, String, i128)> {
+    let negative = text.starts_with('-');
+    let unsigned = text.strip_prefix('-').unwrap_or(text);
+    let (mantissa, exponent) = unsigned.split_once(['e', 'E']).unwrap_or((unsigned, "0"));
+    let fraction = mantissa
+        .split_once('.')
+        .map_or(0, |(_, fraction)| fraction.len());
+    let digits: String = mantissa.chars().filter(|c| *c != '.').collect();
+    let digits = digits.trim_start_matches('0');
+    if digits.is_empty() {
+        return Some((false, "0".into(), 0));
+    }
+    let trimmed = digits.trim_end_matches('0');
+    let exponent = exponent
+        .parse::<i128>()
+        .ok()?
+        .checked_sub(fraction as i128)?
+        .checked_add((digits.len() - trimmed.len()) as i128)?;
+    Some((negative, trimmed.into(), exponent))
 }

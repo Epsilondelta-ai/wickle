@@ -239,3 +239,40 @@ fn compiler_output_cannot_change_ownership_drop_fields_or_ambiguate_presence() {
         );
     }
 }
+
+#[test]
+fn codecs_never_silently_round_numeric_arguments() {
+    let mut descriptor = tool().descriptor().clone();
+    descriptor.input_schema["properties"]["note"] = json!({"type":"number"});
+    let registry = SystemInputRegistry::new(vec![SystemInputDefinition {
+        key: id("workspace_id"),
+        version: id("1"),
+        value_schema: json!({"type":"string"}),
+        source: SystemInputSource::Run {},
+    }])
+    .unwrap();
+    let tool = SchemaCompiler::new()
+        .compile(descriptor, &registry)
+        .unwrap();
+    let limits = ProviderToolSchemaLimits::default();
+    let compiled =
+        CompiledToolContract::compile(&tool, target(), &NativeToolSchemaCompiler, limits).unwrap();
+    for number in [
+        "18446744073709551617",
+        "0.12345678901234567890123456789",
+        "1e-999",
+    ] {
+        assert!(
+            compiled
+                .decode_arguments(&format!(r#"{{"query":"ok","note":{number}}}"#), limits)
+                .is_err(),
+            "changed numeric value: {number}"
+        );
+    }
+    for number in ["18446744073709551615", "0.1", "1e2", "100.00", "-0.0"] {
+        let decoded = compiled
+            .decode_arguments(&format!(r#"{{"query":"ok","note":{number}}}"#), limits)
+            .unwrap();
+        tool.validate_model_inputs(&decoded).unwrap();
+    }
+}
