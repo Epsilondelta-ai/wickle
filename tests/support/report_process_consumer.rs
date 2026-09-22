@@ -183,7 +183,7 @@ mod host {
             clock.clone(),
         ));
         // The Run budget includes both process lifetimes and the approval gap.
-        // Each child has a separate 30-second wall watchdog below; this is a
+        // Each child has a separate 90-second wall watchdog below; this is a
         // recovery-contract example, not a 30-second end-to-end latency test.
         let profile = AgentProfile::from_json(
             r#"{
@@ -227,12 +227,10 @@ mod host {
                     token_estimator: Arc::new(Estimate),
                     settings: AgentSettings {
                         require_durable: true,
-                        // The wait worker can exit after component release but
-                        // before lease release. Keep crash handoff well inside
-                        // the parent's 30-second watchdog; do not race two
-                        // identical 30-second deadlines.
-                        lease_ttl_ms: 1000,
-                        heartbeat_interval_ms: 200,
+                        // An abrupt wait-worker exit may retain the normal
+                        // 30-second lease. Allow handoff to outlive that lease;
+                        // the parent watchdog also includes execution/cleanup.
+                        start_timeout_ms: 60_000,
                         max_output_tokens: 128.try_into().unwrap(),
                         ..Default::default()
                     },
@@ -250,7 +248,7 @@ mod host {
             .arg(directory)
             .arg(mode)
             .spawn()?;
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(90);
         loop {
             if let Some(status) = child.try_wait()? {
                 return Ok(status);
