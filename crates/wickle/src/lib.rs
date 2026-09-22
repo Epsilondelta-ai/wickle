@@ -15,6 +15,7 @@
 mod agent;
 mod artifacts;
 mod budget;
+mod canonical;
 mod clock;
 mod component_runtime;
 mod context;
@@ -36,6 +37,9 @@ mod profile;
 mod resolution;
 mod run;
 mod serialization;
+pub use canonical::{
+    CanonicalizationVersion, JsonTextLimits, canonicalize_json_text, versioned_digest_json,
+};
 mod skills;
 mod state;
 mod tool_execution;
