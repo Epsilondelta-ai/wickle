@@ -149,7 +149,8 @@ pub use context::{
 pub use error::{ContractError, ErrorCode};
 pub use message::{
     ArtifactRef, ContentBlock, EvidenceRef, Failure, InputContent, Message, MessageOrigin,
-    MessageRole, RecordRef, ToolCall, ToolResult, ToolResultStatus, Visibility,
+    MessageRole, ProviderToolArguments, RecordRef, ToolCall, ToolResult, ToolResultStatus,
+    Visibility,
 };
 pub use model::{
     ApiContract, ModelAttemptState, ModelFailureKind, ModelInvocationRecord, ModelPurpose,

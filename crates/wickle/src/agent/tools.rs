@@ -1,6 +1,32 @@
 use super::*;
 
 impl Agent {
+    /// Charge at most once per rejected Tool round, including recovery after reservation.
+    pub(super) async fn reserve_tool_repair(
+        &self,
+        request_id: &Id,
+        budget: &RunBudget,
+    ) -> Result<(), ContractError> {
+        let saved = self
+            .inner
+            .bindings
+            .state
+            .load(budget.scope(), budget.run_id())
+            .await?;
+        let invalid = saved.snapshot.tool_ledger.iter().any(|entry| {
+            &entry.call.model_request_id == request_id && crate::budget::needs_tool_repair(entry)
+        });
+        let reserved = saved.snapshot.reservations.iter().any(|reservation| matches!(&reservation.kind, ReservationKind::ToolRepair { model_request_id } if model_request_id == request_id));
+        if invalid && !reserved {
+            budget
+                .reserve(ReservationKind::ToolRepair {
+                    model_request_id: request_id.clone(),
+                })
+                .await?;
+        }
+        Ok(())
+    }
+
     pub(super) async fn tool_round(
         &self,
         budget: &RunBudget,
@@ -103,6 +129,13 @@ impl Agent {
                 .find(|tool| tool.model_tool.name == proposed.name)
                 .map(|tool| tool.descriptor_digest.clone());
             let call = ToolCall {
+                provider_arguments: proposed.raw_arguments.as_ref().map(|raw| {
+                    ProviderToolArguments {
+                        name: proposed.name.clone(),
+                        raw: raw.clone(),
+                        compiled_contract_ref: None,
+                    }
+                }),
                 call_id: bindings.ids.next_id()?,
                 model_request_id: response.request_id.clone(),
                 provider_call_id: proposed.provider_call_id.clone(),

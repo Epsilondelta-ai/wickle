@@ -358,6 +358,16 @@ impl Agent {
                     Err(error) => break Some(Err(error)),
                 }
             }
+            if let Some(request_id) = current
+                .snapshot
+                .tool_ledger
+                .last()
+                .map(|entry| entry.call.model_request_id.clone())
+            {
+                if let Err(error) = self.reserve_tool_repair(&request_id, budget).await {
+                    break Some(Err(error));
+                }
+            }
             // Keep the nested model/verification path off the parent Tool loop stack.
             match Box::pin(self.generate(
                 run_id,

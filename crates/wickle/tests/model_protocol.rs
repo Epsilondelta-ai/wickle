@@ -224,7 +224,7 @@ async fn contradictory_or_repeated_terminals_and_events_after_completion_are_rej
 }
 
 #[tokio::test]
-async fn malformed_or_ambiguous_argument_json_is_rejected_before_returning_calls() {
+async fn malformed_argument_text_is_preserved_as_an_unexecutable_proposal() {
     for arguments in [
         r#"{"query":"first","query":"second"}"#,
         r#"{"query":"x","nested":{"key":1,"key":2}}"#,
@@ -236,18 +236,24 @@ async fn malformed_or_ambiguous_argument_json_is_rejected_before_returning_calls
         "",
         r#"{"query":"unfinished"#,
     ] {
-        assert!(
-            collect(
-                &request(),
-                vec![
-                    tool(0, Some("call"), Some("search"), arguments),
-                    completed(ModelFinish::ToolCalls),
-                ]
-            )
-            .await
-            .is_err(),
-            "accepted arguments: {arguments}"
+        let response = collect(
+            &request(),
+            vec![
+                tool(0, Some("call"), Some("search"), arguments),
+                completed(ModelFinish::ToolCalls),
+            ],
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            response.tool_calls[0].validation,
+            ToolCallValidation::InvalidArguments
         );
+        assert_eq!(
+            response.tool_calls[0].raw_arguments.as_deref(),
+            Some(arguments)
+        );
+        assert!(response.tool_calls[0].model_inputs.is_empty());
     }
 }
 

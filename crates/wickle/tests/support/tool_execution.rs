@@ -482,6 +482,7 @@ impl Fixture {
                 .find(|tool| tool.descriptor().name.as_str() == *name)
                 .map(|tool| tool.descriptor_digest().clone());
             let call = ToolCall {
+                provider_arguments: None,
                 call_id: id(call_id),
                 model_request_id: id("model-request"),
                 provider_call_id: id(&format!("provider-{call_id}")),

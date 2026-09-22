@@ -84,22 +84,26 @@ impl SerialToolRound {
                 .await?;
                 continue;
             };
-            if registered
-                .compiled
-                .validate_model_inputs(&call.model_inputs)
-                .is_err()
+            let normalized = match self
+                .binder
+                .prepare_model_inputs(&registered.compiled, &call, context, budget)
+                .await
             {
-                self.reject(
-                    &call,
-                    call_message_id,
-                    ToolResultStatus::Failed,
-                    "invalid_arguments",
-                    budget,
-                    context,
-                )
-                .await?;
-                continue;
-            }
+                Ok(inputs) => inputs,
+                Err(error) if error.code == ErrorCode::InvalidArguments => {
+                    self.reject(
+                        &call,
+                        call_message_id,
+                        ToolResultStatus::Failed,
+                        "invalid_arguments",
+                        budget,
+                        context,
+                    )
+                    .await?;
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
             if call.bound_input_ref.is_none() {
                 if let Some(hooks) = &self.hooks {
                     let transformed = hooks
@@ -112,7 +116,7 @@ impl SerialToolRound {
                                 descriptor_digest: registered.compiled.descriptor_digest().clone(),
                                 compiled_digest: registered.compiled.digest().clone(),
                                 original_model_inputs: call.model_inputs.clone(),
-                                model_inputs: call.model_inputs.clone(),
+                                model_inputs: normalized,
                             },
                             context,
                             budget,
@@ -131,7 +135,7 @@ impl SerialToolRound {
                         continue;
                     }
                     if let Some(inputs) = transformed.model_inputs {
-                        registered.compiled.validate_model_inputs(&inputs)?;
+                        registered.compiled.normalize_model_inputs(&inputs)?;
                     }
                 }
             }
@@ -994,7 +998,7 @@ impl SerialToolRound {
 }
 
 pub(crate) fn call_message(saved: &StoredRun, call: &ToolCall) -> Result<Id, ContractError> {
-    let messages: Vec<_> = saved.messages.iter().filter(|message| message.run_id == saved.snapshot.run_id && message.role == MessageRole::Assistant && message.content.iter().any(|content| matches!(content, ContentBlock::ToolCall { call: candidate } if candidate.call_id == call.call_id && candidate.model_request_id == call.model_request_id && candidate.provider_call_id == call.provider_call_id && candidate.tool_name == call.tool_name && candidate.model_inputs == call.model_inputs && candidate.descriptor_digest == call.descriptor_digest))).collect();
+    let messages: Vec<_> = saved.messages.iter().filter(|message| message.run_id == saved.snapshot.run_id && message.role == MessageRole::Assistant && message.content.iter().any(|content| matches!(content, ContentBlock::ToolCall { call: candidate } if candidate.call_id == call.call_id && candidate.model_request_id == call.model_request_id && candidate.provider_call_id == call.provider_call_id && candidate.tool_name == call.tool_name && candidate.model_inputs == call.model_inputs && candidate.provider_arguments == call.provider_arguments && candidate.descriptor_digest == call.descriptor_digest))).collect();
     if messages.len() != 1 {
         return Err(error(ErrorCode::InvalidSnapshot, "tool.call_message"));
     }

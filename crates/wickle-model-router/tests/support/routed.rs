@@ -622,6 +622,7 @@ pub fn completed(outcome: Guarded<ModelExchangeOutcome>) -> ModelResponse {
 pub async fn seed_tool(fixture: &Fixture, state: ToolCallState) {
     let saved = fixture.saved().await;
     let call = ToolCall {
+        provider_arguments: None,
         call_id: id("unsettled-call"),
         model_request_id: id("earlier-attempt"),
         provider_call_id: id("earlier-call"),

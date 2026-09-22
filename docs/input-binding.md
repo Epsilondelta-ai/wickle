@@ -5,7 +5,7 @@ Host-supplied system values. It saves immutable execution arguments before a
 Tool executor can use them. It does not invoke the Tool or make missing IDs up.
 
 For a tool exposing `query` and `limit`, a model can submit `{"query":"recent"}`.
-The binder can apply the optional model default `limit=10` and read the required
+The binder can apply the declared model default `limit=10` and read the required
 `workspace_id` from the run's system snapshot. Its execution arguments contain
 exactly those three fields. Other registered run values are not merged in.
 
@@ -38,8 +38,8 @@ let result = binder.bind(
 ```
 
 The call must already exist in the Run's Tool ledger. The binder validates its
-original model arguments, adds supported model defaults, and reads only the
-hidden keys selected by the compiled contract. Aliases of the same system key
+provider argument provenance, applies declared model defaults before canonical
+validation, and reads only the hidden keys selected by the compiled contract. Aliases of the same system key
 share one lookup, including a missing result.
 
 `SystemInputResolver` receives one registered key, its definition/resolver version,
@@ -48,10 +48,10 @@ neither the complete system map nor credentials. It is a read-only lookup
 contract. `None` means missing; a returned JSON null is a value and must be allowed
 by the relevant schema.
 
-Default application is deliberately narrow: only missing optional top-level
-model parameters use a direct default or one reached through a supported local
-reference. Required, supplied, null, nested, and conditional values are not
-replaced or inferred. System defaults are never used. Both value schemas and the
+Default application is deliberately narrow: missing top-level model parameters,
+including required parameters, use a direct default or one reached through a
+supported local reference before validation. Supplied values and explicit null
+are never replaced. Nested and conditional defaults are not inferred. System defaults are never used. Both value schemas and the
 full execution schema must pass after assembly.
 
 ## Enforce current policy
@@ -100,3 +100,29 @@ Provider-specific schema representation and reversible argument codecs are descr
 in [Provider Tool schema contracts](provider-tool-schemas.md). These operate on the
 model-visible projection; full execution validation and system input binding remain
 separate boundaries.
+
+## Preserve provider arguments and bound corrections
+
+`ProposedToolCall.raw_arguments` preserves the original complete argument text,
+including malformed proposals. `ToolCall.provider_arguments` keeps the provider
+name, raw text, and optional protected `CompiledToolContract` reference separately
+from canonical `model_inputs`. Historical records can omit this evidence.
+
+`InputBinder::prepare_model_inputs` restores a saved provider codec against the
+original model invocation's target and verifies that decoding matches the saved
+canonical arguments. Identity projections also reparse the raw text. Malformed,
+ambiguous or numerically rounded input cannot become executable by applying defaults.
+The Agent stores identity provenance automatically; custom projections require
+materializing the pinned compiler reference with the canonical call.
+
+The Tool round applies defaults and validates before `before_tool`. Hook outputs
+are normalized and validated again, then system values are resolved/bound and the
+full execution schema is checked. Existing immutable Hook records are replayed
+as stored; the runtime does not rewrite old callback inputs or repeat callbacks.
+
+Before another model decision following an invalid/unknown Tool round, the Agent
+reserves one `ReservationKind::ToolRepair` for that physical response. Multiple bad
+calls in the same round share that reservation; resuming reuses it. It consumes
+`max_repair_attempts`, while the subsequent model call consumes `max_model_calls`.
+Transport recovery remains a separate budget. With zero repair capacity, the
+Agent records safe Tool failures and stops without another model call.

@@ -279,6 +279,7 @@ impl Fixture {
 pub enum Behavior {
     Context,
     Append,
+    RemoveQuery,
     Hidden,
     InvalidValue,
     Deny,
@@ -417,8 +418,13 @@ impl HookHandler for Hook {
                     ..
                 } => {
                     assert_eq!(
-                        tool.model_input_schema["properties"],
-                        json!({"query":{"type":"string"}})
+                        tool.model_input_schema["properties"]
+                            .as_object()
+                            .unwrap()
+                            .keys()
+                            .cloned()
+                            .collect::<Vec<_>>(),
+                        vec!["query".to_string()]
                     );
                     assert!(original_model_inputs.get("workspace_id").is_none());
                     let mut model_inputs = model_inputs.clone();
@@ -429,6 +435,9 @@ impl HookHandler for Hook {
                                 "query".into(),
                                 json!(format!("{query}|{}", self.suffix.lock().unwrap())),
                             );
+                        }
+                        Behavior::RemoveQuery => {
+                            model_inputs.remove("query");
                         }
                         Behavior::Hidden => {
                             model_inputs.insert("workspace_id".into(), json!(WORKSPACE));

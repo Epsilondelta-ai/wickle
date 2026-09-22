@@ -95,8 +95,10 @@ pub(super) fn validate_output(
             HookPosition::BeforeTool,
             HookInput::BeforeTool { tool, .. },
             HookOutput::Tool { model_inputs, .. },
-        ) => crate::tool_schema::compile_validator(&tool.model_input_schema)?
-            .is_valid(&serde_json::to_value(model_inputs).map_err(|_| invalid())?),
+        ) => {
+            crate::tool_schema::normalize_model_input_schema(&tool.model_input_schema, model_inputs)
+                .is_ok()
+        }
         (HookPosition::AfterTool, HookInput::AfterTool { .. }, HookOutput::Observed {})
         | (HookPosition::AfterRun, HookInput::AfterRun { .. }, HookOutput::Observed {}) => true,
         _ => false,
@@ -317,7 +319,12 @@ pub(crate) fn validate_application_chain(
                         if call.call.tool_name != tool.name
                             || call.call.descriptor_digest.as_ref() != Some(descriptor_digest)
                             || &call.call.model_inputs != original_model_inputs
-                            || model_inputs != original_model_inputs
+                            || (model_inputs != original_model_inputs
+                                && model_inputs
+                                    != &crate::tool_schema::normalize_model_input_schema(
+                                        &tool.model_input_schema,
+                                        original_model_inputs,
+                                    )?)
                         {
                             return Err(hook_error(
                                 ErrorCode::InvalidSnapshot,
@@ -415,4 +422,20 @@ fn source_context_for_step(
         items.extend_from_slice(batch.items());
     }
     Ok(items)
+}
+
+pub(super) fn normalize_output(
+    input: &HookInput,
+    mut output: HookOutput,
+) -> Result<HookOutput, ContractError> {
+    if let (HookInput::BeforeTool { tool, .. }, HookOutput::Tool { model_inputs, .. }) =
+        (input, &mut output)
+    {
+        *model_inputs = crate::tool_schema::normalize_model_input_schema(
+            &tool.model_input_schema,
+            model_inputs,
+        )
+        .map_err(|_| hook_error(ErrorCode::InvalidContract, "hooks.output"))?;
+    }
+    Ok(output)
 }

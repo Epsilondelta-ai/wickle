@@ -652,7 +652,7 @@ async fn concurrent_duplicate_starts_share_one_run_and_one_model_attempt() {
 async fn adapter_panic_fails_and_repeated_unknown_tools_exhaust_without_tool_dispatch() {
     for (response, expected_status, expected_calls) in [
         (Response::Panic, RunStatus::Failed, 1),
-        (Response::Tool, RunStatus::Exhausted, 4),
+        (Response::Tool, RunStatus::Exhausted, 1),
     ] {
         let fixture = Fixture::new(response, false);
         let agent = fixture.agent();
@@ -1209,5 +1209,41 @@ async fn profile_and_run_options_reach_the_model_with_pinned_origins_and_output_
             serde_json::json!(expected_effort)
         );
         assert_eq!(config.max_output_tokens.get(), expected_cap);
+    }
+}
+
+#[tokio::test]
+async fn invalid_tool_rounds_have_a_separate_finite_repair_budget() {
+    for capacity in [0, 1, 2] {
+        let fixture = Fixture::new(Response::Tool, false);
+        let mut profile = profile();
+        profile.limits.max_repair_attempts = capacity;
+        let agent = create_agent(profile, fixture.bindings()).unwrap();
+        let handle = fixture.started(&agent, "repair").await;
+        let outcome = completed(handle.outcome(&context()).await.unwrap());
+        assert_eq!(
+            outcome.result,
+            OutcomeResult::Exhausted {
+                budget: BudgetKind::RepairAttempts
+            }
+        );
+        assert_eq!(outcome.usage.model_calls, capacity + 1);
+        assert_eq!(outcome.usage.repair_attempts, capacity);
+        assert_eq!(outcome.usage.tool_attempts, 0);
+        assert_eq!(outcome.usage.recovery_attempts, 0);
+        let saved = fixture.store.load(&scope(), handle.run_id()).await.unwrap();
+        let rounds: std::collections::BTreeSet<_> = saved
+            .snapshot
+            .reservations
+            .iter()
+            .filter_map(|reservation| {
+                if let ReservationKind::ToolRepair { model_request_id } = &reservation.kind {
+                    Some(model_request_id)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert_eq!(rounds.len(), capacity as usize);
     }
 }

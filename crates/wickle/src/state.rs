@@ -1090,6 +1090,14 @@ fn validate_snapshot_refs(
     references.extend(&snapshot.context_batches);
     references.extend(snapshot.source_states.iter().map(|s| &s.batch_ref));
     for entry in &snapshot.tool_ledger {
+        if let Some(reference) = entry
+            .call
+            .provider_arguments
+            .as_ref()
+            .and_then(|arguments| arguments.compiled_contract_ref.as_ref())
+        {
+            references.push(reference);
+        }
         if let Some(reference) = &entry.call.bound_input_ref {
             crate::input_binding::validate_bound_record(
                 record_value(state, additions, reference)?,

@@ -130,7 +130,8 @@ async fn plan(
     let expected_revision = snapshot.revision;
     snapshot.revision += 1;
     snapshot.phase = RunPhase::Tool;
-    let call = ToolCall {
+    let mut call = ToolCall {
+        provider_arguments: None,
         call_id: id(call_id),
         model_request_id: id("model-request"),
         provider_call_id: id(&format!("provider-{call_id}")),
@@ -139,6 +140,7 @@ async fn plan(
         descriptor_digest: Some(compiled.descriptor_digest().clone()),
         bound_input_ref: None,
     };
+    call.provider_arguments = Some(ProviderToolArguments { name:call.tool_name.clone(),raw:serde_json::to_string(&call.model_inputs)?,compiled_contract_ref:None });
     snapshot.tool_ledger.push(ToolLedgerEntry {
         call,
         state: ToolCallState::Planned {},

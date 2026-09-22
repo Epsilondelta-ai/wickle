@@ -1687,7 +1687,8 @@ async fn unknown_invalid_and_denied_calls_return_errors_to_the_model_without_exe
             ),
             _ => ("read", object(json!({"query":"x"}))),
         };
-        let fixture = Fixture::new(vec![plan], Behavior::Success);
+        let mut fixture = Fixture::new(vec![plan], Behavior::Success);
+        fixture.profile.limits.max_repair_attempts = 1;
         if case == 2 {
             fixture.policy.mode.store(1, Ordering::SeqCst);
         }
@@ -1696,6 +1697,7 @@ async fn unknown_invalid_and_denied_calls_return_errors_to_the_model_without_exe
         let outcome = fixture.outcome(&handle).await;
         assert_eq!(outcome.result.status(), RunStatus::Succeeded);
         assert_eq!(outcome.usage.tool_attempts, 0);
+        assert_eq!(outcome.usage.repair_attempts, if case == 2 { 0 } else { 1 });
         assert_eq!(fixture.model.calls.load(Ordering::SeqCst), 2);
         assert!(fixture.order.lock().unwrap().is_empty());
         let requests = fixture.model.requests.lock().unwrap();

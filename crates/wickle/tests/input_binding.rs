@@ -359,6 +359,7 @@ impl Fixture {
     async fn plan(&self, call_id: &str, model_inputs: JsonObject) -> ToolCall {
         let saved = self.store.load(&scope(), &id("run")).await.unwrap();
         let call = ToolCall {
+            provider_arguments: None,
             call_id: id(call_id),
             model_request_id: id(&format!("request-{call_id}")),
             provider_call_id: id(&format!("provider-{call_id}")),
@@ -1240,7 +1241,7 @@ async fn restored_bound_inputs_require_the_original_record_call_scope_and_run() 
 }
 
 #[tokio::test]
-async fn only_direct_optional_defaults_are_applied_not_conditional_or_required_model_defaults() {
+async fn direct_required_and_optional_defaults_are_applied_but_conditional_defaults_are_not() {
     let mut required_default = descriptor();
     required_default.input_schema["required"] = json!(["query", "limit", "workspace_id"]);
     let fixture = Fixture::new(
@@ -1250,7 +1251,9 @@ async fn only_direct_optional_defaults_are_applied_not_conditional_or_required_m
     )
     .await;
     fixture.plan("call", object(json!({"query":"x"}))).await;
-    assert!(fixture.bind("call", None).await.is_err());
+    let bound = fixture.bind("call", None).await.unwrap();
+    assert_eq!(bound.input.normalized_model_inputs()["limit"], json!(10));
+    assert!(!bound.input.original_model_inputs().contains_key("limit"));
 
     let mut conditional = descriptor();
     conditional.agent_parameters.push("workspace_id".into());

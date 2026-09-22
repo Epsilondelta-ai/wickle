@@ -77,10 +77,43 @@ pub enum InputContent {
     },
 }
 
+/// Original provider representation, kept in protected records separately from
+/// canonical model arguments and never populated with system input values.
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderToolArguments {
+    /// Original model-facing provider name, before canonical alias restoration.
+    pub name: Id,
+    /// Exact argument JSON text, including malformed proposals for bounded feedback.
+    pub raw: String,
+    /// Pinned provider compilation record; absent for identity/legacy projection.
+    #[serde(
+        default,
+        deserialize_with = "optional",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub compiled_contract_ref: Option<RecordRef>,
+}
+impl std::fmt::Debug for ProviderToolArguments {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProviderToolArguments")
+            .field("name", &self.name)
+            .field("bytes", &self.raw.len())
+            .finish_non_exhaustive()
+    }
+}
+
 /// Model-owned tool arguments and provenance, separate from system execution inputs.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ToolCall {
+    /// Protected original wire representation, absent only in historical/Host-created calls.
+    #[serde(
+        default,
+        deserialize_with = "optional",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub provider_arguments: Option<ProviderToolArguments>,
     /// Core call identifier.
     pub call_id: Id,
     /// Original model request identifier.

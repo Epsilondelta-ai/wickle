@@ -250,6 +250,7 @@ pub async fn populate_protected_run(store: Arc<dyn StateStore>) -> Value {
     };
     let proposal = &response.tool_calls[0];
     let call = ToolCall {
+        provider_arguments: None,
         call_id: id("call"),
         model_request_id: response.request_id.clone(),
         provider_call_id: proposal.provider_call_id.clone(),
