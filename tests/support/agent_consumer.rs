@@ -371,9 +371,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     assert_eq!(outcome.usage.model_calls, 2);
     assert_eq!(outcome.usage.recovery_attempts, 1);
-    let replay = completed(agent.start(request, context.clone()).await?)?;
+    let replay = completed(agent.start(request.clone(), context.clone()).await?)?;
     assert_eq!(replay.run_id(), &run_id);
     assert_eq!(completed(replay.outcome(&context).await?)?, outcome);
+    let submitted = store.read_execution(&scope, &run_id).await?.submitted.ok_or("submitted identity missing")?;
+    submitted.validate(JsonTextLimits::default())?;
+    let mut changed = request;
+    changed.model_options.insert("reasoning_effort".into(), json!("changed"));
+    assert_eq!(agent.start(changed, context.clone()).await.unwrap_err().code, ErrorCode::RequestConflict);
+    assert_eq!(store.read_execution(&scope, &run_id).await?.submitted.as_ref().map(|s|s.digest()), Some(submitted.digest()));
+
     assert_eq!(first.calls.load(Ordering::SeqCst), 1);
     assert_eq!(second.calls.load(Ordering::SeqCst), 1);
     let view = completed(agent.get_run(&run_id, &context).await?)?;

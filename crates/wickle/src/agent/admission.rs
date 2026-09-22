@@ -8,32 +8,7 @@ impl Agent {
         context: ExecutionContext,
     ) -> Result<Guarded<RunHandle>, ContractError> {
         self.check_scope(&context)?;
-        // The request contract exists before its purpose-specific routing integration.
-        // Never silently accept an output cap that this driver cannot yet enforce.
-        if request.max_output_tokens.is_some() {
-            return Err(fail(
-                ErrorCode::CapabilityUnsupported,
-                "agent.request_output_cap",
-            ));
-        }
         let bindings = &self.inner.bindings;
-        if serde_json::to_vec(&request)
-            .map_err(|_| fail(ErrorCode::InvalidJson, "agent.request"))?
-            .len()
-            > bindings.settings.max_request_bytes
-        {
-            return Err(fail(ErrorCode::InvalidContract, "agent.request_size"));
-        }
-        if request
-            .input
-            .iter()
-            .any(|content| !matches!(content, InputContent::Text { .. }))
-        {
-            return Err(fail(ErrorCode::CapabilityUnsupported, "agent.request"));
-        }
-        self.inner
-            .verification
-            .plan(&self.inner.profile, request.output_contract.as_ref())?;
         let policy = PolicyRequest {
             owner_scope: bindings.scope.clone(),
             resource_id: request.request_id.clone(),
@@ -67,6 +42,32 @@ impl Agent {
                 self.handle(saved.snapshot.run_id, segment)?,
             ));
         }
+        if serde_json::to_vec(&request)
+            .map_err(|_| fail(ErrorCode::InvalidJson, "agent.request"))?
+            .len()
+            > bindings.settings.max_request_bytes
+        {
+            return Err(fail(ErrorCode::InvalidContract, "agent.request_size"));
+        }
+        // The request contract exists before its purpose-specific routing integration.
+        // Never silently accept an output cap that this driver cannot yet enforce.
+        if request.max_output_tokens.is_some() {
+            return Err(fail(
+                ErrorCode::CapabilityUnsupported,
+                "agent.request_output_cap",
+            ));
+        }
+        if request
+            .input
+            .iter()
+            .any(|content| !matches!(content, InputContent::Text { .. }))
+        {
+            return Err(fail(ErrorCode::CapabilityUnsupported, "agent.request"));
+        }
+        self.validate_new_configuration()?;
+        self.inner
+            .verification
+            .plan(&self.inner.profile, request.output_contract.as_ref())?;
         // Preparation may be cancelled or time out. Once durable admission begins,
         // this owned coordinator waits for its result even if the caller disconnects.
         let prepared = AssertUnwindSafe(self.prepare(request.clone(), &context)).catch_unwind();
@@ -176,6 +177,27 @@ impl Agent {
         context: &ExecutionContext,
         saved: &StoredRun,
     ) -> Result<(), ContractError> {
+        match self
+            .inner
+            .bindings
+            .state
+            .read_execution(&self.inner.bindings.scope, &saved.snapshot.run_id)
+            .await
+        {
+            Ok(history) => {
+                if let Some(submitted) = history.submitted {
+                    let candidate = self.capture_submission(request, context)?;
+                    if !submitted
+                        .matches_submission(&candidate, crate::JsonTextLimits::default())?
+                    {
+                        return Err(fail(ErrorCode::RequestConflict, "agent.submitted_request"));
+                    }
+                    return Ok(());
+                }
+            }
+            Err(error) if error.code == ErrorCode::CapabilityUnsupported => {}
+            Err(error) => return Err(error),
+        }
         if self.inner.profile.digest() != *saved.snapshot.profile.profile_digest()
             || admission_digest(
                 request,
@@ -209,12 +231,38 @@ impl Agent {
         Ok(())
     }
 
+    fn capture_submission(
+        &self,
+        request: &RunRequest,
+        context: &ExecutionContext,
+    ) -> Result<crate::RequestSnapshot, ContractError> {
+        let request = serde_json::to_string(request)
+            .map_err(|_| fail(ErrorCode::InvalidJson, "agent.request"))?;
+        let system = context
+            .data
+            .system_inputs
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(|_| fail(ErrorCode::InvalidJson, "agent.system_inputs"))?;
+        crate::RequestSnapshot::capture(
+            VersionedRef {
+                id: self.inner.profile.agent_id.clone(),
+                version: self.inner.profile.version.clone(),
+            },
+            &request,
+            system.as_deref(),
+            crate::JsonTextLimits::default(),
+        )
+    }
+
     async fn prepare(
         &self,
         request: RunRequest,
         context: &ExecutionContext,
     ) -> Result<(AdmissionInput, PromptSnapshot), ContractError> {
         let bindings = &self.inner.bindings;
+        let submitted = self.capture_submission(&request, context)?;
         let routing = bindings.router.snapshot().clone();
         if routing.scope() != &bindings.scope {
             return Err(fail(ErrorCode::AccessDenied, "agent.router_scope"));
@@ -543,7 +591,7 @@ impl Agent {
         Ok((
             AdmissionInput {
                 execution_principal_ref: context.data.principal_ref.clone(),
-                submitted: None,
+                submitted: Some(submitted),
                 snapshot,
                 prompt_snapshot: prompt_record.reference().clone(),
                 require_durable: bindings.settings.require_durable,

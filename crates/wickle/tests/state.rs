@@ -1002,3 +1002,58 @@ async fn recovery_acceptance_requires_the_exact_running_checkpoint_and_its_event
         }
     }
 }
+
+#[tokio::test]
+async fn admission_race_compares_stored_submission_before_candidate_configuration() {
+    let store = MemoryStateStore::new();
+    assert!(
+        store
+            .find_request(&scope(), &id("session"), &id("request"))
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let mut first = admission("winner", "request", "session", "same", "1").await;
+    let profile = first.snapshot.profile.profile();
+    first.submitted = Some(
+        RequestSnapshot::capture(
+            VersionedRef {
+                id: profile.agent_id.clone(),
+                version: profile.version.clone(),
+            },
+            &serde_json::to_string(&first.snapshot.request).unwrap(),
+            None,
+            JsonTextLimits::default(),
+        )
+        .unwrap(),
+    );
+    let original = first.submitted.clone();
+    let winner = store.admit(&scope(), first).await.unwrap();
+    let mut loser = admission("loser", "request", "session", "same", "99").await;
+    loser.submitted = original;
+    loser.snapshot.request_digest = canonical_digest(&json!("changed-current-configuration"));
+    let replay = store.admit(&scope(), loser.clone()).await.unwrap();
+    assert!(!replay.created);
+    assert_eq!(replay.state, winner.state);
+    let changed = RequestSnapshot::capture(
+        VersionedRef {
+            id: id("assistant"),
+            version: id("1.0.0"),
+        },
+        &serde_json::to_string(
+            &admission("unused", "request", "session", "different", "1")
+                .await
+                .snapshot
+                .request,
+        )
+        .unwrap(),
+        None,
+        JsonTextLimits::default(),
+    )
+    .unwrap();
+    loser.submitted = Some(changed);
+    assert_eq!(
+        store.admit(&scope(), loser).await.unwrap_err().code,
+        ErrorCode::RequestConflict
+    );
+}
