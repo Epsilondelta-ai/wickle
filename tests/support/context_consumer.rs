@@ -79,6 +79,7 @@ fn request(run: &str, text: &str) -> RunRequest {
         input: vec![InputContent::Text { text: text.into() }],
         trigger: RunTrigger::User {},
         model_options: JsonObject::from([("reasoning_effort".into(), json!("high"))]),
+        max_output_tokens: None,
         output_contract: None,
     }
 }

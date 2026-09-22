@@ -79,6 +79,13 @@ pub struct RunRequest {
     /// Catalog schemas define supported keys; credentials and raw provider bodies do not belong here.
     #[serde(default, skip_serializing_if = "JsonObject::is_empty")]
     pub model_options: JsonObject,
+    /// Requested per-model output cap; positive, authorized and bounded by Host/profile/model limits.
+    #[serde(
+        default,
+        deserialize_with = "optional",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub max_output_tokens: Option<NonZeroU64>,
     /// Optional output override; Host policy must authorize its use.
     #[serde(
         default,
@@ -271,6 +278,8 @@ pub enum RunStatus {
     Running,
     /// Persisted wait.
     Waiting,
+    /// Saved nonterminal segment interruption; requires the new execution contract.
+    Interrupted,
     /// Completion policy satisfied.
     Succeeded,
     /// Unrecoverable failure.
@@ -284,7 +293,7 @@ pub enum RunStatus {
 impl RunStatus {
     /// Whether this status cannot be resumed as the same run.
     pub fn is_terminal(self) -> bool {
-        !matches!(self, Self::Running | Self::Waiting)
+        !matches!(self, Self::Running | Self::Waiting | Self::Interrupted)
     }
 }
 
@@ -772,6 +781,11 @@ impl RunSnapshot {
     /// Check static checkpoint invariants without performing recovery or authorization.
     pub fn validate(&self) -> Result<(), ContractError> {
         let invalid = |path| ContractError::new(ErrorCode::InvalidSnapshot, path);
+        // Version-one checkpoints lack the required interruption/segment record.
+        // Never accept a fabricated interrupted state via the legacy decoder.
+        if self.status == RunStatus::Interrupted {
+            return Err(invalid("interrupted.requires_execution_checkpoint"));
+        }
         crate::budget::validate_budget(self)?;
         if &self.scope != self.profile.scope()
             || self.request_digest

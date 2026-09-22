@@ -125,6 +125,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }],
         trigger: RunTrigger::User {},
         model_options: std::collections::BTreeMap::from([
+        max_output_tokens: None,
             ("reasoning_effort".into(), json!("high")),
         ]),
         output_contract: None,

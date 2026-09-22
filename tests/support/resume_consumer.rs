@@ -510,6 +510,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }],
         trigger: RunTrigger::User {},
         model_options: JsonObject::new(),
+        max_output_tokens: None,
         output_contract: None,
     };
     let handle = completed(initial_agent.start(request, caller.clone()).await?)?;

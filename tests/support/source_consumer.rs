@@ -401,6 +401,7 @@ fn request(name: &str) -> RunRequest {
         }],
         trigger: RunTrigger::User {},
         model_options: JsonObject::new(),
+        max_output_tokens: None,
         output_contract: None,
     }
 }

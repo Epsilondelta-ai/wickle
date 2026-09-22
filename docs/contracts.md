@@ -205,3 +205,5 @@ These text-boundary functions do not change existing profile or checkpoint
 encodings. Runtime adoption and stored-data migration require an explicit
 versioned contract. They also cannot detect whether a caller previously converted
 a nonfinite native float into JSON null: validate native values before encoding.
+
+See [execution record contracts](execution-records.md) for submitted snapshots, segment outcomes and atomic storage Port contracts.

@@ -59,6 +59,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }],
         trigger: RunTrigger::User {},
         model_options: JsonObject::new(),
+        max_output_tokens: None,
         output_contract: None,
     };
     let request_record =

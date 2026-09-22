@@ -284,6 +284,7 @@ mod host {
                     }],
                     trigger: RunTrigger::User {},
                     model_options: JsonObject::new(),
+                    max_output_tokens: None,
                     output_contract: None,
                 };
                 let handle = completed(agent.start(request, caller.clone()).await?)?;
