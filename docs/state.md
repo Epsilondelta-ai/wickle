@@ -1,5 +1,7 @@
 # StateStore and the memory reference store
 
+For upgrades and persisted executions, see [runtime compatibility](compatibility.md).
+
 `StateStore` is the trusted storage boundary for admission, checkpoints, leases,
 session transcripts, protected records, and event replay. `MemoryStateStore`
 implements that contract in-process with a mutex-protected transaction boundary.
