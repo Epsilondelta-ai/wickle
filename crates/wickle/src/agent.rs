@@ -413,8 +413,12 @@ impl Agent {
         let run_id = command.run_id.clone();
         let disclosure_context = context.clone();
         let agent = self.clone();
+        // Build the owned coordinator outside the caller's poll stack before
+        // handing it to Tokio; recovery can nest several large state futures.
         let result = runtime
-            .spawn(async move { agent.resume_command(command, context).await })
+            .spawn(crate::future::boxed(|| async move {
+                agent.resume_command(command, context).await
+            }))
             .await
             .map_err(|_| fail(ErrorCode::InvalidContract, "agent.resume"))?;
         match result {
