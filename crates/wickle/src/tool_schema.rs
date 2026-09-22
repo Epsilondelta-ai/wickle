@@ -408,15 +408,27 @@ impl SchemaCompiler {
                 }
                 "properties" | "required" | "$defs" | "definitions" => {}
                 "patternProperties" => return Err(unsupported("input_schema.patternProperties")),
-                key if root_constraint(key) => {
-                    if mixed {
-                        return Err(unsupported("input_schema.cross_parameter_constraint"));
-                    }
+                key if root_constraint(key) && !mixed => {
                     projected.insert(key.into(), value.clone());
                 }
                 // Root annotations can contain full execution examples, so they are
                 // never copied. Selected field annotations remain explicitly visible.
                 _ => {}
+            }
+        }
+        if mixed {
+            let conditions = project_model_conjunction(
+                &descriptor.input_schema,
+                &exposed,
+                &descriptor.input_schema,
+                0,
+            )?;
+            if let Value::Object(conditions) = conditions {
+                for (key, value) in conditions {
+                    if root_constraint(&key) {
+                        projected.insert(key, value);
+                    }
+                }
             }
         }
         projected.insert(
@@ -716,4 +728,258 @@ pub(crate) fn compile_validator(schema: &Value) -> Result<jsonschema::Validator,
         .with_retriever(NoSchemaRetrieval)
         .build(schema)
         .map_err(|_| invalid("schema"))
+}
+
+// A root predicate is model-only only if hidden properties cannot change its truth.
+// Conditions that depend on system fields stay in the full execution validator.
+fn model_only_condition(
+    node: &Value,
+    exposed: &BTreeSet<&str>,
+    document: &Value,
+    depth: usize,
+) -> Option<Value> {
+    if depth > 64 {
+        return None;
+    }
+    if node.is_boolean() {
+        return Some(node.clone());
+    }
+    let map = node.as_object()?;
+    let mut result = Map::new();
+    for (key, value) in map {
+        match key.as_str() {
+            "properties" => {
+                let props = value.as_object()?;
+                if props.keys().any(|name| !exposed.contains(name.as_str())) {
+                    return None;
+                }
+                result.insert(key.clone(), value.clone());
+            }
+            "required" => {
+                if value
+                    .as_array()?
+                    .iter()
+                    .any(|name| name.as_str().is_none_or(|name| !exposed.contains(name)))
+                {
+                    return None;
+                }
+                result.insert(key.clone(), value.clone());
+            }
+            "allOf" | "anyOf" | "oneOf" => {
+                let parts: Option<Vec<_>> = value
+                    .as_array()?
+                    .iter()
+                    .map(|part| model_only_condition(part, exposed, document, depth + 1))
+                    .collect();
+                let parts = parts?;
+                if key == "allOf" {
+                    result
+                        .entry(key.clone())
+                        .or_insert_with(|| Value::Array(Vec::new()))
+                        .as_array_mut()?
+                        .extend(parts);
+                } else {
+                    result.insert(key.clone(), Value::Array(parts));
+                }
+            }
+            "not" | "if" | "then" | "else" => {
+                result.insert(
+                    key.clone(),
+                    model_only_condition(value, exposed, document, depth + 1)?,
+                );
+            }
+            "dependentRequired" => {
+                let dependencies = value.as_object()?;
+                for (name, required) in dependencies {
+                    if !exposed.contains(name.as_str())
+                        || required
+                            .as_array()?
+                            .iter()
+                            .any(|name| name.as_str().is_none_or(|name| !exposed.contains(name)))
+                    {
+                        return None;
+                    }
+                }
+                result.insert(key.clone(), value.clone());
+            }
+            "dependentSchemas" => {
+                let mut dependencies = Map::new();
+                for (name, schema) in value.as_object()? {
+                    if !exposed.contains(name.as_str()) {
+                        return None;
+                    }
+                    dependencies.insert(
+                        name.clone(),
+                        model_only_condition(schema, exposed, document, depth + 1)?,
+                    );
+                }
+                result.insert(key.clone(), Value::Object(dependencies));
+            }
+            "$ref" => {
+                let reference = value.as_str()?.strip_prefix('#')?;
+                let resolved = model_only_condition(
+                    document.pointer(reference)?,
+                    exposed,
+                    document,
+                    depth + 1,
+                )?;
+                result
+                    .entry("allOf")
+                    .or_insert_with(|| Value::Array(Vec::new()))
+                    .as_array_mut()?
+                    .push(resolved);
+            }
+            "type" => {
+                result.insert(key.clone(), value.clone());
+            }
+            key if root_constraint(key)
+                || matches!(key, "additionalProperties" | "patternProperties") =>
+            {
+                return None;
+            }
+            // Root annotations may describe full execution inputs, so do not expose them.
+            _ => {}
+        }
+    }
+    Some(Value::Object(result))
+}
+
+// Keep necessary model-owned restrictions in a conjunction. This projection may
+// weaken a whole execution predicate, so it must never be used as an if/not/XOR test.
+fn project_model_conjunction(
+    node: &Value,
+    exposed: &BTreeSet<&str>,
+    document: &Value,
+    depth: usize,
+) -> Result<Value, ContractError> {
+    if depth > 64 {
+        return Err(unsupported("input_schema.projection_depth"));
+    }
+    if node.is_boolean() {
+        return Ok(node.clone());
+    }
+    let map = node
+        .as_object()
+        .ok_or_else(|| invalid("input_schema.condition"))?;
+    let mut result = Map::new();
+    let mut conjuncts = Vec::new();
+    for (key, value) in map {
+        match key.as_str() {
+            "type" => {
+                result.insert(key.clone(), value.clone());
+            }
+            "properties" => {
+                let selected = value
+                    .as_object()
+                    .ok_or_else(|| invalid("input_schema.properties"))?
+                    .iter()
+                    .filter(|(name, _)| exposed.contains(name.as_str()))
+                    .map(|(name, value)| (name.clone(), value.clone()))
+                    .collect();
+                result.insert(key.clone(), Value::Object(selected));
+            }
+            "required" => {
+                let selected = value
+                    .as_array()
+                    .ok_or_else(|| invalid("input_schema.required"))?
+                    .iter()
+                    .filter(|name| name.as_str().is_some_and(|name| exposed.contains(name)))
+                    .cloned()
+                    .collect();
+                result.insert(key.clone(), Value::Array(selected));
+            }
+            "allOf" => {
+                for child in value
+                    .as_array()
+                    .ok_or_else(|| invalid("input_schema.allOf"))?
+                {
+                    conjuncts.push(project_model_conjunction(
+                        child,
+                        exposed,
+                        document,
+                        depth + 1,
+                    )?);
+                }
+            }
+            "$ref" => {
+                let pointer = value
+                    .as_str()
+                    .and_then(|reference| reference.strip_prefix('#'))
+                    .ok_or_else(|| unsupported("input_schema.reference"))?;
+                let child = document
+                    .pointer(pointer)
+                    .ok_or_else(|| unsupported("input_schema.reference"))?;
+                conjuncts.push(project_model_conjunction(
+                    child,
+                    exposed,
+                    document,
+                    depth + 1,
+                )?);
+            }
+            "dependentRequired" => {
+                let mut dependencies = Map::new();
+                for (name, required) in value
+                    .as_object()
+                    .ok_or_else(|| invalid("input_schema.dependentRequired"))?
+                {
+                    if exposed.contains(name.as_str()) {
+                        let kept = required
+                            .as_array()
+                            .ok_or_else(|| invalid("input_schema.dependentRequired"))?
+                            .iter()
+                            .filter(|name| name.as_str().is_some_and(|name| exposed.contains(name)))
+                            .cloned()
+                            .collect();
+                        dependencies.insert(name.clone(), Value::Array(kept));
+                    }
+                }
+                result.insert(key.clone(), Value::Object(dependencies));
+            }
+            "dependentSchemas" => {
+                let mut dependencies = Map::new();
+                for (name, condition) in value
+                    .as_object()
+                    .ok_or_else(|| invalid("input_schema.dependentSchemas"))?
+                {
+                    if exposed.contains(name.as_str()) {
+                        dependencies.insert(
+                            name.clone(),
+                            project_model_conjunction(condition, exposed, document, depth + 1)?,
+                        );
+                    }
+                }
+                result.insert(key.clone(), Value::Object(dependencies));
+            }
+            "if" | "then" | "else" => {}
+            key if root_constraint(key) => {
+                let wrapper = Value::Object(Map::from_iter([(key.into(), value.clone())]));
+                if let Some(Value::Object(mut exact)) =
+                    model_only_condition(&wrapper, exposed, document, depth + 1)
+                {
+                    if let Some(value) = exact.remove(key) {
+                        result.insert(key.into(), value);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    if let Some(condition) = map
+        .get("if")
+        .and_then(|condition| model_only_condition(condition, exposed, document, depth + 1))
+    {
+        result.insert("if".into(), condition);
+        for branch in ["then", "else"] {
+            if let Some(schema) = map.get(branch) {
+                result.insert(
+                    branch.into(),
+                    project_model_conjunction(schema, exposed, document, depth + 1)?,
+                );
+            }
+        }
+    }
+    if !conjuncts.is_empty() {
+        result.insert("allOf".into(), Value::Array(conjuncts));
+    }
+    Ok(Value::Object(result))
 }
