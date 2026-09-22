@@ -47,7 +47,7 @@ impl fmt::Display for Id {
     }
 }
 
-/// A SHA-256 digest using the versioned `sorted-json-v1` encoding.
+/// A SHA-256 digest carrying its canonicalization version.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub struct JsonDigest(String);
@@ -64,6 +64,7 @@ impl TryFrom<String> for JsonDigest {
     fn try_from(value: String) -> Result<Self, Self::Error> {
         let valid = value
             .strip_prefix("sorted-json-v1:sha256:")
+            .or_else(|| value.strip_prefix("wickle-canonical-json-v1:sha256:"))
             .is_some_and(|hex| {
                 hex.len() == 64
                     && hex

@@ -185,3 +185,23 @@ application. The Host supplies Tokio, a scoped metadata resolver, and a JSON
 profile. The program validates the profile, persists and restores its resolved
 identity, and reports the result. The consumer also accepts a profile JSON file
 and an optional second file to compare against the pinned profile.
+
+## Versioned JSON text digests
+
+`canonicalize_json_text` sorts object keys, normalizes JSON string escaping and
+preserves the original number tokens. It does not round large integers through a
+floating-point value. `1E+003`, `1e3` and `1000` may have different digests.
+Pass UTF-8 JSON text directly; converting it through `serde_json::Value` first
+cannot recover number spelling that has already been lost.
+
+`versioned_digest_json` requires a `CanonicalizationVersion`. Use the version
+saved with the original request when comparing a retransmission. The
+`SortedJsonV1` branch retains the historical `canonical_digest_json` behavior;
+`WickleCanonicalJsonV1` produces a distinct digest prefix. `JsonTextLimits`
+bounds input bytes and object/array nesting (default 1 MiB and depth 128).
+Duplicate decoded keys, trailing data and invalid JSON are rejected.
+
+These text-boundary functions do not change existing profile or checkpoint
+encodings. Runtime adoption and stored-data migration require an explicit
+versioned contract. They also cannot detect whether a caller previously converted
+a nonfinite native float into JSON null: validate native values before encoding.
