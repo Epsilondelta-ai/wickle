@@ -189,6 +189,9 @@ impl RunBudget {
     /// Recheck current cancellation, deadline, run status, and the store's
     /// authoritative lease. Counter limits are checked individually at reservation.
     pub async fn check_boundary(&self) -> Result<(), ContractError> {
+        // In-memory stores and cached adapters can complete every await immediately.
+        // Offer heartbeat/control tasks a scheduling opportunity before checking ownership.
+        tokio::task::yield_now().await;
         self.check_cancelled()?;
         let saved = self.store.load(&self.scope, &self.run_id).await?;
         self.validate_running(&saved.snapshot)?;

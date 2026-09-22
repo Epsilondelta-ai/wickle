@@ -2515,3 +2515,55 @@ fn assert_prepared_corruption_rejected(image: &Value, corruption: &str) {
         "accepted {corruption} omission or mismatch with all containing record hashes recomputed"
     );
 }
+
+/// Deterministic work clock: every clock read advances execution time, while
+/// sleep waits cooperatively. Ready-only model/store work must let renewals run.
+struct WorkClock(std::sync::atomic::AtomicU64);
+impl Clock for WorkClock {
+    fn now(&self) -> Result<ClockReading, ContractError> {
+        let tick = self.0.fetch_add(10, Ordering::SeqCst);
+        Ok(ClockReading {
+            utc_ms: 1000 + tick as i64,
+            monotonic_ms: tick,
+        })
+    }
+    fn sleep_until<'a>(&'a self, deadline: u64) -> PortFuture<'a, ()> {
+        Box::pin(async move {
+            while self.0.load(Ordering::SeqCst) < deadline {
+                tokio::task::yield_now().await;
+            }
+            Ok(())
+        })
+    }
+}
+#[tokio::test]
+async fn ready_only_execution_yields_to_lease_renewal_between_guarded_operations() {
+    let fixture = Fixture::new(
+        vec![("read", object(json!({"query":"cached records"})))],
+        Behavior::Success,
+    );
+    let mut bindings = fixture.bindings();
+    bindings.clock = Arc::new(WorkClock(std::sync::atomic::AtomicU64::new(0)));
+    bindings.settings.lease_ttl_ms = 300;
+    bindings.settings.heartbeat_interval_ms = 30;
+    let agent = create_agent(fixture.profile.clone(), bindings).unwrap();
+    let handle = fixture.start(&agent).await;
+    assert_eq!(
+        fixture.outcome(&handle).await.result.status(),
+        RunStatus::Succeeded
+    );
+    assert_eq!(fixture.tools[0].calls.load(Ordering::SeqCst), 1);
+    assert_eq!(fixture.model.calls.load(Ordering::SeqCst), 2);
+    assert!(
+        fixture
+            .base
+            .store
+            .load(&scope(), handle.run_id())
+            .await
+            .unwrap()
+            .snapshot
+            .usage
+            .elapsed_ms
+            > 300
+    );
+}

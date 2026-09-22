@@ -596,12 +596,21 @@ async fn an_in_flight_operation_is_interrupted_when_the_original_deadline_arrive
     let fixture = Fixture::new(1, 0, 0, 0).await;
     let budget = fixture.budget(fixture.store.clone()).await;
     let calls = AtomicUsize::new(0);
+    let entered = Notify::new();
     let execution = budget.execute(model(ModelPurpose::Agent), |_| {
         calls.fetch_add(1, Ordering::SeqCst);
+        entered.notify_one();
         std::future::pending::<Result<(), ContractError>>()
     });
     tokio::pin!(execution);
-    assert!(futures_util::poll!(execution.as_mut()).is_pending());
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        tokio::select! {
+            result = &mut execution => panic!("operation should still be in flight: {result:?}"),
+            _ = entered.notified() => {},
+        }
+    })
+    .await
+    .unwrap();
     fixture.clock.set(100, 100);
     assert_eq!(
         execution.await.unwrap_err().code,
