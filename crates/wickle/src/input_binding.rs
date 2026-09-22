@@ -789,7 +789,7 @@ impl InputBinder {
             .call
             .clone();
         check_selection(&saved.snapshot, compiled, &call)?;
-        self.prepare_model_inputs(compiled, &call, context, budget)
+        crate::future::boxed(|| self.prepare_model_inputs(compiled, &call, context, budget))
             .await?;
         let selection = resolved_tool_selection(&saved.snapshot, compiled, context, budget).await?;
         let run_inputs = match &saved.snapshot.system_inputs {

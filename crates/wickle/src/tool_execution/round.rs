@@ -84,10 +84,11 @@ impl SerialToolRound {
                 .await?;
                 continue;
             };
-            let normalized = match self
-                .binder
-                .prepare_model_inputs(&registered.compiled, &call, context, budget)
-                .await
+            let normalized = match crate::future::boxed(|| {
+                self.binder
+                    .prepare_model_inputs(&registered.compiled, &call, context, budget)
+            })
+            .await
             {
                 Ok(inputs) => inputs,
                 Err(error) if error.code == ErrorCode::InvalidArguments => {
