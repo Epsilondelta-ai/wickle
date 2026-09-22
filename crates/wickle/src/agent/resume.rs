@@ -831,14 +831,10 @@ impl Agent {
         data.system_inputs = None;
         let context = ExecutionContext::new(data, local.cancel.clone());
         tokio::spawn(async move {
-            let result = AssertUnwindSafe(agent.drive_leased(
-                &driver_id,
-                prompt,
-                context,
-                &driver_local,
-                lease,
-                expired,
-            ))
+            // Keep the large resumed driver out of this spawned closure's poll frame.
+            let result = AssertUnwindSafe(crate::future::boxed(|| {
+                agent.drive_leased(&driver_id, prompt, context, &driver_local, lease, expired)
+            }))
             .catch_unwind()
             .await;
             let error = match result {
