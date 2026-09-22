@@ -11,8 +11,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     ContractError, ErrorCode, Id, JsonDigest, JsonObject, ModelFailureKind, ModelPurpose,
-    ModelUsage, PortStream, ResolvedModelRoute, Scope, VersionedRef, parse_json,
-    serialization::data_digest,
+    ModelUsage, PortStream, ResolvedModelRoute, Scope, VersionedRef, serialization::data_digest,
 };
 
 /// Adapter-owned provider, implementation, and credential-binding identities.
@@ -480,6 +479,13 @@ pub enum ToolCallValidation {
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProposedToolCall {
+    /// Exact provider argument text. Historical records may not contain this evidence.
+    #[serde(
+        default,
+        deserialize_with = "crate::serialization::optional",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub raw_arguments: Option<String>,
     /// Provider-local identity, scoped by the ModelResponse request_id.
     pub provider_call_id: Id,
     /// Normalized model-facing name.
@@ -805,17 +811,21 @@ pub async fn collect_model_response(
             .name
             .as_ref()
             .ok_or_else(|| assembly.error(ModelProtocolErrorCode::InvalidToolName))?;
-        let value = parse_json(&call.arguments)
-            .map_err(|_| assembly.error(ModelProtocolErrorCode::InvalidArguments))?;
-        let object = value
-            .as_object()
-            .ok_or_else(|| assembly.error(ModelProtocolErrorCode::InvalidArguments))?;
+        let parsed = crate::provider_tool_schema::parse_provider_arguments(
+            &call.arguments,
+            request.limits.max_response_bytes,
+        )
+        .ok();
         let validation = match request.tools.iter().find(|tool| tool.name.as_str() == name) {
             None => ToolCallValidation::UnknownTool,
             Some(tool) => {
-                let validator = compile_schema(&tool.model_input_schema)
-                    .map_err(|_| assembly.error(ModelProtocolErrorCode::InvalidRequest))?;
-                if validator.is_valid(&value) {
+                if parsed.as_ref().is_some_and(|input| {
+                    crate::tool_schema::normalize_model_input_schema(
+                        &tool.model_input_schema,
+                        input,
+                    )
+                    .is_ok()
+                }) {
                     ToolCallValidation::Valid
                 } else {
                     ToolCallValidation::InvalidArguments
@@ -823,14 +833,12 @@ pub async fn collect_model_response(
             }
         };
         tool_calls.push(ProposedToolCall {
+            raw_arguments: Some(call.arguments.clone()),
             provider_call_id: Id::new(provider_call_id.clone())
                 .map_err(|_| assembly.error(ModelProtocolErrorCode::InvalidCallId))?,
             name: Id::new(name.clone())
                 .map_err(|_| assembly.error(ModelProtocolErrorCode::InvalidToolName))?,
-            model_inputs: object
-                .iter()
-                .map(|(key, value)| (key.clone(), value.clone()))
-                .collect(),
+            model_inputs: parsed.unwrap_or_default(),
             validation,
         });
     }

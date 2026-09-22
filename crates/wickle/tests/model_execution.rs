@@ -105,6 +105,7 @@ impl PolicyPort for Policy {
 
 enum Reply {
     Complete,
+    Tool(String),
     Fail(ModelFailureKind),
     IncompleteTool,
     Pending,
@@ -187,6 +188,19 @@ impl ModelPort for ScriptedModel {
                 name: Some("search".into()),
                 delta: "{\"query\":".into(),
             })])),
+            Reply::Tool(arguments) => Box::pin(stream::iter([
+                Ok(ModelEvent::ToolArgumentsDelta {
+                    index: 0,
+                    provider_call_id: Some("provider-tool".into()),
+                    name: Some("wire_search".into()),
+                    delta: arguments,
+                }),
+                Ok(ModelEvent::ResponseCompleted {
+                    finish: ModelFinish::ToolCalls,
+                    metadata: ModelResponseMetadata::default(),
+                    continuation: vec![],
+                }),
+            ])),
             Reply::Pending => Box::pin(stream::pending()),
         };
         Box::pin(start.chain(tail))
@@ -802,5 +816,128 @@ async fn a_completed_ledger_entry_requires_the_exact_typed_response_and_reservat
     assert_eq!(
         saved.snapshot.model_ledger[0].response_ref.as_ref(),
         Some(record.reference())
+    );
+}
+
+struct RenamedArguments;
+impl ProviderToolSchemaCompiler for RenamedArguments {
+    fn reference(&self) -> VersionedRef {
+        reference("renamed")
+    }
+    fn compile(
+        &self,
+        tool: &ModelTool,
+        _: &ProviderToolTarget,
+    ) -> Result<ProviderToolProjection, ContractError> {
+        Ok(ProviderToolProjection {
+            wire_tool: ModelTool {
+                name: id("wire_search"),
+                description: tool.description.clone(),
+                model_input_schema: json!({"type":"object","properties":{"q":{"type":"string"},"n":{"type":"object","properties":{"present":{"type":"boolean"},"value":{"type":["integer","null"]}},"required":["present","value"],"additionalProperties":false}},"required":["q","n"],"additionalProperties":false}),
+            },
+            decode_plan: ArgumentDecodePlan::Fields {
+                fields: vec![
+                    ArgumentFieldMapping {
+                        wire_name: "q".into(),
+                        canonical_name: "query".into(),
+                        encoding: ArgumentValueEncoding::Identity {},
+                    },
+                    ArgumentFieldMapping {
+                        wire_name: "n".into(),
+                        canonical_name: "limit".into(),
+                        encoding: ArgumentValueEncoding::Presence {
+                            present_key: "present".into(),
+                            value_key: "value".into(),
+                        },
+                    },
+                ],
+            },
+        })
+    }
+}
+#[tokio::test]
+async fn saved_provider_codec_restores_canonical_arguments_before_required_defaults() {
+    let registry = SystemInputRegistry::new(vec![]).unwrap();
+    let canonical = SchemaCompiler::new().compile(ToolDescriptor::from_json(r#"{
+        "tool":{"id":"search","version":"1"},"name":"search","description":"Search",
+        "input_schema":{"type":"object","properties":{"query":{"type":"string"},"limit":{"type":"integer","default":10}},"required":["query","limit"],"additionalProperties":false},
+        "agent_parameters":["query","limit"],"output_schema":{"type":"string"},"max_output_bytes":100
+    }"#).unwrap(),&registry).unwrap();
+    let mut request = request("first");
+    let target = ProviderToolTarget {
+        provider: request.route.provider.clone(),
+        api_contract: request.route.api_contract.clone(),
+        capability_revision: request.route.capability_revision.clone(),
+    };
+    let contract = CompiledToolContract::compile(
+        &canonical,
+        target,
+        &RenamedArguments,
+        ProviderToolSchemaLimits::default(),
+    )
+    .unwrap();
+    let record = ProtectedRecord::new(
+        id("compiled-provider-tool"),
+        1,
+        serde_json::to_value(&contract).unwrap(),
+    );
+    let contract_ref = record.reference().clone();
+    let fixture = Fixture::with_records(1, 0, Arc::new(RandomIdSource), vec![record]).await;
+    request.tools = vec![contract.wire_tool().clone()];
+    request.limits.max_tool_calls = 1;
+    let raw = r#"{ "q": "evidence", "n": {"present":false,"value":null} }"#;
+    let model = fixture.model("first", vec![Reply::Tool(raw.into())]);
+    let response = fixture
+        .exchange(model, 0)
+        .generate(&request, &fixture.context, &fixture.budget)
+        .await
+        .unwrap();
+    let Guarded::Completed(ModelExchangeOutcome::Completed { response }) = response else {
+        panic!("expected complete Tool proposal")
+    };
+    let proposal = &response.tool_calls[0];
+    assert_eq!(proposal.raw_arguments.as_deref(), Some(raw));
+    let mut call = ToolCall {
+        provider_arguments: Some(ProviderToolArguments {
+            name: proposal.name.clone(),
+            raw: raw.into(),
+            compiled_contract_ref: Some(contract_ref),
+        }),
+        call_id: id("call"),
+        model_request_id: response.request_id,
+        provider_call_id: proposal.provider_call_id.clone(),
+        tool_name: id("search"),
+        model_inputs: contract
+            .decode_arguments(raw, ProviderToolSchemaLimits::default())
+            .unwrap(),
+        descriptor_digest: Some(canonical.descriptor_digest().clone()),
+        bound_input_ref: None,
+    };
+    let binder = InputBinder::new(
+        Arc::new(registry),
+        None,
+        Arc::new(PolicyGate::new(fixture.policy.clone(), Duration::from_secs(1)).unwrap()),
+        Arc::new(RandomIdSource),
+    );
+    let restored = binder
+        .prepare_model_inputs(&canonical, &call, &fixture.context, &fixture.budget)
+        .await
+        .unwrap();
+    assert_eq!(
+        restored,
+        JsonObject::from([
+            ("query".into(), json!("evidence")),
+            ("limit".into(), json!(10))
+        ])
+    );
+    assert!(!call.model_inputs.contains_key("limit"));
+    call.model_inputs.insert("query".into(), json!("changed"));
+    assert_eq!(
+        binder
+            .prepare_model_inputs(&canonical, &call, &fixture.context, &fixture.budget)
+            .await
+            .unwrap_err()
+            .code,
+        ErrorCode::InvalidArguments
     );
 }

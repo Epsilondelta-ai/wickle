@@ -63,6 +63,7 @@ async fn plan(
     snapshot.revision += 1;
     snapshot.phase = RunPhase::Tool;
     let call = ToolCall {
+        provider_arguments: None,
         call_id: id(call_id),
         model_request_id: id("model-request"),
         provider_call_id: id(&format!("provider-{call_id}")),

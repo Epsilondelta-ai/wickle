@@ -145,6 +145,47 @@ impl HookRuntime {
             self.validate_live_input(&saved, &target, &input, budget.store().as_ref()),
         )
         .await?;
+        if let HookInput::BeforeTool {
+            tool, model_inputs, ..
+        } = &mut input
+        {
+            *model_inputs = crate::tool_schema::normalize_model_input_schema(
+                &tool.model_input_schema,
+                model_inputs,
+            )?;
+            // Replay the exact historical first input. Old records can predate
+            // default-before-hook ordering and must not be silently rewritten.
+            if let Some(first) = saved
+                .snapshot
+                .hook_applications
+                .iter()
+                .find(|application| application.target == target)
+            {
+                let record = bounded(
+                    context,
+                    Some(budget),
+                    budget.call_deadline()?,
+                    budget
+                        .store()
+                        .read_record(budget.scope(), &first.result_ref),
+                )
+                .await?;
+                let first = HookApplicationRecord::restore(
+                    &record,
+                    &plan,
+                    first,
+                    budget.scope(),
+                    budget.run_id(),
+                )?;
+                if let HookInput::BeforeTool {
+                    model_inputs: original,
+                    ..
+                } = first.input
+                {
+                    *model_inputs = original;
+                }
+            }
+        }
         let definitions: Vec<_> = plan
             .definitions()
             .iter()
@@ -214,6 +255,7 @@ impl HookRuntime {
                 .await?;
             let (output, failure) = match callback {
                 Ok(output) => {
+                    let output = records::normalize_output(&input, output)?;
                     records::validate_output(&definition, &input, &output)?;
                     (Some(output), None)
                 }
@@ -618,7 +660,12 @@ impl HookRuntime {
                     .call;
                 if call.bound_input_ref.is_some()
                     || original_model_inputs != &call.model_inputs
-                    || model_inputs != original_model_inputs
+                    || (model_inputs != original_model_inputs
+                        && model_inputs
+                            != &crate::tool_schema::normalize_model_input_schema(
+                                &tool.model_input_schema,
+                                original_model_inputs,
+                            )?)
                     || call.descriptor_digest.as_ref() != Some(descriptor_digest)
                 {
                     return Err(invalid());

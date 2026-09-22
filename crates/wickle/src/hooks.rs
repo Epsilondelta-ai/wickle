@@ -200,14 +200,16 @@ impl HookInput {
                 },
                 HookTarget::BeforeTool { .. },
             ) => {
-                let validator = crate::tool_schema::compile_validator(&tool.model_input_schema)?;
-                validator.is_valid(
-                    &serde_json::to_value(original_model_inputs)
-                        .map_err(|_| hook_error(ErrorCode::InvalidJson, "hooks.input"))?,
-                ) && validator.is_valid(
-                    &serde_json::to_value(model_inputs)
-                        .map_err(|_| hook_error(ErrorCode::InvalidJson, "hooks.input"))?,
+                crate::tool_schema::normalize_model_input_schema(
+                    &tool.model_input_schema,
+                    original_model_inputs,
                 )
+                .is_ok()
+                    && crate::tool_schema::normalize_model_input_schema(
+                        &tool.model_input_schema,
+                        model_inputs,
+                    )
+                    .is_ok()
             }
             (
                 Self::AfterTool {

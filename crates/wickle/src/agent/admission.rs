@@ -129,10 +129,11 @@ impl Agent {
         data.system_inputs = None;
         let driver_context = ExecutionContext::new(data, local.cancel.clone());
         tokio::spawn(async move {
-            let result =
-                AssertUnwindSafe(agent.drive(&driver_id, prompt, driver_context, &driver_local))
-                    .catch_unwind()
-                    .await;
+            let result = AssertUnwindSafe(crate::future::boxed(|| {
+                agent.drive(&driver_id, prompt, driver_context, &driver_local)
+            }))
+            .catch_unwind()
+            .await;
             let error = match result {
                 Ok(Ok(())) => None,
                 Ok(Err(error)) => Some(fail(error.code, "agent.driver")),

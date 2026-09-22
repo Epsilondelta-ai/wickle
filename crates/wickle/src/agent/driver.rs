@@ -21,7 +21,7 @@ impl Agent {
                 bindings.settings.lease_ttl_ms,
             )
             .await?;
-        self.drive_leased(run_id, prompt, context, local, lease, false)
+        crate::future::boxed(|| self.drive_leased(run_id, prompt, context, local, lease, false))
             .await
     }
 
@@ -334,7 +334,7 @@ impl Agent {
                 .load(budget.scope(), run_id)
                 .await?;
             if current.snapshot.candidate_ref.is_some() {
-                match Box::pin(self.verify_candidate(segment, budget)).await {
+                match crate::future::boxed(|| self.verify_candidate(segment, budget)).await {
                     Ok(super::verification::CandidateAction::Finish(candidate)) => {
                         return self
                             .finish(run_id, *candidate, budget, segment, local)
@@ -358,15 +358,27 @@ impl Agent {
                     Err(error) => break Some(Err(error)),
                 }
             }
+            if let Some(request_id) = current
+                .snapshot
+                .tool_ledger
+                .last()
+                .map(|entry| entry.call.model_request_id.clone())
+            {
+                if let Err(error) = self.reserve_tool_repair(&request_id, budget).await {
+                    break Some(Err(error));
+                }
+            }
             // Keep the nested model/verification path off the parent Tool loop stack.
-            match Box::pin(self.generate(
-                run_id,
-                prompt.clone(),
-                segment,
-                budget,
-                lease,
-                std::mem::take(&mut reuse_step),
-            ))
+            match crate::future::boxed(|| {
+                self.generate(
+                    run_id,
+                    prompt.clone(),
+                    segment,
+                    budget,
+                    lease,
+                    std::mem::take(&mut reuse_step),
+                )
+            })
             .await
             {
                 Ok(Guarded::Completed(ModelExchangeOutcome::Completed { response }))
@@ -395,7 +407,9 @@ impl Agent {
                         && response.tool_calls.is_empty()
                         && saved.snapshot.verification_plan_ref.is_some() =>
                 {
-                    if let Err(error) = Box::pin(self.candidate(&response, budget)).await {
+                    if let Err(error) =
+                        crate::future::boxed(|| self.candidate(&response, budget)).await
+                    {
                         break Some(Err(error));
                     }
                     continue;
@@ -1155,15 +1169,19 @@ impl ModelRequestProjector for Projector<'_> {
                 },
                 context.cancellation.clone(),
             );
-            let prepared = Box::pin(self.context_runtime.prepare(
-                &self.prompt,
-                seed,
-                crate::context_strategy::ContextServices {
-                    bindings: self.bindings,
-                    budget: self.budget,
-                    context: &current,
-                },
-            ))
+            // Preparation can nest another routed model call for compaction.
+            // Construct its future outside this projector's poll stack frame.
+            let prepared = crate::future::boxed(|| {
+                self.context_runtime.prepare(
+                    &self.prompt,
+                    seed,
+                    crate::context_strategy::ContextServices {
+                        bindings: self.bindings,
+                        budget: self.budget,
+                        context: &current,
+                    },
+                )
+            })
             .await?;
             let mut references = artifacts::selected(
                 &prepared.projection.request,

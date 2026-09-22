@@ -294,6 +294,13 @@ impl CompiledTool {
         }
         Ok(())
     }
+    /// Apply declared top-level model defaults before canonical validation.
+    /// Explicit null and present values are never replaced; system fields are absent.
+    pub fn normalize_model_inputs(&self, input: &JsonObject) -> Result<JsonObject, ContractError> {
+        let normalized = apply_model_defaults(self.model_input_schema(), input)?;
+        self.validate_model_inputs(&normalized)?;
+        Ok(normalized)
+    }
     /// Validate already-bound execution arguments. This does not establish target
     /// existence/ownership or apply defaults; those remain later binding/policy work.
     pub fn validate_execution_inputs(&self, input: &JsonObject) -> Result<(), ContractError> {
@@ -982,4 +989,56 @@ fn project_model_conjunction(
         result.insert("allOf".into(), Value::Array(conjuncts));
     }
     Ok(Value::Object(result))
+}
+
+pub(crate) fn normalize_model_input_schema(
+    schema: &Value,
+    input: &JsonObject,
+) -> Result<JsonObject, ContractError> {
+    let normalized = apply_model_defaults(schema, input)?;
+    if !compile_validator(schema)?
+        .is_valid(&Value::Object(normalized.clone().into_iter().collect()))
+    {
+        return Err(ContractError::new(
+            ErrorCode::InvalidArguments,
+            "tool.model_inputs",
+        ));
+    }
+    Ok(normalized)
+}
+fn apply_model_defaults(schema: &Value, input: &JsonObject) -> Result<JsonObject, ContractError> {
+    let Some(properties) = schema.get("properties") else {
+        return Ok(input.clone());
+    };
+    let properties = properties
+        .as_object()
+        .ok_or_else(|| invalid("model_defaults.properties"))?;
+    let mut normalized = input.clone();
+    for (name, property) in properties {
+        if normalized.contains_key(name) {
+            continue;
+        }
+        let mut current = property;
+        let mut visited = BTreeSet::new();
+        loop {
+            if let Some(default) = current.get("default") {
+                normalized.insert(name.clone(), default.clone());
+                break;
+            }
+            let Some(reference) = current.get("$ref").and_then(Value::as_str) else {
+                break;
+            };
+            if !visited.insert(reference) {
+                break;
+            }
+            current = schema
+                .pointer(
+                    reference
+                        .strip_prefix('#')
+                        .ok_or_else(|| invalid("model_defaults.reference"))?,
+                )
+                .ok_or_else(|| invalid("model_defaults.reference"))?;
+        }
+    }
+    Ok(normalized)
 }

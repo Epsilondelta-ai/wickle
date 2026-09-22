@@ -767,6 +767,7 @@ async fn checkpoint() -> RunSnapshot {
         model_ledger: vec![],
         tool_ledger: vec![ToolLedgerEntry {
             call: ToolCall {
+                provider_arguments: None,
                 call_id: id("call"),
                 model_request_id: id("model-request"),
                 provider_call_id: id("provider-call"),

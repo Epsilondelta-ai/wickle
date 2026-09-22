@@ -177,6 +177,7 @@ impl SystemInputResolver for Resolver {
 }
 
 pub struct Model {
+    pub raw_arguments: Mutex<Option<String>>,
     pub calls: AtomicUsize,
     pub requests: Mutex<Vec<ModelRequest>>,
     pub hold_final: AtomicBool,
@@ -206,18 +207,21 @@ impl ModelPort for Model {
             })
         };
         if attempt == 0 {
-            let mut events: Vec<_> = ["before", "target", "after"]
-                .iter()
-                .enumerate()
-                .map(|(index, name)| {
-                    Ok(ModelEvent::ToolArgumentsDelta {
-                        index: index as u32,
-                        provider_call_id: Some(format!("provider-{index}")),
-                        name: Some((*name).into()),
-                        delta: serde_json::to_string(&json!({"query":name})).unwrap(),
+            let mut events: Vec<_> =
+                ["before", "target", "after"]
+                    .iter()
+                    .enumerate()
+                    .map(|(index, name)| {
+                        Ok(ModelEvent::ToolArgumentsDelta {
+                            index: index as u32,
+                            provider_call_id: Some(format!("provider-{index}")),
+                            name: Some((*name).into()),
+                            delta: self.raw_arguments.lock().unwrap().clone().unwrap_or_else(
+                                || serde_json::to_string(&json!({"query":name})).unwrap(),
+                            ),
+                        })
                     })
-                })
-                .collect();
+                    .collect();
             events.push(completion(ModelFinish::ToolCalls));
             Box::pin(stream::iter(events))
         } else {
@@ -409,6 +413,7 @@ impl Fixture {
             profile,
             order,
             model: Arc::new(Model {
+                raw_arguments: Mutex::new(None),
                 calls: AtomicUsize::new(0),
                 requests: Mutex::new(vec![]),
                 hold_final: AtomicBool::new(false),

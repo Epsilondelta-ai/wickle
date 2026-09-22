@@ -358,24 +358,12 @@ impl CompiledToolContract {
         limits: ProviderToolSchemaLimits,
     ) -> Result<JsonObject, ContractError> {
         check_limits(limits)?;
-        if raw.len() > limits.max_argument_bytes {
-            return Err(arguments());
-        }
-        let value = parse_json(raw).map_err(|_| arguments())?;
-        let original: &serde_json::value::RawValue =
-            serde_json::from_str(raw).map_err(|_| arguments())?;
-        if !numbers_preserved(original, &value) {
-            return Err(ContractError::new(
-                ErrorCode::InvalidArguments,
-                "provider_tool.numeric_precision",
-            ));
-        }
-        let object = value.as_object().ok_or_else(arguments)?;
+        let object = parse_provider_arguments(raw, limits.max_argument_bytes)?;
         match &self.data.decode_plan {
-            ArgumentDecodePlan::Identity {} => Ok(object.clone().into_iter().collect()),
+            ArgumentDecodePlan::Identity {} => Ok(object.clone()),
             ArgumentDecodePlan::Fields { fields } => {
                 let mut result = JsonObject::new();
-                for (name, value) in object {
+                for (name, value) in &object {
                     let mapping = fields
                         .iter()
                         .find(|field| &field.wire_name == name)
@@ -646,4 +634,28 @@ fn normalized_decimal(text: &str) -> Option<(bool, String, i128)> {
         .checked_sub(fraction as i128)?
         .checked_add((digits.len() - trimmed.len()) as i128)?;
     Some((negative, trimmed.into(), exponent))
+}
+
+pub(crate) fn parse_provider_arguments(
+    raw: &str,
+    max_bytes: usize,
+) -> Result<JsonObject, ContractError> {
+    if raw.len() > max_bytes {
+        return Err(arguments());
+    }
+    let value = parse_json(raw).map_err(|_| arguments())?;
+    let original: &serde_json::value::RawValue =
+        serde_json::from_str(raw).map_err(|_| arguments())?;
+    if !numbers_preserved(original, &value) {
+        return Err(ContractError::new(
+            ErrorCode::InvalidArguments,
+            "provider_tool.numeric_precision",
+        ));
+    }
+    Ok(value
+        .as_object()
+        .ok_or_else(arguments)?
+        .clone()
+        .into_iter()
+        .collect())
 }

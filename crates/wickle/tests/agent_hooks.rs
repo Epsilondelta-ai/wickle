@@ -828,3 +828,169 @@ async fn after_run_uses_a_fresh_bounded_cleanup_context_after_explicit_cancellat
             .all(|tool| tool.calls.load(Ordering::SeqCst) == 0)
     );
 }
+
+fn defaulted_tools(fixture: &mut Fixture) {
+    let entries = ["before", "target", "after"]
+        .iter()
+        .enumerate()
+        .map(|(index, name)| {
+            let mut descriptor = fixture
+                .base
+                .registry
+                .get(&id(name))
+                .unwrap()
+                .compiled
+                .descriptor()
+                .clone();
+            descriptor.input_schema["properties"]["query"]["default"] = json!("fallback");
+            ToolRegistration {
+                compiled: SchemaCompiler::new()
+                    .compile(descriptor, &fixture.base.inputs)
+                    .unwrap(),
+                executor: fixture.base.tools[index].clone(),
+            }
+        })
+        .collect();
+    fixture.base.registry = std::sync::Arc::new(ToolRegistry::new(scope(), entries).unwrap());
+}
+
+#[tokio::test]
+async fn required_defaults_precede_hooks_and_are_reapplied_after_a_hook_removes_the_value() {
+    let mut fixture = Fixture::new();
+    defaulted_tools(&mut fixture);
+    *fixture.base.model.raw_arguments.lock().unwrap() = Some("{}".into());
+    let first = fixture.add(
+        "remove",
+        HookPosition::BeforeTool,
+        Behavior::RemoveQuery,
+        0,
+        true,
+    );
+    let second = fixture.add(
+        "append",
+        HookPosition::BeforeTool,
+        Behavior::Append,
+        1,
+        true,
+    );
+    let agent = fixture.agent();
+    let handle = fixture.started(&agent).await;
+    assert_eq!(
+        fixture.outcome(&handle).await.result.status(),
+        RunStatus::Succeeded
+    );
+    for hook in [&first, &second] {
+        for (input, _) in hook.seen.lock().unwrap().iter() {
+            let HookInput::BeforeTool {
+                original_model_inputs,
+                model_inputs,
+                ..
+            } = input
+            else {
+                panic!("expected Tool input")
+            };
+            assert!(original_model_inputs.is_empty());
+            assert_eq!(model_inputs["query"], json!("fallback"));
+            assert!(!model_inputs.contains_key("workspace_id"));
+        }
+    }
+    for tool in &fixture.base.tools {
+        assert_eq!(
+            tool.seen.lock().unwrap()[0].arguments["query"],
+            json!("fallback|append")
+        );
+    }
+    let saved = fixture.saved(&handle).await;
+    assert!(saved.snapshot.tool_ledger.iter().all(|entry| {
+        entry.call.provider_arguments.as_ref().unwrap().raw == "{}"
+            && entry.call.model_inputs.is_empty()
+    }));
+    assert_eq!(saved.snapshot.usage.repair_attempts, 0);
+}
+
+#[tokio::test]
+async fn malformed_raw_arguments_cannot_become_executable_by_applying_defaults() {
+    for raw in ["{", "[]", r#"{"query":"x","query":"y"}"#] {
+        let mut fixture = Fixture::new();
+        defaulted_tools(&mut fixture);
+        *fixture.base.model.raw_arguments.lock().unwrap() = Some(raw.into());
+        let hook = fixture.add(
+            "before",
+            HookPosition::BeforeTool,
+            Behavior::Append,
+            0,
+            true,
+        );
+        let agent = fixture.agent();
+        let handle = fixture.started(&agent).await;
+        let outcome = fixture.outcome(&handle).await;
+        assert_eq!(
+            outcome.result,
+            OutcomeResult::Exhausted {
+                budget: BudgetKind::RepairAttempts
+            }
+        );
+        assert_eq!(outcome.usage.model_calls, 1);
+        assert_eq!(outcome.usage.tool_attempts, 0);
+        assert_eq!(hook.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(fixture.base.resolver.calls.load(Ordering::SeqCst), 0);
+        assert!(
+            fixture
+                .base
+                .tools
+                .iter()
+                .all(|tool| tool.calls.load(Ordering::SeqCst) == 0)
+        );
+        let saved = fixture.saved(&handle).await;
+        assert_eq!(saved.snapshot.tool_ledger.len(), 3);
+        for entry in &saved.snapshot.tool_ledger {
+            assert_eq!(entry.call.provider_arguments.as_ref().unwrap().raw, raw);
+        }
+    }
+}
+
+#[tokio::test]
+async fn one_repair_reservation_covers_all_invalid_calls_in_a_round_and_restores() {
+    let mut fixture = Fixture::new();
+    defaulted_tools(&mut fixture);
+    fixture.base.profile.limits.max_repair_attempts = 1;
+    *fixture.base.model.raw_arguments.lock().unwrap() = Some("{".into());
+    let agent = fixture.agent();
+    let handle = fixture.started(&agent).await;
+    let outcome = fixture.outcome(&handle).await;
+    assert_eq!(outcome.result.status(), RunStatus::Succeeded);
+    assert_eq!(outcome.usage.model_calls, 2);
+    assert_eq!(outcome.usage.repair_attempts, 1);
+    assert_eq!(outcome.usage.tool_attempts, 0);
+    let checkpoint = fixture.base.base.store.export_checkpoint(&scope()).unwrap();
+    let loaded = StateStoreCheckpoint::from_json(
+        &serde_json::to_string(&checkpoint).unwrap(),
+        &scope(),
+        &checkpoint.digest(),
+    )
+    .unwrap();
+    let reopened = MemoryStateStore::from_checkpoint(loaded);
+    let saved = reopened.load(&scope(), handle.run_id()).await.unwrap();
+    assert_eq!(saved.snapshot.tool_ledger.len(), 3);
+    let repairs: Vec<_> = saved
+        .snapshot
+        .reservations
+        .iter()
+        .filter_map(|entry| {
+            if let ReservationKind::ToolRepair { model_request_id } = &entry.kind {
+                Some(model_request_id)
+            } else {
+                None
+            }
+        })
+        .collect();
+    assert_eq!(repairs.len(), 1);
+    assert!(
+        saved
+            .snapshot
+            .tool_ledger
+            .iter()
+            .all(|entry| &entry.call.model_request_id == repairs[0]
+                && entry.call.provider_arguments.as_ref().unwrap().raw == "{")
+    );
+}

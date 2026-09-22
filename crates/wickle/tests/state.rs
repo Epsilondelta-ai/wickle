@@ -578,6 +578,7 @@ async fn uncertain_tool_effects_keep_the_original_attempt_and_idempotency_key() 
         .unwrap();
     let mut plan = prepared(&before.snapshot, lease.clone(), 101);
     let call = ToolCall {
+        provider_arguments: None,
         call_id: id("call"),
         model_request_id: id("model-request"),
         provider_call_id: id("provider-call"),

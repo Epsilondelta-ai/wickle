@@ -516,6 +516,7 @@ async fn waiting_observation_consumes_time_but_no_model_attempts() {
     // A wait target needs a matching planned tool in the saved checkpoint.
     commit.snapshot.tool_ledger.push(ToolLedgerEntry {
         call: ToolCall {
+            provider_arguments: None,
             call_id: id("call"),
             model_request_id: id("model"),
             provider_call_id: id("provider-call"),

@@ -1,11 +1,4 @@
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    fmt,
-    future::Future,
-    io,
-    panic::AssertUnwindSafe,
-    sync::Arc,
-};
+use std::{collections::BTreeMap, fmt, future::Future, io, panic::AssertUnwindSafe, sync::Arc};
 
 use futures_util::FutureExt;
 use serde::{Deserialize, Serialize, Serializer};
@@ -433,7 +426,7 @@ impl BoundToolInput {
     pub fn transformation_ref(&self) -> Option<&RecordRef> {
         self.data.transformation_ref.as_ref()
     }
-    /// Effective model arguments plus declared optional top-level defaults.
+    /// Effective model arguments plus declared top-level defaults.
     pub fn normalized_model_inputs(&self) -> &JsonObject {
         &self.data.normalized_model_inputs
     }
@@ -607,8 +600,8 @@ impl BoundToolInput {
                 "bound_input.compiled",
             ));
         }
-        compiled.validate_model_inputs(self.original_model_inputs())?;
-        compiled.validate_model_inputs(self.effective_model_inputs())?;
+        compiled.normalize_model_inputs(self.original_model_inputs())?;
+        compiled.normalize_model_inputs(self.effective_model_inputs())?;
         if normalize_model_inputs(compiled, self.effective_model_inputs())?
             != *self.normalized_model_inputs()
         {
@@ -665,6 +658,90 @@ pub struct InputBinder {
 }
 
 impl InputBinder {
+    /// Restore and verify provider arguments before defaults, Hooks or system resolution.
+    /// This performs only protected store reads; it does not invoke a Tool/resolver.
+    pub async fn prepare_model_inputs(
+        &self,
+        compiled: &CompiledTool,
+        call: &ToolCall,
+        context: &ExecutionContext,
+        budget: &RunBudget,
+    ) -> Result<JsonObject, ContractError> {
+        if &context.data.scope != budget.scope() {
+            return Err(error(ErrorCode::AccessDenied, "tool.scope"));
+        }
+        if call.descriptor_digest.as_ref() != Some(compiled.descriptor_digest()) {
+            return Err(error(
+                ErrorCode::InvalidToolInputContract,
+                "tool.descriptor",
+            ));
+        }
+        boundary(context, budget).await?;
+        if let Some(provider) = &call.provider_arguments {
+            let decoded = if let Some(reference) = &provider.compiled_contract_ref {
+                let saved = bounded(
+                    context,
+                    budget,
+                    budget.store().load(budget.scope(), budget.run_id()),
+                )
+                .await?;
+                let invocation = saved
+                    .snapshot
+                    .model_ledger
+                    .iter()
+                    .find(|invocation| invocation.attempt_id == call.model_request_id)
+                    .ok_or_else(|| error(ErrorCode::InvalidSnapshot, "tool.provider_invocation"))?;
+                let target = crate::ProviderToolTarget {
+                    provider: invocation.route.provider.clone(),
+                    api_contract: invocation.route.api_contract.clone(),
+                    capability_revision: invocation.route.capability_revision.clone(),
+                };
+                let record = bounded(
+                    context,
+                    budget,
+                    budget.store().read_record(budget.scope(), reference),
+                )
+                .await?;
+                let digest =
+                    serde_json::from_value(record.value().get("digest").cloned().ok_or_else(
+                        || error(ErrorCode::InvalidSnapshot, "tool.provider_contract"),
+                    )?)
+                    .map_err(|_| error(ErrorCode::InvalidSnapshot, "tool.provider_contract"))?;
+                let limits = crate::ProviderToolSchemaLimits {
+                    max_argument_bytes: self.limits.max_bound_bytes,
+                    ..Default::default()
+                };
+                let contract = crate::CompiledToolContract::restore(
+                    &serde_json::to_string(record.value())
+                        .map_err(|_| error(ErrorCode::InvalidJson, "tool.provider_contract"))?,
+                    compiled,
+                    &target,
+                    &digest,
+                    limits,
+                )?;
+                if contract.wire_tool().name != provider.name {
+                    return Err(error(ErrorCode::InvalidArguments, "tool.provider_name"));
+                }
+                contract.decode_arguments(&provider.raw, limits)?
+            } else {
+                if provider.name != call.tool_name {
+                    return Err(error(ErrorCode::InvalidArguments, "tool.provider_name"));
+                }
+                crate::provider_tool_schema::parse_provider_arguments(
+                    &provider.raw,
+                    self.limits.max_bound_bytes,
+                )?
+            };
+            if decoded != call.model_inputs {
+                return Err(error(
+                    ErrorCode::InvalidArguments,
+                    "tool.canonical_arguments",
+                ));
+            }
+        }
+        compiled.normalize_model_inputs(&call.model_inputs)
+    }
+
     /// Wire trusted metadata, optional read-only resolver, policy, and internal record IDs.
     pub fn new(
         registry: Arc<SystemInputRegistry>,
@@ -712,6 +789,8 @@ impl InputBinder {
             .call
             .clone();
         check_selection(&saved.snapshot, compiled, &call)?;
+        crate::future::boxed(|| self.prepare_model_inputs(compiled, &call, context, budget))
+            .await?;
         let selection = resolved_tool_selection(&saved.snapshot, compiled, context, budget).await?;
         let run_inputs = match &saved.snapshot.system_inputs {
             Some(reference) => {
@@ -1124,41 +1203,7 @@ fn normalize_model_inputs(
     compiled: &CompiledTool,
     original: &JsonObject,
 ) -> Result<JsonObject, ContractError> {
-    compiled.validate_model_inputs(original)?;
-    let mut normalized = original.clone();
-    let properties = compiled
-        .model_input_schema()
-        .get("properties")
-        .and_then(Value::as_object)
-        .expect("compiled properties");
-    for parameter in &compiled.descriptor().agent_parameters {
-        if normalized.contains_key(parameter) || required_parameter(compiled, parameter) {
-            continue;
-        }
-        let mut schema = &properties[parameter];
-        let mut seen = BTreeSet::new();
-        loop {
-            if let Some(default) = schema.get("default") {
-                normalized.insert(parameter.clone(), default.clone());
-                break;
-            }
-            let Some(reference) = schema.get("$ref").and_then(Value::as_str) else {
-                break;
-            };
-            if !seen.insert(reference) {
-                break;
-            }
-            let pointer = reference
-                .strip_prefix('#')
-                .ok_or_else(|| error(ErrorCode::InvalidToolInputContract, "model_defaults"))?;
-            schema = compiled
-                .model_input_schema()
-                .pointer(pointer)
-                .ok_or_else(|| error(ErrorCode::InvalidToolInputContract, "model_defaults"))?;
-        }
-    }
-    compiled.validate_model_inputs(&normalized)?;
-    Ok(normalized)
+    compiled.normalize_model_inputs(original)
 }
 fn required_parameter(compiled: &CompiledTool, parameter: &str) -> bool {
     compiled
@@ -1331,7 +1376,7 @@ async fn saved_tool_transform(
         ));
     }
     let mut inputs = call.model_inputs.clone();
-    for (definition, application) in definitions.iter().zip(&applications) {
+    for (index, (definition, application)) in definitions.iter().zip(&applications).enumerate() {
         if definition.hook != application.hook {
             return Err(error(ErrorCode::InvalidSnapshot, "hooks.order"));
         }
@@ -1360,6 +1405,9 @@ async fn saved_tool_transform(
         else {
             return Err(error(ErrorCode::InvalidSnapshot, "hooks.tool_input"));
         };
+        if index == 0 && model_inputs == &compiled.normalize_model_inputs(&call.model_inputs)? {
+            inputs = model_inputs.clone();
+        }
         if tool != &compiled.to_model_tool()
             || descriptor_digest != compiled.descriptor_digest()
             || compiled_digest != compiled.digest()
@@ -1377,7 +1425,7 @@ async fn saved_tool_transform(
         if deny.is_some() {
             return Err(error(ErrorCode::AccessDenied, "hooks.tool_denied"));
         }
-        compiled.validate_model_inputs(&model_inputs)?;
+        compiled.normalize_model_inputs(&model_inputs)?;
         inputs = model_inputs;
     }
     Ok(Some((

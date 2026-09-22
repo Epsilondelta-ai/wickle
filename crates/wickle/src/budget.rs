@@ -59,6 +59,11 @@ pub enum ReservationKind {
     },
     /// One candidate-repair decision; any resulting model call is charged separately.
     Repair {},
+    /// One decision to correct invalid/unknown Tool arguments for a saved model response.
+    ToolRepair {
+        /// Physical response whose settled invalid calls require another model decision.
+        model_request_id: Id,
+    },
     /// One recovery decision; any resulting external call is charged separately.
     Recovery {},
 }
@@ -69,7 +74,7 @@ impl ReservationKind {
         match self {
             Self::Model { .. } => BudgetKind::ModelCalls,
             Self::Tool { .. } => BudgetKind::ToolAttempts,
-            Self::Repair {} => BudgetKind::RepairAttempts,
+            Self::Repair {} | Self::ToolRepair { .. } => BudgetKind::RepairAttempts,
             Self::Recovery {} => BudgetKind::RecoveryAttempts,
         }
     }
@@ -417,7 +422,7 @@ pub(crate) fn charge(
             limits.max_tool_attempts,
             "budget.tool_attempts",
         ),
-        ReservationKind::Repair {} => (
+        ReservationKind::Repair {} | ReservationKind::ToolRepair { .. } => (
             &mut usage.repair_attempts,
             limits.max_repair_attempts,
             "budget.repair_attempts",
@@ -456,6 +461,18 @@ pub(crate) fn validate_budget(snapshot: &RunSnapshot) -> Result<(), ContractErro
         || snapshot.usage.recovery_attempts > snapshot.limits.max_recovery_attempts
     {
         return Err(invalid());
+    }
+    let mut repaired_rounds = BTreeSet::new();
+    for reservation in &snapshot.reservations {
+        if let ReservationKind::ToolRepair { model_request_id } = &reservation.kind {
+            if !repaired_rounds.insert(model_request_id)
+                || !snapshot.tool_ledger.iter().any(|entry| {
+                    &entry.call.model_request_id == model_request_id && needs_tool_repair(entry)
+                })
+            {
+                return Err(invalid());
+            }
+        }
     }
     let mut attempts = BTreeSet::new();
     let mut counts = BudgetUsage::default();
@@ -502,4 +519,11 @@ pub(crate) fn validate_budget_transition(
         return Err(invalid());
     }
     Ok(())
+}
+
+pub(crate) fn needs_tool_repair(entry: &crate::ToolLedgerEntry) -> bool {
+    entry.call.bound_input_ref.is_none()
+        && matches!(&entry.state, crate::ToolCallState::Settled { result }
+        if result.status == crate::ToolResultStatus::Failed && result.effect == crate::ToolEffect::NotApplied
+        && result.error.as_ref().is_some_and(|failure| matches!(failure.code.as_str(), "unknown_tool" | "invalid_arguments")))
 }

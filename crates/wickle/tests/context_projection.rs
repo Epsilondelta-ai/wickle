@@ -340,6 +340,7 @@ fn text(value: &str) -> ContentBlock {
 fn round(run: &str, sequence: u64, label: &str, body: &str, tool: &CompiledTool) -> Vec<Message> {
     let call_message = id(&format!("message-{sequence}"));
     let call = ToolCall {
+        provider_arguments: None,
         call_id: id(label),
         model_request_id: id(&format!("request-{label}")),
         provider_call_id: id(&format!("provider-{label}")),

@@ -318,7 +318,7 @@ pub struct RunLimits {
     pub max_model_calls: NonZeroU64,
     /// Physical tool dispatch attempts; zero disables tools.
     pub max_tool_attempts: u64,
-    /// Candidate repair attempts; zero disables repair.
+    /// Candidate and Tool-argument repair decisions; zero disables repair.
     pub max_repair_attempts: u64,
     /// Recovery attempts; zero disables recovery.
     pub max_recovery_attempts: u64,
