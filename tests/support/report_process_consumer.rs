@@ -227,6 +227,12 @@ mod host {
                     token_estimator: Arc::new(Estimate),
                     settings: AgentSettings {
                         require_durable: true,
+                        // The wait worker can exit after component release but
+                        // before lease release. Keep crash handoff well inside
+                        // the parent's 30-second watchdog; do not race two
+                        // identical 30-second deadlines.
+                        lease_ttl_ms: 1000,
+                        heartbeat_interval_ms: 200,
                         max_output_tokens: 128.try_into().unwrap(),
                         ..Default::default()
                     },
