@@ -78,6 +78,10 @@ pub struct ContextSourceUsage {
 pub enum ContextResult {
     /// One or more original, locally identified items.
     Ready {
+        /// Explicit per-item external versions, keyed by native item ID. Missing is unknown;
+        /// the batch/index revision is never substituted for a document revision.
+        #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+        item_revisions: std::collections::BTreeMap<Id, Id>,
         /// Items whose original claims must validate before namespacing.
         items: Vec<ContextItem>,
         /// Optional source data revision.
@@ -90,6 +94,16 @@ pub enum ContextResult {
         /// Optional source data revision.
         source_revision: Option<Id>,
         /// Optional reported external-service usage.
+        reported_usage: Option<ContextSourceUsage>,
+    },
+    /// The source explicitly reports deleted native material IDs. This is not
+    /// inferred from an empty search result; the current selection is empty.
+    Deleted {
+        /// Deleted source-local IDs, distinct and bounded by the source item limit.
+        item_ids: Vec<Id>,
+        /// Optional version of the deletion observation/index, not guessed item versions.
+        source_revision: Option<Id>,
+        /// Reported external service usage.
         reported_usage: Option<ContextSourceUsage>,
     },
     /// Explicit operational unavailability; this is not a permission override.
@@ -126,6 +140,9 @@ impl ContextResult {
                 source_revision, ..
             }
             | Self::Unavailable {
+                source_revision, ..
+            }
+            | Self::Deleted {
                 source_revision, ..
             } => source_revision.as_ref(),
         }
@@ -192,6 +209,12 @@ pub struct ContextCallContext {
 /// Original source-local identities and content for current source ACL checks.
 #[derive(Clone)]
 pub struct ContextUseRequest {
+    /// Current consuming Run; original request ownership remains unchanged.
+    pub consumer_run_id: Id,
+    /// True for historical data used through a derived summary or conversation.
+    pub derived: bool,
+    /// Per-item external revisions; never inferred from the batch/index revision.
+    pub item_revisions: std::collections::BTreeMap<Id, Id>,
     /// Exact immutable batch used in this projection.
     pub batch_ref: RecordRef,
     /// Original query identity and pinned source contract.
@@ -266,6 +289,8 @@ pub struct ContextBatch {
     request: ContextRequest,
     result: ContextResult,
     items: Vec<ContextItem>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    fragments: Vec<ContextFragment>,
     collected_at_ms: i64,
     estimated_tokens: u64,
     estimator_version: VersionedRef,

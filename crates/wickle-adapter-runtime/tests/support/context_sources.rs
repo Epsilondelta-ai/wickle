@@ -71,6 +71,7 @@ impl ContextSource for Source {
                 },
             };
             Ok(ContextResult::Ready {
+                item_revisions: Default::default(),
                 items: vec![ContextItem::new(
                     id("local-item"),
                     request.definition.origin,

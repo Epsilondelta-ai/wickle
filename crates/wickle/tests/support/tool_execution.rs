@@ -514,6 +514,7 @@ impl Fixture {
             content.push(ContentBlock::ToolCall { call });
         }
         update.messages.push(Message {
+            source_model_request_id: None,
             message_id: id("call-message"),
             run_id: id("run"),
             sequence: (saved.session.transcript_revision + 1).try_into().unwrap(),

@@ -853,6 +853,7 @@ impl SerialToolRound {
             },
         };
         let message = Message {
+            source_model_request_id: None,
             message_id: self.ids.next_id()?,
             run_id: budget.run_id().clone(),
             sequence: saved

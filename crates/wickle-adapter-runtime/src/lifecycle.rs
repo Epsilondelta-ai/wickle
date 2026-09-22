@@ -164,7 +164,32 @@ impl ContextSource for ScopedSource {
         context: &'a ContextCallContext,
     ) -> PortFuture<'a, ()> {
         Box::pin(async move {
-            self.check(&request.request, context)?;
+            if request.derived {
+                self.lifetime
+                    .check(&context.scope, context.binding_set_id.as_ref())?;
+                if context.run_id != self.lifetime.run_id
+                    || request.consumer_run_id != context.run_id
+                    || request.request.scope != context.scope
+                    || request.request.session_id != context.session_id
+                    || context.source != self.selection
+                    || request.request.binding.source != self.selection
+                    || request.request.definition != self.definition
+                    || request.request.context_request_id != context.context_request_id
+                {
+                    return Err(ContractError::new(
+                        ErrorCode::AccessDenied,
+                        "adapter.source_lineage",
+                    ));
+                }
+            } else {
+                if request.consumer_run_id != request.request.run_id {
+                    return Err(ContractError::new(
+                        ErrorCode::AccessDenied,
+                        "adapter.source_consumer",
+                    ));
+                }
+                self.check(&request.request, context)?;
+            }
             let mut controlled = context.clone();
             controlled.cancellation = CancellationToken::new();
             let _cancel = controlled.cancellation.clone().drop_guard();

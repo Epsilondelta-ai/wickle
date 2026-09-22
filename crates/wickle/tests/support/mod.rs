@@ -150,6 +150,7 @@ pub async fn admission(
         },
     );
     let message = Message {
+        source_model_request_id: None,
         message_id: id(&format!("message-{run}")),
         run_id: snapshot.run_id.clone(),
         sequence: 1.try_into().unwrap(),

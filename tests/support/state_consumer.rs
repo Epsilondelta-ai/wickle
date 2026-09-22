@@ -108,6 +108,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
     };
     let message = Message {
+        source_model_request_id: None,
         message_id: id("user-message"),
         run_id: id("run"),
         sequence: 1.try_into()?,

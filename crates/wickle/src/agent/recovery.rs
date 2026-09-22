@@ -253,6 +253,7 @@ impl Agent {
                 },
             });
             messages.push(Message {
+                source_model_request_id: None,
                 message_id: bindings.ids.next_id()?,
                 run_id: command.run_id.clone(),
                 sequence: saved

@@ -373,6 +373,10 @@ pub enum Visibility {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Message {
+    /// Immutable physical model attempt that produced this message, when known.
+    /// Legacy messages omit this field; it is provenance, not model-visible content.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_model_request_id: Option<Id>,
     /// Unique message identity.
     pub message_id: Id,
     /// Owning run.

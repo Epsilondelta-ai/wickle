@@ -2,6 +2,16 @@
 #[path = "support/agent.rs"]
 #[allow(dead_code)]
 mod support;
+use support as agent_support;
+#[path = "support/agent_hooks.rs"]
+#[allow(dead_code)]
+mod hooks_support;
+#[path = "support/agent_resume.rs"]
+#[allow(dead_code)]
+mod resume_support;
+#[path = "support/context_sources.rs"]
+#[allow(dead_code, unused_imports)]
+mod source_support;
 use futures_util::{TryStreamExt, stream};
 use serde_json::json;
 use std::{
@@ -992,5 +1002,88 @@ async fn replay_precedes_current_verifier_lookup_and_new_request_limits() {
             .await
             .unwrap()
             .is_none()
+    );
+}
+
+#[tokio::test]
+async fn repaired_text_keeps_its_original_source_attempt_after_later_inference() {
+    let (fixture, mut profile, mut bindings, _, _) = setup(
+        &["incomplete", "complete"],
+        vec![
+            Ok(VerificationDecision::Revise {
+                feedback: "Add evidence".into(),
+            }),
+            Ok(VerificationDecision::Pass {}),
+        ],
+    );
+    let mut source_fixture = source_support::Fixture::new();
+    let source = source_fixture.add(
+        "records",
+        ContextTrigger::BeforeModel,
+        true,
+        vec![source_support::Reply::Ready, source_support::Reply::Ready],
+    );
+    profile.context_sources = Some(source_fixture.bindings.clone());
+    let registry = Arc::new(
+        ContextSourceRegistry::new(
+            scope(),
+            vec![ContextSourceRegistration {
+                selection: source.selection.clone(),
+                definition: source.definition.clone(),
+                source: source.clone(),
+            }],
+        )
+        .unwrap(),
+    );
+    let runtime = Arc::new(
+        ContextSourceRuntime::new(
+            bindings.state.clone(),
+            bindings.policy.clone(),
+            bindings.clock.clone(),
+            bindings.ids.clone(),
+            registry,
+            source_fixture.estimator.clone(),
+        )
+        .unwrap(),
+    );
+    bindings.context_sources = Some(runtime.clone());
+    bindings.context_token_estimator = Some(source_fixture.estimator.clone());
+    let agent = create_agent(profile, bindings).unwrap();
+    let handle = fixture.started(&agent, "request").await;
+    let outcome = completed(handle.outcome(&context()).await.unwrap());
+    assert_eq!(outcome.result.status(), RunStatus::Succeeded);
+    let saved = fixture.store.load(&scope(), handle.run_id()).await.unwrap();
+    let answer = saved
+        .messages
+        .iter()
+        .find(|message| message.origin == MessageOrigin::Model)
+        .unwrap();
+    assert_eq!(
+        answer.source_model_request_id.as_ref(),
+        Some(&saved.snapshot.model_ledger[0].attempt_id)
+    );
+    let lineage = runtime
+        .lineage_for_messages(
+            &saved.snapshot.request.session_id,
+            std::slice::from_ref(answer),
+            &context(),
+            tokio::time::Instant::now() + Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        lineage,
+        vec![ContextLineage {
+            run_id: handle.run_id().clone(),
+            batch_ref: saved.snapshot.context_batches[0].clone()
+        }]
+    );
+    assert!(
+        source
+            .use_requests
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|check| check.derived && check.batch_ref == saved.snapshot.context_batches[1])
     );
 }

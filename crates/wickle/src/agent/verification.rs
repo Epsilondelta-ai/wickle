@@ -126,6 +126,29 @@ impl Agent {
             ModelExchangeOutcome::Completed { response } => response.continuation,
             _ => return Err(fail(ErrorCode::InvalidSnapshot, "verification.response")),
         };
+        if let Some(sources) = segment.sources.as_deref() {
+            let messages = candidate_lineage_messages(&saved, &candidate)?;
+            let deadline = budget.call_deadline()?;
+            let lineage = crate::future::boxed(|| {
+                sources.lineage_for_messages(
+                    &saved.snapshot.request.session_id,
+                    &messages,
+                    &segment.context,
+                    deadline,
+                )
+            })
+            .await?;
+            crate::future::boxed(|| {
+                sources.authorize_lineage(
+                    budget.run_id(),
+                    &lineage,
+                    None,
+                    &segment.context,
+                    deadline,
+                )
+            })
+            .await?;
+        }
         // Completed records are replayed rather than re-invoking a quality callback.
         let mut prior = None;
         for reference in saved.snapshot.verification_records.iter().rev() {
@@ -227,6 +250,7 @@ impl Agent {
                     tokio::time::Instant::now() + Duration::from_millis(plan.limits.timeout_ms),
                 );
                 let models = ReviewModels {
+                    sources: segment.sources.as_deref(),
                     bindings,
                     budget,
                     context: &segment.context,
@@ -459,7 +483,7 @@ impl Agent {
         snapshot.phase = RunPhase::Prepare;
         let mut messages = vec![];
         for (index,(role,origin,content)) in [(MessageRole::Assistant,MessageOrigin::Model,candidate.output.clone()),(MessageRole::User,MessageOrigin::Verification,vec![InputContent::Json{value:serde_json::json!({"kind":"verification_feedback","candidate_digest":candidate_ref.digest,"feedback":feedback})}])].into_iter().enumerate(){
-            messages.push(Message{message_id:bindings.ids.next_id()?,run_id:budget.run_id().clone(),sequence:(saved.session.transcript_revision+index as u64+1).try_into().map_err(|_|fail(ErrorCode::InvalidSnapshot,"verification.sequence"))?,role,origin,visibility:Visibility::Model,content:content.into_iter().map(|content|ContentBlock::Content{content}).collect()});
+            messages.push(Message {source_model_request_id: if origin == MessageOrigin::Model { snapshot.model_ledger.iter().find(|entry| entry.response_ref.as_ref() == Some(&candidate.response_ref)).map(|entry| entry.attempt_id.clone()) } else { None },message_id:bindings.ids.next_id()?,run_id:budget.run_id().clone(),sequence:(saved.session.transcript_revision+index as u64+1).try_into().map_err(|_|fail(ErrorCode::InvalidSnapshot,"verification.sequence"))?,role,origin,visibility:Visibility::Model,content:content.into_iter().map(|content|ContentBlock::Content{content}).collect()});
         }
         let mut records = vec![record];
         let stored: StoredModelResponse = self.read_verification(&candidate.response_ref).await?;
@@ -575,6 +599,7 @@ impl Agent {
 }
 
 struct ReviewModels<'a> {
+    sources: Option<&'a ContextSourceRuntime>,
     bindings: &'a AgentBindings,
     budget: &'a RunBudget,
     context: &'a ExecutionContext,
@@ -633,6 +658,7 @@ impl VerificationModel for ReviewModels<'_> {
                 },
             };
             let projector = ReviewProjector {
+                sources: self.sources,
                 run_id: self.budget.run_id(),
                 candidate_ref: self.candidate_ref,
                 bindings: self.bindings,
@@ -663,6 +689,7 @@ impl VerificationModel for ReviewModels<'_> {
     }
 }
 struct ReviewProjector<'a> {
+    sources: Option<&'a ContextSourceRuntime>,
     run_id: &'a Id,
     candidate_ref: &'a RecordRef,
     bindings: &'a AgentBindings,
@@ -671,7 +698,7 @@ struct ReviewProjector<'a> {
 impl ModelRequestProjector for ReviewProjector<'_> {
     fn authorize_use<'a>(
         &'a self,
-        _: &'a RouteSelection,
+        selection: &'a RouteSelection,
         _: &'a RoutedModelInput,
         context: &'a ModelProjectionContext,
     ) -> PortFuture<'a, ()> {
@@ -725,6 +752,28 @@ impl ModelRequestProjector for ReviewProjector<'_> {
                 PolicyDecision::Allow {} => {}
                 _ => return Err(fail(ErrorCode::AccessDenied, "verification.policy")),
             }
+            if let Some(sources) = self.sources {
+                let messages = candidate_lineage_messages(&saved, &candidate)?;
+                let lineage = crate::future::boxed(|| {
+                    sources.lineage_for_messages(
+                        &saved.snapshot.request.session_id,
+                        &messages,
+                        &current,
+                        context.deadline,
+                    )
+                })
+                .await?;
+                crate::future::boxed(|| {
+                    sources.authorize_lineage(
+                        self.run_id,
+                        &lineage,
+                        Some(&selection.route),
+                        &current,
+                        context.deadline,
+                    )
+                })
+                .await?;
+            }
             if let Some(artifacts) = &self.bindings.artifacts {
                 let evidence: Vec<_> = saved
                     .messages
@@ -772,4 +821,29 @@ impl ModelRequestProjector for ReviewProjector<'_> {
             })
         })
     }
+}
+
+fn candidate_lineage_messages(
+    saved: &StoredRun,
+    candidate: &VerificationCandidate,
+) -> Result<Vec<Message>, ContractError> {
+    let attempt = saved
+        .snapshot
+        .model_ledger
+        .iter()
+        .find(|invocation| invocation.response_ref.as_ref() == Some(&candidate.response_ref))
+        .ok_or_else(|| fail(ErrorCode::InvalidSnapshot, "verification.candidate_attempt"))?;
+    let mut messages = saved.messages.clone();
+    // Dependency-only view: the pending candidate has no transcript message yet.
+    messages.push(Message {
+        source_model_request_id: Some(attempt.attempt_id.clone()),
+        message_id: candidate.response_ref.record_id.clone(),
+        run_id: candidate.run_id.clone(),
+        sequence: std::num::NonZeroU64::MIN,
+        role: MessageRole::Assistant,
+        origin: MessageOrigin::Model,
+        visibility: Visibility::Model,
+        content: vec![],
+    });
+    Ok(messages)
 }

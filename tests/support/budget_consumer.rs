@@ -136,6 +136,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 snapshot,
                 prompt_snapshot: prompt.reference().clone(),
                 messages: vec![Message {
+                    source_model_request_id: None,
                     message_id: id("user-message"),
                     run_id: run_id.clone(),
                     sequence: 1.try_into()?,

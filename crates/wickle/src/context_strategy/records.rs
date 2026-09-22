@@ -311,6 +311,10 @@ impl ContextRevision {
     pub fn covered_message_ids(&self) -> &[Id] {
         &self.covered_message_ids
     }
+    /// Exact source batches represented by the covered conversation.
+    pub fn source_lineage(&self) -> &[ContextLineage] {
+        &self.source_lineage
+    }
     /// Stored complete summary, never substituted for System instructions.
     pub fn summary(&self) -> Option<&str> {
         self.summary.as_deref()
@@ -358,7 +362,10 @@ impl ContextRevision {
         let revision: Self = serde_json::from_value(record.value().clone())
             .map_err(|_| context_error(ErrorCode::InvalidSnapshot, "context.revision"))?;
         if record.reference().digest != crate::serialization::data_digest(&revision)
-            || revision.schema_version != "wickle.context-revision.v1"
+            || !matches!(
+                revision.schema_version.as_str(),
+                "wickle.context-revision.v1" | "wickle.context-revision.v2"
+            )
             || &revision.scope != scope
             || &revision.session_id != session_id
             || revision.plan_ref.digest != plan.digest()

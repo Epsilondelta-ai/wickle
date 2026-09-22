@@ -18,6 +18,9 @@ use wickle::*;
 #[derive(Clone, Copy)]
 pub enum Reply {
     Ready,
+    ReadySame,
+    ReadyVersion,
+    Deleted,
     Empty,
     Unavailable,
     WrongScope,
@@ -104,6 +107,13 @@ impl ContextSource for Source {
                         "source.transport",
                     ));
                 }
+                Reply::Deleted => {
+                    return Ok(ContextResult::Deleted {
+                        item_ids: vec![id("shared")],
+                        source_revision: Some(id(&format!("revision-{generation}"))),
+                        reported_usage: None,
+                    });
+                }
                 Reply::Empty => {
                     return Ok(ContextResult::Empty {
                         source_revision: Some(id(&format!("revision-{generation}"))),
@@ -155,7 +165,7 @@ impl ContextSource for Source {
                 let value = if matches!(reply, Reply::TooLarge) {
                     json!({"source":self.definition.source.id,"payload":"x".repeat(5000)})
                 } else {
-                    json!({"source":self.definition.source.id,"generation":generation})
+                    json!({"source":self.definition.source.id,"generation":if matches!(reply, Reply::ReadySame) { 0 } else { generation }})
                 };
                 let mut item = ContextItem::new(
                     if count == 1 {
@@ -176,6 +186,11 @@ impl ContextSource for Source {
                 items.push(item);
             }
             Ok(ContextResult::Ready {
+                item_revisions: if matches!(reply, Reply::ReadyVersion) {
+                    [(id("shared"), id("document-r1"))].into()
+                } else {
+                    Default::default()
+                },
                 items,
                 source_revision: Some(id(&format!("revision-{generation}"))),
                 reported_usage: Some(ContextSourceUsage {

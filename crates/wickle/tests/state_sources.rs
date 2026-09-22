@@ -278,3 +278,63 @@ async fn a_delayed_query_result_cannot_be_committed_after_another_generation_is_
         before_late
     );
 }
+
+fn replace_reference(value: &mut Value, old: &Value, new: &Value) {
+    if value == old {
+        *value = new.clone();
+        return;
+    }
+    match value {
+        Value::Array(values) => values
+            .iter_mut()
+            .for_each(|value| replace_reference(value, old, new)),
+        Value::Object(values) => values
+            .values_mut()
+            .for_each(|value| replace_reference(value, old, new)),
+        _ => {}
+    }
+}
+
+#[tokio::test]
+async fn checkpoint_rejects_revision_rollback_even_when_record_hashes_are_recomputed() {
+    let mut fixture = Fixture::new();
+    fixture.add(
+        "records",
+        ContextTrigger::BeforeModel,
+        true,
+        vec![Reply::ReadySame, Reply::ReadySame],
+    );
+    let agent = fixture.agent();
+    let handle = fixture.start(&agent).await;
+    assert_eq!(
+        fixture.outcome(&handle).await.result.status(),
+        RunStatus::Succeeded
+    );
+    let image =
+        serde_json::to_value(fixture.store.inner.export_checkpoint(&scope()).unwrap()).unwrap();
+    restore(&image).unwrap();
+    for forged_revision in [1, 3] {
+        let mut changed = image.clone();
+        let old = changed["runs"][0]["snapshot"]["context_batches"][1].clone();
+        let record = changed["records"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|record| record["reference"] == old)
+            .unwrap();
+        let fragment = record["value"]["fragments"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|fragment| fragment["value"]["type"] == "item")
+            .unwrap();
+        fragment["core_revision"] = json!(forged_revision);
+        let mut new = old.clone();
+        new["digest"] = serde_json::to_value(canonical_digest(&record["value"])).unwrap();
+        replace_reference(&mut changed, &old, &new);
+        assert!(
+            restore(&changed).is_err(),
+            "accepted skipped or rolled-back core revision {forged_revision}"
+        );
+    }
+}

@@ -78,6 +78,7 @@ pub(super) fn validate_source_snapshot(
             value.clone(),
         );
         let batch = ContextBatch::restore(&record, &plan, &snapshot.scope, &snapshot.run_id)?;
+        batch.validate_fragment_history(&batches)?;
         if batch.request().session_id != snapshot.request.session_id
             || batch.request().user_input != snapshot.request.input
             || !requests.insert(batch.request().context_request_id.clone())

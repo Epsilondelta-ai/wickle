@@ -1227,6 +1227,40 @@ fn validate_messages(
         {
             return Err(error(ErrorCode::InvalidMessage, "messages"));
         }
+        if let Some(attempt) = &message.source_model_request_id {
+            let valid = message.origin == crate::MessageOrigin::Model
+                && state.runs.get(run_id).is_some_and(|run| run.snapshot.model_ledger.iter().any(|invocation|
+                    &invocation.attempt_id == attempt && invocation.purpose == crate::ModelPurpose::Agent
+                    && matches!(invocation.state, crate::ModelAttemptState::Completed {})))
+                && message.content.iter().all(|block| !matches!(block, ContentBlock::ToolCall { call } if &call.model_request_id != attempt));
+            if !valid {
+                return Err(error(
+                    ErrorCode::InvalidMessage,
+                    "messages.model_provenance",
+                ));
+            }
+            if message.visibility == crate::Visibility::UserAndModel
+                && !message
+                    .content
+                    .iter()
+                    .any(|block| matches!(block, ContentBlock::ToolCall { .. }))
+                && state
+                    .runs
+                    .get(run_id)
+                    .and_then(|run| {
+                        run.snapshot.model_ledger.iter().rev().find(|entry| {
+                            entry.purpose == crate::ModelPurpose::Agent
+                                && matches!(entry.state, crate::ModelAttemptState::Completed {})
+                        })
+                    })
+                    .is_none_or(|entry| &entry.attempt_id != attempt)
+            {
+                return Err(error(
+                    ErrorCode::InvalidMessage,
+                    "messages.final_model_provenance",
+                ));
+            }
+        }
         for content in &message.content {
             if matches!(content, ContentBlock::ToolResultCorrection { .. }) {
                 let mut history: Vec<_> = state

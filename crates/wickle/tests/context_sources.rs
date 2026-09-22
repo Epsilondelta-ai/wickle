@@ -607,3 +607,277 @@ async fn source_access_errors_never_become_model_unavailable_or_version_drift_fa
         }
     }
 }
+
+async fn saved_batches(fixture: &Fixture, handle: &RunHandle) -> Vec<ContextBatch> {
+    let saved = fixture.saved(handle).await;
+    let plan_ref = saved.snapshot.source_plan_ref.as_ref().unwrap();
+    let record = fixture.store.read_record(&scope(), plan_ref).await.unwrap();
+    let plan = ContextSourcePlan::restore(&record.value().to_string(), &scope(), &plan_ref.digest)
+        .unwrap();
+    let mut batches = vec![];
+    for reference in &saved.snapshot.context_batches {
+        let record = fixture
+            .store
+            .read_record(&scope(), reference)
+            .await
+            .unwrap();
+        batches.push(ContextBatch::restore(&record, &plan, &scope(), handle.run_id()).unwrap());
+    }
+    batches
+}
+
+fn data_fragment(batch: &ContextBatch) -> &ContextFragment {
+    batch
+        .fragments()
+        .iter()
+        .find(|fragment| matches!(fragment.value, FragmentValue::Item { .. }))
+        .unwrap()
+}
+
+#[tokio::test]
+async fn new_observation_advances_core_revision_without_inventing_external_versions() {
+    let mut fixture = Fixture::new();
+    let source = fixture.add(
+        "records",
+        ContextTrigger::BeforeModel,
+        true,
+        vec![Reply::ReadySame, Reply::ReadySame],
+    );
+    fixture.model.fail_first.store(true, Ordering::SeqCst);
+    let agent = fixture.agent();
+    let handle = fixture.start(&agent).await;
+    assert_eq!(
+        fixture.outcome(&handle).await.result.status(),
+        RunStatus::Succeeded
+    );
+    let batches = saved_batches(&fixture, &handle).await;
+    assert_eq!(batches.len(), 2);
+    assert_eq!(source.calls.load(Ordering::SeqCst), 2);
+    assert_eq!(fixture.model.physical_calls.load(Ordering::SeqCst), 3);
+    let first = data_fragment(&batches[0]);
+    let second = data_fragment(&batches[1]);
+    assert_eq!(first.identity, second.identity);
+    assert_eq!(first.core_revision.get(), 1);
+    assert_eq!(second.core_revision.get(), 2);
+    assert_eq!(first.content_digest, second.content_digest);
+    assert_eq!(first.source_revision, None);
+    assert_eq!(second.source_revision, None);
+    assert_ne!(first.batch_id, second.batch_id);
+    assert!(batches[1].fragments().iter().any(|fragment| matches!(
+        fragment.value,
+        FragmentValue::Selection { .. }
+    ) && fragment.source_revision
+        == Some(id("revision-1"))));
+}
+
+#[tokio::test]
+async fn document_revision_is_distinct_from_index_revision_and_reaches_authorization() {
+    let mut fixture = Fixture::new();
+    let source = fixture.add(
+        "records",
+        ContextTrigger::RunStart,
+        true,
+        vec![Reply::ReadyVersion],
+    );
+    let agent = fixture.agent();
+    let handle = fixture.start(&agent).await;
+    assert_eq!(
+        fixture.outcome(&handle).await.result.status(),
+        RunStatus::Succeeded
+    );
+    let batches = saved_batches(&fixture, &handle).await;
+    assert_eq!(
+        data_fragment(&batches[0]).source_revision,
+        Some(id("document-r1"))
+    );
+    let checks = source.use_requests.lock().unwrap();
+    assert!(checks.iter().any(|request| request.derived));
+    assert!(
+        checks
+            .iter()
+            .all(|request| request.item_revisions.get(&id("shared")) == Some(&id("document-r1")))
+    );
+}
+
+#[tokio::test]
+async fn empty_selection_tombstones_prevent_falling_back_to_older_content() {
+    let mut fixture = Fixture::new();
+    fixture.add(
+        "records",
+        ContextTrigger::BeforeModel,
+        true,
+        vec![Reply::Ready, Reply::Empty],
+    );
+    let agent = fixture.agent();
+    let handle = fixture.start(&agent).await;
+    assert_eq!(
+        fixture.outcome(&handle).await.result.status(),
+        RunStatus::Succeeded
+    );
+    let batches = saved_batches(&fixture, &handle).await;
+    let fragments: Vec<_> = batches
+        .iter()
+        .flat_map(|batch| batch.fragments().iter().cloned())
+        .collect();
+    assert!(
+        select_context_fragments(&fragments, &scope())
+            .unwrap()
+            .is_empty()
+    );
+    let tombstone = batches[1]
+        .fragments()
+        .iter()
+        .find(|fragment| fragment.identity == data_fragment(&batches[0]).identity)
+        .unwrap();
+    assert_eq!(tombstone.core_revision.get(), 2);
+    assert!(
+        matches!(&tombstone.value, FragmentValue::Tombstone { reason } if reason == &id("empty"))
+    );
+    let mut other_scope = scope();
+    other_scope.tenant_id = id("other-tenant");
+    assert_eq!(
+        select_context_fragments(&fragments, &other_scope)
+            .unwrap_err()
+            .code,
+        ErrorCode::AccessDenied
+    );
+}
+
+#[tokio::test]
+async fn explicit_deletion_blocks_derived_history_before_another_model_call() {
+    let mut fixture = Fixture::new();
+    let source = fixture.add(
+        "records",
+        ContextTrigger::BeforeModel,
+        true,
+        vec![Reply::Ready, Reply::Deleted],
+    );
+    let agent = fixture.agent();
+    let handle = fixture.start(&agent).await;
+    assert_eq!(
+        fixture.outcome(&handle).await.result.status(),
+        RunStatus::Failed
+    );
+    assert_eq!(source.calls.load(Ordering::SeqCst), 2);
+    assert_eq!(fixture.model.physical_calls.load(Ordering::SeqCst), 1);
+    let batches = saved_batches(&fixture, &handle).await;
+    assert!(batches[1].fragments().iter().any(|fragment| matches!(&fragment.value, FragmentValue::Tombstone { reason } if reason == &id("deleted"))));
+}
+
+#[tokio::test]
+async fn deletion_in_a_new_run_blocks_previous_run_derived_history() {
+    let mut fixture = Fixture::new();
+    let source = fixture.add(
+        "records",
+        ContextTrigger::RunStart,
+        true,
+        vec![Reply::Ready, Reply::Deleted, Reply::Empty],
+    );
+    let agent = fixture.agent();
+    let first = fixture.start(&agent).await;
+    assert_eq!(
+        fixture.outcome(&first).await.result.status(),
+        RunStatus::Succeeded
+    );
+    let calls = fixture.model.physical_calls.load(Ordering::SeqCst);
+    let mut caller = context();
+    caller.data.system_inputs = Some(SystemInputs::new(object(
+        json!({"workspace_id":resume_support::WORKSPACE}),
+    )));
+    let second = completed(
+        agent
+            .start(request("second-request"), caller)
+            .await
+            .unwrap(),
+    );
+    assert_eq!(
+        fixture.outcome(&second).await.result.status(),
+        RunStatus::Failed
+    );
+    assert_eq!(source.calls.load(Ordering::SeqCst), 2);
+    assert_eq!(fixture.model.physical_calls.load(Ordering::SeqCst), calls);
+    let third = completed(
+        agent
+            .start(request("third-request"), context())
+            .await
+            .unwrap(),
+    );
+    assert_eq!(
+        fixture.outcome(&third).await.result.status(),
+        RunStatus::Failed
+    );
+    assert_eq!(fixture.model.physical_calls.load(Ordering::SeqCst), calls);
+    assert_eq!(source.calls.load(Ordering::SeqCst), 3);
+}
+
+#[tokio::test]
+async fn deletion_from_another_trigger_blocks_still_active_run_start_data() {
+    let mut fixture = Fixture::new();
+    fixture.add(
+        "records",
+        ContextTrigger::RunStart,
+        true,
+        vec![Reply::Ready, Reply::Deleted],
+    );
+    let mut step_binding = fixture.bindings[0].clone();
+    step_binding.trigger = ContextTrigger::BeforeModel;
+    fixture.bindings.push(step_binding);
+    let agent = fixture.agent();
+    let handle = fixture.start(&agent).await;
+    assert_eq!(
+        fixture.outcome(&handle).await.result.status(),
+        RunStatus::Failed
+    );
+    assert_eq!(fixture.model.physical_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(saved_batches(&fixture, &handle).await.len(), 2);
+}
+
+#[tokio::test]
+async fn reconciled_tool_observation_retains_the_original_model_step_sources() {
+    let mut fixture = Fixture::new();
+    fixture.add(
+        "records",
+        ContextTrigger::BeforeModel,
+        true,
+        vec![Reply::Ready, Reply::Ready],
+    );
+    let bindings = fixture.agent_bindings();
+    let runtime = bindings.context_sources.clone().unwrap();
+    let agent = create_agent(fixture.profile(), bindings).unwrap();
+    let handle = fixture.start(&agent).await;
+    assert_eq!(
+        fixture.outcome(&handle).await.result.status(),
+        RunStatus::Succeeded
+    );
+    let saved = fixture.saved(&handle).await;
+    let mut correction = saved
+        .messages
+        .iter()
+        .find(|message| message.origin == MessageOrigin::Tool)
+        .unwrap()
+        .clone();
+    let ContentBlock::ToolResult { result } = correction.content[0].clone() else {
+        panic!("tool observation")
+    };
+    correction.content = vec![ContentBlock::ToolResultCorrection {
+        previous_message_id: correction.message_id.clone(),
+        previous_result_digest: canonical_digest(&serde_json::to_value(&result).unwrap()),
+        result,
+    }];
+    let lineage = runtime
+        .lineage_for_messages(
+            &saved.snapshot.request.session_id,
+            &[correction],
+            &context(),
+            tokio::time::Instant::now() + Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        lineage,
+        vec![ContextLineage {
+            run_id: handle.run_id().clone(),
+            batch_ref: saved.snapshot.context_batches[0].clone()
+        }]
+    );
+}

@@ -7,6 +7,7 @@ pub(super) struct Compression<'a, 'b> {
     pub saved: &'a StoredRun,
     pub plan: &'a ContextPlan,
     pub candidate: ContextRevision,
+    pub lineage: Vec<ContextLineage>,
     pub view: &'a [Message],
     pub controls: &'a ContextStrategyContext,
 }
@@ -22,6 +23,7 @@ impl ContextRuntime {
             saved,
             plan,
             mut candidate,
+            lineage,
             view,
             controls,
         } = work;
@@ -123,6 +125,18 @@ impl ContextRuntime {
             revision_ref: None,
             failure: None,
         };
+        if let Some(sources) = services.sources {
+            crate::future::boxed(|| {
+                sources.authorize_lineage(
+                    &saved.snapshot.run_id,
+                    &lineage,
+                    None,
+                    services.context,
+                    controls.deadline,
+                )
+            })
+            .await?;
+        }
         let result = match compactor {
             ContextCompactor::Host { compressor, .. } => {
                 bounded(controls, services, async {
@@ -168,6 +182,24 @@ impl ContextRuntime {
         candidate.covered_digest =
             records::covered_digest(&saved.messages, &candidate.covered_message_ids);
         candidate.summary = Some(summary);
+        if let Some(sources) = services.sources {
+            let covered: Vec<_> = saved
+                .messages
+                .iter()
+                .filter(|message| candidate.covered_message_ids.contains(&message.message_id))
+                .cloned()
+                .collect();
+            let deadline = services.budget.call_deadline()?;
+            candidate.source_lineage = crate::future::boxed(|| {
+                sources.lineage_for_messages(
+                    &saved.snapshot.request.session_id,
+                    &covered,
+                    services.context,
+                    deadline,
+                )
+            })
+            .await?;
+        }
         candidate.anchors = records::anchors(
             &saved.messages,
             &candidate.covered_message_ids,
@@ -206,6 +238,7 @@ impl ContextRuntime {
         self.commit(saved, &candidate, Some(decision), services)
             .await?;
         Ok(PreparedContext {
+            lineage,
             artifacts: Self::artifact_refs(&projection, Some(&candidate), plan)?,
             projection,
             input_tokens: tokens,

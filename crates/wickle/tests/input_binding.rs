@@ -394,6 +394,7 @@ impl Fixture {
             },
         )];
         update.messages = vec![Message {
+            source_model_request_id: None,
             message_id: id(&format!("call-message-{call_id}")),
             run_id: id("run"),
             sequence: (saved.session.transcript_revision + 1).try_into().unwrap(),

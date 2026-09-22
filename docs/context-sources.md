@@ -24,6 +24,7 @@ The source returns one of these results:
 | --- | --- | --- |
 | `Ready` | Valid, nonempty data | Save and authorize before use |
 | `Empty` | Successful lookup without data | Save an empty active slot, including for a required source |
+| `Deleted` | Explicitly deleted native item IDs | Save deletion markers and reject subsequent use of the old data or its derivatives |
 | `Unavailable` | Explicit operational failure | Save the diagnostic; stop if the source is required |
 
 A callback timeout may become optional unavailability. Cancellation, permission
@@ -113,3 +114,34 @@ Run it with the other independent consumers using
 `python3 scripts/check-package.py --allow-dirty`.
 
 For post-run memory updates, see [external event consumers](event-consumers.md). The Host owns delivery and application receipts; the next Run reads applied data through `ContextSource`.
+
+## Track observations and deletions
+
+New batches carry `ContextFragment` records with stable scope, Run owner,
+producer and native item identity. `core_revision` starts at one and advances
+for each committed observation, including unchanged content and withdrawals.
+Physical retries reuse that observation. `content_digest` identifies content and
+provenance independently of the observation's batch or step. The pinned
+`assembler_version` specifies the assembly rules. Store validation checks the
+complete revision history before accepting a commit or checkpoint.
+
+`Ready.item_revisions` supplies optional external versions keyed by native item
+ID. Omit entries when the source cannot report document versions. The separate
+`source_revision` describes the query/index snapshot and is never copied into
+an item's version. Neither hashes nor timestamps substitute for unknown external
+versions. Old batches remain readable without invented fragment metadata.
+
+An empty or unavailable selection withdraws its current slot without reviving an
+older result. `Deleted` is stronger: it names deleted items, so matching cached
+data and derived conversation cannot be sent again. Deletion matching uses the
+exact source definition and native item ID across triggers and the current Run's
+use of earlier Runs. Run-local revision counters are not compared across Runs.
+The source's `authorize_use` must still check current external ACL/deletion state;
+the core cannot discover deletions that the source has never reported.
+
+For historical or summarized use, `ContextUseRequest.derived` is true and
+`consumer_run_id` identifies the current Run. `request.run_id` remains the
+original observation's owner, while `ContextCallContext.run_id` is the current
+consumer. Check access using the current actor and grant, with the original
+item IDs and item revisions. Do not treat either a stored batch or a prior
+successful permission check as a current access grant.

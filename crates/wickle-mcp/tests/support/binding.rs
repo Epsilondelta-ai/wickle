@@ -194,6 +194,7 @@ pub async fn bound_arguments(
                 snapshot,
                 prompt_snapshot: prompt.reference().clone(),
                 messages: vec![Message {
+                    source_model_request_id: None,
                     message_id: id("user-message"),
                     run_id: run.clone(),
                     sequence: 1.try_into()?,

@@ -810,6 +810,7 @@ async fn a_saved_failed_result_with_unknown_effect_still_blocks_following_tools(
         },
     ));
     update.messages.push(Message {
+        source_model_request_id: None,
         message_id: id("historical-result-message"),
         run_id: id("run"),
         sequence: (saved.session.transcript_revision + 1).try_into().unwrap(),
