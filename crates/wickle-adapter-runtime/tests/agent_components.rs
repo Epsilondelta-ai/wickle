@@ -592,3 +592,247 @@ async fn cleanup_releases_the_lease_before_bounded_adapter_close_and_preserves_t
     assert_eq!(fixture.model.calls.load(Ordering::SeqCst), 2);
     assert_eq!(instance.close_calls.load(Ordering::SeqCst), 1);
 }
+
+struct ScopedModel {
+    owner: Scope,
+    query: String,
+    calls: AtomicUsize,
+    requests: Mutex<Vec<ModelRequest>>,
+}
+impl ModelPort for ScopedModel {
+    fn binding(&self) -> ModelPortBinding {
+        ModelPortBinding {
+            provider: id("fixture"),
+            adapter: reference("adapter"),
+            connection_ref: reference("connection"),
+        }
+    }
+    fn generate<'a>(
+        &'a self,
+        request: &'a ModelRequest,
+        context: &'a ModelCallContext,
+    ) -> PortStream<'a, ModelEvent> {
+        assert_eq!(context.scope, self.owner);
+        self.requests.lock().unwrap().push(request.clone());
+        let first = self.calls.fetch_add(1, Ordering::SeqCst) == 0;
+        let event = if first {
+            ModelEvent::ToolArgumentsDelta {
+                index: 0,
+                provider_call_id: Some("lookup".into()),
+                name: Some("search_0".into()),
+                delta: json!({"query":self.query}).to_string(),
+            }
+        } else {
+            ModelEvent::TextDelta {
+                text: "complete".into(),
+            }
+        };
+        Box::pin(stream::iter(vec![
+            Ok(event),
+            Ok(ModelEvent::ResponseCompleted {
+                finish: if first {
+                    ModelFinish::ToolCalls
+                } else {
+                    ModelFinish::Stop
+                },
+                metadata: Default::default(),
+                continuation: vec![],
+            }),
+        ]))
+    }
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn simultaneous_tenants_keep_user_thread_mappings_and_mutable_instances_separate() {
+    let adapters = Fixture::new();
+    let factory = adapters.factories[0].clone();
+    factory.behavior.store(7, Ordering::SeqCst);
+    let mut cases = vec![];
+    for (tenant, user, workspace, thread, query) in [
+        (
+            "tenant-a",
+            "user-a",
+            "11111111-1111-4111-8111-111111111111",
+            "thread-a",
+            "query-a",
+        ),
+        (
+            "tenant-b",
+            "user-b",
+            "22222222-2222-4222-8222-222222222222",
+            "thread-b",
+            "query-b",
+        ),
+    ] {
+        let owner = Scope {
+            tenant_id: id(tenant),
+            workspace_id: id("workspace"),
+            user_id: Some(id(user)),
+        };
+        let state = json!({"thread_id":thread,"external_user":user});
+        let mapping = AdapterBindingState {
+            scope: owner.clone(),
+            session_id: id("session"),
+            adapter_binding: id("binding-0"),
+            adapter: reference("adapter"),
+            definition_digest: adapters.definitions[0].digest(),
+            state_ref: ProtectedRecord::new(id(&format!("mapping-{tenant}")), 1, state.clone())
+                .reference()
+                .clone(),
+            value: state,
+        };
+        let registry = Arc::new(
+            AdapterRegistry::new(
+                owner.clone(),
+                vec![AdapterRegistration {
+                    definition: adapters.definitions[0].clone(),
+                    factory: factory.clone(),
+                }],
+                adapters.connections.clone(),
+                vec![],
+                vec![],
+                vec![mapping],
+            )
+            .unwrap(),
+        );
+        let base = agent_support::Fixture::new(agent_support::Response::Text, false);
+        let model = Arc::new(ScopedModel {
+            owner: owner.clone(),
+            query: query.into(),
+            calls: AtomicUsize::new(0),
+            requests: Mutex::new(vec![]),
+        });
+        let mut bindings = base.bindings();
+        bindings.scope = owner.clone();
+        bindings.state = adapters.store.clone();
+        bindings.clock = adapters.clock.clone();
+        bindings.ids = Arc::new(RandomIdSource);
+        bindings.profile_resolver = Arc::new(Catalog(registry.clone()));
+        let mut catalog = base.router.snapshot.catalog().clone();
+        let mut policy = base.router.snapshot.policy().clone();
+        catalog.scope = owner.clone();
+        policy.scope = owner.clone();
+        catalog.models[0]
+            .capabilities
+            .features
+            .insert(id("tool_calling"));
+        catalog.bindings[0].capabilities = catalog.models[0].capabilities.clone();
+        catalog.bindings[0].evidence[0].binding_digest = catalog.bindings[0]
+            .contract_digest(&catalog.models[0])
+            .unwrap();
+        bindings.router = Arc::new(agent_support::Router {
+            snapshot: RoutingSnapshot::new(catalog, policy).unwrap(),
+            queries: AtomicUsize::new(0),
+            snapshots: AtomicUsize::new(0),
+        });
+        bindings.policy =
+            Arc::new(PolicyGate::new(adapters.policy.clone(), Duration::from_secs(5)).unwrap());
+        bindings.model_exchange = Arc::new(
+            ModelExchange::new(model.clone(), bindings.policy.clone())
+                .with_route_inspector(base.inspector.clone(), Duration::from_secs(5))
+                .unwrap(),
+        );
+        bindings.system_inputs = inputs();
+        bindings.components = Some(Arc::new(adapters.runtime(registry)));
+        bindings.tools = None;
+        bindings.settings.lease_ttl_ms = 30000;
+        bindings.settings.heartbeat_interval_ms = 5000;
+        let agent = create_agent(multi_profile(&["adapter"]), bindings).unwrap();
+        let mut context = agent_support::context();
+        context.data.scope = owner.clone();
+        context.data.principal_ref = id(user);
+        context.data.system_inputs =
+            Some(SystemInputs::new(object(json!({"workspace_id":workspace}))));
+        let start_agent = agent.clone();
+        let start_context = context.clone();
+        let start = tokio::spawn(async move {
+            agent_support::completed(
+                start_agent
+                    .start(agent_support::request("same-request"), start_context)
+                    .await
+                    .unwrap(),
+            )
+        });
+        cases.push((agent, context, model, workspace, thread, query, start));
+    }
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while factory.observed.lock().unwrap().len() != 2 {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .unwrap();
+    // Both Runs are inside the shared factory before either may create an instance.
+    assert!(factory.instances.lock().unwrap().is_empty());
+    factory.release.add_permits(2);
+    let mut finished = vec![];
+    for (agent, context, model, workspace, thread, query, start) in cases {
+        let handle = start.await.unwrap();
+        let outcome = agent_support::completed(
+            tokio::time::timeout(Duration::from_secs(10), handle.outcome(&context))
+                .await
+                .unwrap()
+                .unwrap(),
+        );
+        assert_eq!(
+            outcome.result.status(),
+            RunStatus::Succeeded,
+            "{:?}",
+            outcome
+        );
+        assert_eq!(model.calls.load(Ordering::SeqCst), 2);
+        let observed = factory
+            .observed
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|item| item.execution.scope == context.data.scope)
+            .cloned()
+            .unwrap();
+        assert_eq!(observed.execution.principal_ref, context.data.principal_ref);
+        assert_eq!(
+            observed.binding.binding_state.unwrap().value,
+            json!({"thread_id":thread,"external_user":context.data.principal_ref})
+        );
+        let instance = factory
+            .instances
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|item| item.scope == context.data.scope)
+            .cloned()
+            .unwrap();
+        assert_eq!(instance.run_id, *handle.run_id());
+        assert_eq!(instance.executor.calls.load(Ordering::SeqCst), 1);
+        let seen = instance.executor.seen.lock().unwrap();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].0["workspace_id"], workspace);
+        assert_eq!(seen[0].0["query"], query);
+        assert_eq!(seen[0].1.scope, context.data.scope);
+        drop(seen);
+        for request in model.requests.lock().unwrap().iter() {
+            let encoded = serde_json::to_string(request).unwrap();
+            assert!(!encoded.contains(workspace));
+            assert!(!encoded.contains(thread));
+        }
+        finished.push((agent, context, handle));
+    }
+    assert_eq!(factory.instances.lock().unwrap().len(), 2);
+    assert_eq!(
+        adapters
+            .store
+            .load(&finished[0].1.data.scope, finished[1].2.run_id())
+            .await
+            .unwrap_err()
+            .code,
+        ErrorCode::StateNotFound
+    );
+    assert_eq!(
+        finished[0]
+            .0
+            .get_run(finished[0].2.run_id(), &finished[1].1)
+            .await
+            .unwrap_err()
+            .code,
+        ErrorCode::AccessDenied
+    );
+}

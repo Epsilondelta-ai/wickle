@@ -308,3 +308,80 @@ pub async fn atomic_recovery_contract(store: Arc<dyn StateStore>) {
     assert_eq!(after.accepted_commands.len(), 1);
     assert_eq!(after.execution_principal_ref, id("execution-principal"));
 }
+
+pub async fn conflicting_submissions_race(stores: [Arc<dyn StateStore>; 2]) {
+    let store = stores[0].clone();
+    let mut left = admission("race-left", "same-key", "race-session", "left input", "1").await;
+    let mut right = admission("race-right", "same-key", "race-session", "right input", "1").await;
+    for input in [&mut left, &mut right] {
+        let profile = input.snapshot.profile.profile();
+        input.submitted = Some(
+            RequestSnapshot::capture(
+                VersionedRef {
+                    id: profile.agent_id.clone(),
+                    version: profile.version.clone(),
+                },
+                &serde_json::to_string(&input.snapshot.request).unwrap(),
+                None,
+                Default::default(),
+            )
+            .unwrap(),
+        );
+    }
+    let submitted = [
+        left.submitted.clone().unwrap(),
+        right.submitted.clone().unwrap(),
+    ];
+    let expected = [left.snapshot.clone(), right.snapshot.clone()];
+    let gate = Arc::new(tokio::sync::Barrier::new(2));
+    let mut workers = Vec::new();
+    for (store, input) in stores.into_iter().zip([left, right]) {
+        let gate = gate.clone();
+        workers.push(tokio::spawn(async move {
+            gate.wait().await;
+            store.admit(&scope(), input).await
+        }));
+    }
+    let a = workers.pop().unwrap().await.unwrap();
+    let b = workers.pop().unwrap().await.unwrap();
+    let (winner, loser) = match (a, b) {
+        (Ok(winner), Err(loser)) | (Err(loser), Ok(winner)) => (winner, loser),
+        _ => panic!("conflicting submissions must have exactly one admitted winner"),
+    };
+    assert!(winner.created);
+    assert_eq!(loser.code, ErrorCode::RequestConflict);
+    let loaded = store
+        .find_request(&scope(), &id("race-session"), &id("same-key"))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(loaded, winner.state);
+    assert!(expected.iter().any(|snapshot| snapshot == &loaded.snapshot));
+    let history = store
+        .read_execution(&scope(), &loaded.snapshot.run_id)
+        .await
+        .unwrap();
+    let winner_index = expected
+        .iter()
+        .position(|snapshot| snapshot.run_id == loaded.snapshot.run_id)
+        .unwrap();
+    assert_eq!(history.submitted.as_ref(), Some(&submitted[winner_index]));
+    let losing_id = expected
+        .iter()
+        .find(|snapshot| snapshot.run_id != loaded.snapshot.run_id)
+        .unwrap()
+        .run_id
+        .clone();
+    assert_eq!(
+        store.load(&scope(), &losing_id).await.unwrap_err().code,
+        ErrorCode::StateNotFound
+    );
+    assert_eq!(
+        store
+            .load_session(&scope(), &id("race-session"))
+            .await
+            .unwrap()
+            .active_run_id,
+        Some(loaded.snapshot.run_id)
+    );
+}

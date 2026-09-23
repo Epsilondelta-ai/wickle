@@ -1090,3 +1090,99 @@ async fn a_failed_sql_write_never_publishes_mutated_cached_lease_state() {
         .unwrap();
     assert_eq!(store.load(&scope(), &id("run")).await.unwrap(), initial);
 }
+
+#[tokio::test]
+async fn killing_an_uncommitted_legacy_upgrade_preserves_old_data_and_allows_one_later_upgrade() {
+    let database = Database::new();
+    let store = SqliteStateStore::open(database.path()).unwrap();
+    let initial = store
+        .admit(
+            &scope(),
+            core::admission("legacy", "legacy-request", "legacy-session", "old", "1").await,
+        )
+        .await
+        .unwrap();
+    let lease = store
+        .acquire_lease(&scope(), &id("legacy"), &id("owner"), 0, 1000)
+        .await
+        .unwrap();
+    let terminal = store
+        .commit(
+            &scope(),
+            &id("legacy"),
+            finished(&initial.state.snapshot, lease, 1),
+        )
+        .await
+        .unwrap();
+    drop(store);
+    let connection = Connection::open(database.path()).unwrap();
+    let text: String = connection
+        .query_row(
+            "SELECT checkpoint_json FROM wickle_scope_checkpoints",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let mut legacy: Value = serde_json::from_str(&text).unwrap();
+    legacy["schema_version"] = json!("wickle.state-store.v1");
+    legacy.as_object_mut().unwrap().remove("executions");
+    connection
+        .execute(
+            "UPDATE wickle_scope_checkpoints SET checkpoint_json=?1,checksum=?2",
+            rusqlite::params![legacy.to_string(), canonical_digest(&legacy).as_str()],
+        )
+        .unwrap();
+    // The real shared state engine builds the upgrade image. The subprocess
+    // pauses its SQLite image write before COMMIT, without a production test hook.
+    let memory = MemoryStateStore::from_checkpoint(
+        StateStoreCheckpoint::from_json(&legacy.to_string(), &scope(), &canonical_digest(&legacy))
+            .unwrap(),
+    );
+    let input = core::admission("new", "new-request", "new-session", "new", "1").await;
+    memory.admit(&scope(), input.clone()).await.unwrap();
+    let upgraded = serde_json::to_value(memory.export_checkpoint(&scope()).unwrap()).unwrap();
+    assert_eq!(upgraded["schema_version"], "wickle.state-store.v2");
+    let old_reader = SqliteStateStore::open(database.path()).unwrap();
+    let mut worker = workers::Worker::spawn(
+        &database,
+        "upgrade",
+        "uncommitted-upgrade",
+        json!({"image":upgraded}),
+    );
+    workers::wait(&worker.ready);
+    assert_eq!(
+        old_reader.load(&scope(), &id("legacy")).await.unwrap(),
+        terminal
+    );
+    worker.terminate();
+    drop(old_reader);
+    let after_kill: String = connection
+        .query_row(
+            "SELECT checkpoint_json FROM wickle_scope_checkpoints",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(after_kill, legacy.to_string());
+    let reopened = SqliteStateStore::open(database.path()).unwrap();
+    let accepted = reopened.admit(&scope(), input.clone()).await.unwrap();
+    assert!(accepted.created);
+    let replay = reopened.admit(&scope(), input).await.unwrap();
+    assert!(!replay.created);
+    assert_eq!(accepted.state, replay.state);
+    assert_eq!(
+        reopened.load(&scope(), &id("legacy")).await.unwrap(),
+        terminal
+    );
+    let after_commit: String = connection
+        .query_row(
+            "SELECT checkpoint_json FROM wickle_scope_checkpoints",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(&after_commit).unwrap(),
+        upgraded
+    );
+}

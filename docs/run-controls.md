@@ -8,8 +8,11 @@ a changed payload conflicts. Submission requires current authority for the actio
 `ControlReceipt` contains the run ID, command ID and an optional processed segment
 ID. An absent segment ID means pending. Use `get_control_receipt` for a read-only,
 authorized lookup. `get_run` reads current metadata without expiring or cancelling
-work. `RunHandle::cancel` is a convenience that generates a fresh command ID;
-use explicit submission when the caller needs a stable retry key.
+work. Its `deadline_expired` flag observes the original Run deadline for nonterminal
+runs using the injected clock, without acquiring a lease or updating stored usage.
+A clock earlier than the stored high-water time returns `ClockRegression`.
+Terminal views report false. `RunHandle::cancel(command_id, context)` accepts the
+caller’s stable retry key.
 
 The owning driver checks pending commands at dispatch boundaries and during its
 heartbeat. It saves the outcome and command consumption in one fenced commit.

@@ -3,6 +3,8 @@
 #[allow(dead_code)]
 mod support;
 use support as agent_support;
+#[path = "support/command_recovery.rs"]
+mod command_recovery;
 #[path = "support/context_recovery.rs"]
 mod context_recovery;
 #[path = "support/recovery_store.rs"]
@@ -86,7 +88,18 @@ fn worker(directory: &Path, mode: &str) -> std::process::ExitStatus {
         .spawn()
         .unwrap();
     let end = std::time::Instant::now() + Duration::from_secs(30);
+    let mut killed = false;
     loop {
+        if !killed
+            && mode.ends_with("-interrupt")
+            && std::fs::read_to_string(directory.join("kill-ready"))
+                .ok()
+                .as_deref()
+                == Some("ready\n")
+        {
+            child.kill().unwrap();
+            killed = true;
+        }
         if let Some(status) = child.try_wait().unwrap() {
             return status;
         }
@@ -122,6 +135,10 @@ fn recovery_worker() {
     let directory =
         std::path::PathBuf::from(std::env::var_os("WICKLE_RECOVERY_PROCESS_DIRECTORY").unwrap());
     let mode = std::env::var("WICKLE_RECOVERY_PROCESS_MODE").unwrap();
+    if mode.starts_with("command-") {
+        command_recovery::run_worker(&directory, &mode);
+        return;
+    }
     if mode.starts_with("context-") {
         context_recovery::run_worker(&directory, &mode);
         return;
@@ -359,6 +376,11 @@ fn run_tool_worker(directory: &Path, mode: &str) {
                 (true, Some(boundary)) => Arc::new(recovery_store::CrashStore {
                     inner: store.clone(),
                     boundary: boundary.into(),
+                    kill_marker: matches!(
+                        boundary,
+                        "admitted" | "before-prepared" | "prepared" | "reserved"
+                    )
+                    .then(|| directory.join("kill-ready")),
                 }),
                 _ => store.clone(),
             };
@@ -396,7 +418,7 @@ fn run_tool_worker(directory: &Path, mode: &str) {
             bindings.tools = Some(Arc::new(ToolRegistry::new(scope(), registrations).unwrap()));
             if !interrupt {
                 let count = std::fs::read_to_string(directory.join("calls"))
-                    .unwrap()
+                    .unwrap_or_default()
                     .lines()
                     .count();
                 fixture.model.calls.store(count, Ordering::SeqCst);
@@ -425,8 +447,39 @@ fn run_tool_worker(directory: &Path, mode: &str) {
                 let outcome = handle.outcome(&context()).await;
                 panic!("write did not terminate process: {outcome:?}");
             }
-            let run_id = id(&std::fs::read_to_string(directory.join("run")).unwrap());
+            let run_id = match std::fs::read_to_string(directory.join("run")) {
+                Ok(value) => id(&value),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    store
+                        .find_request(&scope(), &id("session"), &id("request"))
+                        .await
+                        .unwrap()
+                        .expect("durable admission")
+                        .snapshot
+                        .run_id
+                }
+                Err(error) => panic!("run identifier: {error}"),
+            };
             let before = store.load(&scope(), &run_id).await.unwrap();
+            match boundary {
+                Some("admitted" | "before-prepared") => {
+                    assert!(before.snapshot.prepared_steps.is_empty());
+                    assert!(before.snapshot.model_ledger.is_empty());
+                }
+                Some("prepared") => {
+                    assert!(!before.snapshot.prepared_steps.is_empty());
+                    assert!(before.snapshot.model_ledger.is_empty());
+                }
+                Some("reserved") => {
+                    assert!(!before.snapshot.prepared_steps.is_empty());
+                    assert_eq!(before.snapshot.model_ledger.len(), 1);
+                    assert!(matches!(
+                        before.snapshot.model_ledger[0].state,
+                        ModelAttemptState::Reserved {}
+                    ));
+                }
+                _ => {}
+            }
             if boundary == Some("terminal") {
                 assert_eq!(before.snapshot.status, RunStatus::Succeeded);
                 let replay = fixture.started(&agent).await;
@@ -464,6 +517,25 @@ fn run_tool_worker(directory: &Path, mode: &str) {
             );
             assert_eq!(outcome.unresolved_effects.len(), usize::from(!known));
             let after = store.load(&scope(), &run_id).await.unwrap();
+            if matches!(
+                boundary,
+                Some("admitted" | "before-prepared" | "prepared" | "reserved")
+            ) {
+                assert_eq!(
+                    after.snapshot.usage.model_calls,
+                    if boundary == Some("reserved") { 3 } else { 2 }
+                );
+                for prepared in &before.snapshot.prepared_steps {
+                    assert!(after.snapshot.prepared_steps.contains(prepared));
+                }
+                if boundary == Some("reserved") {
+                    assert!(matches!(
+                        after.snapshot.model_ledger[0].state,
+                        ModelAttemptState::Interrupted { .. }
+                    ));
+                }
+            }
+
             if boundary.is_none() || matches!(boundary, Some("bound" | "settled")) {
                 assert_eq!(
                     after.snapshot.tool_ledger[1].call.bound_input_ref,
@@ -559,6 +631,94 @@ fn compression_revision_process_boundaries_restore_only_complete_context_without
                 .lines()
                 .count(),
             3
+        );
+        assert!(directory.join("verified").exists());
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+}
+
+#[test]
+fn forced_process_termination_preserves_admission_preparation_and_dispatch_reservations() {
+    let _serial = PROCESS_TESTS.lock().unwrap();
+    for boundary in ["admitted", "before-prepared", "prepared", "reserved"] {
+        let directory = std::env::temp_dir().join(format!(
+            "wickle-prepared-kill-{}",
+            RandomIdSource.next_id().unwrap()
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let status = worker(&directory, &format!("tool-boundary-{boundary}-interrupt"));
+        assert!(!status.success(), "{boundary}");
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::ExitStatusExt;
+            assert_eq!(
+                status.signal(),
+                Some(9),
+                "parent must SIGKILL the paused worker"
+            );
+        }
+        assert_eq!(
+            std::fs::read_to_string(directory.join("calls")).unwrap_or_default(),
+            ""
+        );
+        assert_eq!(
+            std::fs::read_to_string(directory.join("tool-calls")).unwrap_or_default(),
+            ""
+        );
+        assert!(
+            worker(&directory, &format!("tool-boundary-{boundary}-recover")).success(),
+            "{boundary}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(directory.join("tool-calls")).unwrap(),
+            "before\ntarget\nafter\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(directory.join("calls"))
+                .unwrap()
+                .lines()
+                .count(),
+            2
+        );
+        assert!(directory.join("verified").exists());
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+}
+
+#[test]
+fn forced_process_termination_never_half_consumes_an_input_command_or_replays_its_tool() {
+    let _serial = PROCESS_TESTS.lock().unwrap();
+    for boundary in ["wait", "before-command", "accepted-command"] {
+        let directory = std::env::temp_dir().join(format!(
+            "wickle-command-kill-{}",
+            RandomIdSource.next_id().unwrap()
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let status = worker(&directory, &format!("command-{boundary}-interrupt"));
+        assert!(!status.success());
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::ExitStatusExt;
+            assert_eq!(status.signal(), Some(9));
+        }
+        assert_eq!(
+            std::fs::read_to_string(directory.join("tool-calls")).unwrap(),
+            "before\ntarget\n"
+        );
+        assert!(
+            worker(&directory, &format!("command-{boundary}-recover")).success(),
+            "{boundary}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(directory.join("tool-calls")).unwrap(),
+            "before\ntarget\nafter\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(directory.join("calls"))
+                .unwrap()
+                .lines()
+                .count(),
+            2
         );
         assert!(directory.join("verified").exists());
         std::fs::remove_dir_all(directory).unwrap();

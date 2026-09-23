@@ -121,3 +121,27 @@ async fn legacy_terminal_rows_are_read_without_rewrite_then_upgrade_on_new_admis
     assert!(store.read_execution(&scope(), &id("legacy")).await.is_err());
     assert!(store.read_execution(&scope(), &id("new")).await.is_ok());
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn concurrent_conflicting_submissions_keep_only_the_winning_sqlite_snapshot() {
+    let database = support::Database::new();
+    suite::conflicting_submissions_race([
+        Arc::new(SqliteStateStore::open(database.path()).unwrap()),
+        Arc::new(SqliteStateStore::open(database.path()).unwrap()),
+    ])
+    .await;
+    let reopened = SqliteStateStore::open(database.path()).unwrap();
+    let saved = reopened
+        .find_request(&scope(), &id("race-session"), &id("same-key"))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        reopened
+            .load_session(&scope(), &id("race-session"))
+            .await
+            .unwrap()
+            .active_run_id,
+        Some(saved.snapshot.run_id)
+    );
+}

@@ -80,3 +80,8 @@ changing their exact decimal value are rejected with `InvalidArguments` at
 `provider_tool.numeric_precision`. Equivalent exponent/decimal spellings are
 accepted; large integers or high-precision decimals are never silently rounded.
 The historical JSON parser and digest rules remain unchanged.
+
+OpenAI and Azure compiler revision 2 bounds reference-expansion work before building
+intermediate schemas. If that budget is exhausted, fields use their reversible
+JSON text representation. Previously saved compiler-revision-1 contracts still
+restore their own wire schema and codec without invoking revision 2.

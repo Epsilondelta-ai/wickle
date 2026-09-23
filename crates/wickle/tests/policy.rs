@@ -797,12 +797,16 @@ async fn authorized_minimal_views_serialize_only_public_metadata_and_use_distinc
     let context = context(scope());
     let snapshot = snapshot().await;
     snapshot.validate().unwrap();
-    let Guarded::Completed(run) = gate.run_view(&snapshot, &context, None).await.unwrap() else {
+    let Guarded::Completed(run) = gate
+        .run_view(&snapshot, &SystemClock::new(), &context, None)
+        .await
+        .unwrap()
+    else {
         panic!("expected authorized public run view");
     };
     assert_eq!(
         serde_json::to_value(run).unwrap(),
-        json!({"run_id":"run","session_id":"session","status":"failed","phase":"finish","revision":3,
+        json!({"run_id":"run","session_id":"session","status":"failed","phase":"finish","revision":3,"deadline_expired":false,
             "usage":{"model_calls":1,"tool_attempts":0,"repair_attempts":0,"recovery_attempts":0,"elapsed_ms":0}})
     );
     let Guarded::Completed(artifact) = gate
@@ -843,7 +847,7 @@ async fn public_and_protected_views_reject_claimed_scopes_different_from_stored_
     for wrong_scope in wrong_scopes {
         let context = context(wrong_scope);
         assert_eq!(
-            gate.run_view(&snapshot, &context, None)
+            gate.run_view(&snapshot, &SystemClock::new(), &context, None)
                 .await
                 .unwrap_err()
                 .code,
@@ -899,7 +903,9 @@ async fn public_read_permission_does_not_grant_access_to_protected_run_details()
     let context = context(scope());
     let snapshot = snapshot().await;
     assert!(matches!(
-        gate.run_view(&snapshot, &context, None).await.unwrap(),
+        gate.run_view(&snapshot, &SystemClock::new(), &context, None)
+            .await
+            .unwrap(),
         Guarded::Completed(_)
     ));
     assert!(matches!(
@@ -926,5 +932,81 @@ async fn public_read_permission_does_not_grant_access_to_protected_run_details()
     assert_eq!(
         policy.observed.lock().unwrap()[0].request.action,
         PolicyAction::ReadRunDetails {}
+    );
+}
+
+struct ViewClock {
+    calls: AtomicUsize,
+    utc_ms: Option<i64>,
+}
+impl Clock for ViewClock {
+    fn now(&self) -> Result<ClockReading, ContractError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        self.utc_ms
+            .map(|utc_ms| ClockReading {
+                utc_ms,
+                monotonic_ms: 0,
+            })
+            .ok_or_else(|| ContractError::new(ErrorCode::ClockUnavailable, "fixture.clock"))
+    }
+    fn sleep_until<'a>(&'a self, _: u64) -> PortFuture<'a, ()> {
+        Box::pin(pending())
+    }
+}
+#[tokio::test]
+async fn run_view_reads_clock_only_after_authorization_and_never_hides_clock_errors() {
+    let mut snapshot = snapshot().await;
+    let clock = ViewClock {
+        calls: AtomicUsize::new(0),
+        utc_ms: None,
+    };
+    let allowed = HostPolicy::new(Behavior::Decision(PolicyDecision::Allow {})).gate();
+    let terminal = match allowed
+        .run_view(&snapshot, &clock, &context(scope()), None)
+        .await
+        .unwrap()
+    {
+        Guarded::Completed(view) => view,
+        _ => panic!("unexpected approval"),
+    };
+    assert!(!terminal.deadline_expired);
+    assert_eq!(clock.calls.load(Ordering::SeqCst), 0);
+    snapshot.status = RunStatus::Running;
+    snapshot.phase = RunPhase::Prepare;
+    snapshot.outcome = None;
+    snapshot.validate().unwrap();
+    let denied = HostPolicy::new(Behavior::Decision(PolicyDecision::Deny {
+        reason: id("revoked"),
+    }))
+    .gate();
+    assert_eq!(
+        denied
+            .run_view(&snapshot, &clock, &context(scope()), None)
+            .await
+            .unwrap_err()
+            .code,
+        ErrorCode::AccessDenied
+    );
+    assert_eq!(clock.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        allowed
+            .run_view(&snapshot, &clock, &context(scope()), None)
+            .await
+            .unwrap_err()
+            .code,
+        ErrorCode::ClockUnavailable
+    );
+    assert_eq!(clock.calls.load(Ordering::SeqCst), 1);
+    let regressed = ViewClock {
+        calls: AtomicUsize::new(0),
+        utc_ms: Some(snapshot.timing.last_observed_at_ms - 1),
+    };
+    assert_eq!(
+        allowed
+            .run_view(&snapshot, &regressed, &context(scope()), None)
+            .await
+            .unwrap_err()
+            .code,
+        ErrorCode::ClockRegression
     );
 }

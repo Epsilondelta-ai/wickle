@@ -5,6 +5,16 @@ use wickle_state_sqlite::SqliteStateStore;
 pub struct CrashStore {
     pub inner: Arc<SqliteStateStore>,
     pub boundary: String,
+    pub kill_marker: Option<std::path::PathBuf>,
+}
+impl CrashStore {
+    async fn stop(&self, code: i32) -> ! {
+        if let Some(marker) = &self.kill_marker {
+            std::fs::write(marker, b"ready\n").unwrap();
+            std::future::pending::<()>().await;
+        }
+        std::process::exit(code)
+    }
 }
 impl StateStore for CrashStore {
     fn capabilities(&self) -> StateStoreCapabilities {
@@ -23,7 +33,13 @@ impl StateStore for CrashStore {
         scope: &'a Scope,
         input: AdmissionInput,
     ) -> PortFuture<'a, AdmissionResult> {
-        self.inner.admit(scope, input)
+        Box::pin(async move {
+            let result = self.inner.admit(scope, input).await?;
+            if self.boundary == "admitted" {
+                self.stop(75).await;
+            }
+            Ok(result)
+        })
     }
     fn load<'a>(&'a self, scope: &'a Scope, run_id: &'a Id) -> PortFuture<'a, StoredRun> {
         self.inner.load(scope, run_id)
@@ -81,6 +97,11 @@ impl StateStore for CrashStore {
         input: CommitInput,
     ) -> PortFuture<'a, StoredRun> {
         Box::pin(async move {
+            let prepared =
+                !input.snapshot.prepared_steps.is_empty() && input.snapshot.model_ledger.is_empty();
+            if self.boundary == "before-prepared" && prepared {
+                self.stop(75).await;
+            }
             let planned = input
                 .events
                 .iter()
@@ -96,6 +117,13 @@ impl StateStore for CrashStore {
                 std::process::exit(76);
             }
             let stop = match self.boundary.as_str() {
+                "wait" => input.snapshot.status == RunStatus::Waiting,
+                "prepared" => prepared,
+                "reserved" => input
+                    .snapshot
+                    .model_ledger
+                    .iter()
+                    .any(|entry| matches!(entry.state, ModelAttemptState::Reserved {})),
                 "context" => rewritten,
                 "plan" => planned,
                 "bound" => input.snapshot.tool_ledger.iter().any(|entry| {
@@ -112,7 +140,8 @@ impl StateStore for CrashStore {
             };
             let result = self.inner.commit(scope, run_id, input).await?;
             if stop {
-                std::process::exit(if self.boundary == "context" { 76 } else { 75 });
+                self.stop(if self.boundary == "context" { 76 } else { 75 })
+                    .await;
             }
             Ok(result)
         })
@@ -171,6 +200,16 @@ impl wickle::ExecutionTransactions for CrashStore {
         scope: &'a wickle::Scope,
         request: wickle::BeginSegmentRequest,
     ) -> wickle::PortFuture<'a, wickle::BeginSegmentResult> {
-        self.inner.begin_segment(scope, request)
+        Box::pin(async move {
+            let answer = matches!(&request.start, SegmentStart::Resume(command) if matches!(command.action, ResumeAction::Input { .. }));
+            if answer && self.boundary == "before-command" {
+                self.stop(75).await;
+            }
+            let result = self.inner.begin_segment(scope, request).await?;
+            if answer && self.boundary == "accepted-command" {
+                self.stop(75).await;
+            }
+            Ok(result)
+        })
     }
 }

@@ -820,3 +820,73 @@ async fn oversized_native_enum_uses_reversible_text_without_losing_original_vali
         true
     );
 }
+
+#[tokio::test]
+async fn shared_reference_work_budget_falls_back_without_losing_canonical_values() {
+    let server = Server::new(vec![]).await;
+    let connection = connection(&server);
+    let request = request(&connection, "model");
+    let mut defs = serde_json::Map::new();
+    defs.insert("level3".into(),json!({"type":"string","minLength":1,"description":"A leaf selected from a shared reference graph"}));
+    let mut value = json!("selected");
+    for level in (0..3).rev() {
+        let properties: serde_json::Map<String, Value> = (0..5)
+            .map(|index| {
+                (
+                    format!("branch{index}"),
+                    json!({"$ref":format!("#/$defs/level{}",level+1)}),
+                )
+            })
+            .collect();
+        let required: Vec<_> = properties.keys().cloned().collect();
+        defs.insert(format!("level{level}"),json!({"type":"object","properties":properties,"required":required,"additionalProperties":false}));
+        value = Value::Object(
+            (0..5)
+                .map(|index| (format!("branch{index}"), value.clone()))
+                .collect(),
+        );
+    }
+    let canonical = compiled_input(
+        json!({"type":"object","properties":{"a":{"$ref":"#/$defs/level0"},"b":{"$ref":"#/$defs/level0"}},"required":["a","b"],"additionalProperties":false,"if":{"required":["a"]},"then":{"required":["b"]},"$defs":defs}),
+    );
+    let contract = CompiledToolContract::compile(
+        &canonical,
+        ProviderToolTarget::for_route(&request.route),
+        &wickle_model_responses::ResponsesToolSchemaCompiler,
+        Default::default(),
+    )
+    .unwrap();
+    // Each field alone fits native limits. Expansion work across both fields must
+    // share one budget rather than reset at each reference or top-level property.
+    assert_eq!(
+        contract.wire_tool().model_input_schema["properties"]["a"]["type"],
+        "object"
+    );
+    assert_eq!(
+        contract.wire_tool().model_input_schema["properties"]["b"]["type"],
+        "string"
+    );
+    let values = JsonObject::from([("a".into(), value.clone()), ("b".into(), value)]);
+    canonical.validate_model_inputs(&values).unwrap();
+    let encoded = contract.encode_arguments(&values).unwrap();
+    assert!(encoded["b"].is_string());
+    assert_eq!(
+        contract
+            .decode_arguments(
+                &serde_json::to_string(&encoded).unwrap(),
+                Default::default()
+            )
+            .unwrap(),
+        values
+    );
+    let mut invalid = values;
+    invalid.get_mut("b").unwrap()["branch0"]["branch0"]["branch0"] = json!(7);
+    let encoded = contract.encode_arguments(&invalid).unwrap();
+    let decoded = contract
+        .decode_arguments(
+            &serde_json::to_string(&encoded).unwrap(),
+            Default::default(),
+        )
+        .unwrap();
+    assert!(canonical.validate_model_inputs(&decoded).is_err());
+}

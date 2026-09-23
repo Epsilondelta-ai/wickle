@@ -19,6 +19,9 @@ pub struct RunView {
     pub phase: RunPhase,
     /// Snapshot revision.
     pub revision: u64,
+    /// Whether the original Run deadline has elapsed while this Run is nonterminal.
+    /// This observation does not expire the Run or advance its saved usage.
+    pub deadline_expired: bool,
     /// Saved usage, not inferred provider consumption.
     pub usage: BudgetUsage,
 }
@@ -58,6 +61,7 @@ impl PolicyGate {
     pub async fn run_view(
         &self,
         snapshot: &RunSnapshot,
+        clock: &dyn crate::Clock,
         context: &ExecutionContext,
         deadline: Option<Instant>,
     ) -> Result<Guarded<RunView>, ContractError> {
@@ -67,6 +71,18 @@ impl PolicyGate {
             action: PolicyAction::ReadRun {},
         };
         self.guard(&request, context, deadline, None, || async {
+            let deadline_expired = if snapshot.status.is_terminal() {
+                false
+            } else {
+                let now = clock.now()?.utc_ms;
+                if now < snapshot.timing.last_observed_at_ms {
+                    return Err(ContractError::new(
+                        crate::ErrorCode::ClockRegression,
+                        "views.run_clock",
+                    ));
+                }
+                now >= snapshot.timing.deadline_at_ms
+            };
             Ok(RunView {
                 run_id: snapshot.run_id.clone(),
                 session_id: snapshot.request.session_id.clone(),
@@ -74,6 +90,7 @@ impl PolicyGate {
                 phase: snapshot.phase,
                 revision: snapshot.revision,
                 usage: snapshot.usage.clone(),
+                deadline_expired,
             })
         })
         .await

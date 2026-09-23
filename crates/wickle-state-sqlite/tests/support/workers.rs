@@ -98,6 +98,21 @@ pub fn run() {
     let ready = Path::new(config["ready"].as_str().unwrap());
     let actor = config["actor"].as_str().unwrap();
     let mode = config["mode"].as_str().unwrap();
+    if mode == "uncommitted-upgrade" {
+        let connection = rusqlite::Connection::open(database).unwrap();
+        let image = &config["details"]["image"];
+        connection.execute_batch("BEGIN IMMEDIATE").unwrap();
+        connection
+            .execute(
+                "UPDATE wickle_scope_checkpoints SET checkpoint_json=?1,checksum=?2",
+                rusqlite::params![image.to_string(), canonical_digest(image).as_str()],
+            )
+            .unwrap();
+        signal(ready);
+        loop {
+            std::thread::park();
+        }
+    }
     if mode == "uncommitted" {
         let connection = rusqlite::Connection::open(database).unwrap();
         connection.execute_batch("BEGIN IMMEDIATE; UPDATE wickle_scope_checkpoints SET checkpoint_json='uncommitted invalid image', checksum='uncommitted';").unwrap();

@@ -151,3 +151,9 @@ async fn version_two_cannot_silently_reclassify_new_terminal_runs_as_legacy() {
             .is_err()
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn concurrent_conflicting_submissions_keep_only_the_winning_request_snapshot() {
+    let store: Arc<dyn StateStore> = Arc::new(MemoryStateStore::new());
+    suite::conflicting_submissions_race([store.clone(), store]).await;
+}

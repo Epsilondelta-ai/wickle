@@ -552,3 +552,86 @@ async fn denied_worker_processing_and_receipt_reads_leave_the_pending_command_un
     );
     assert_eq!(fixture.tools[1].calls.load(Ordering::SeqCst), 0);
 }
+
+#[tokio::test(start_paused = true)]
+async fn idle_deadline_observation_does_not_settle_waits_or_change_saved_state() {
+    let mut fixture = Fixture::new(Mode::Approval);
+    fixture.profile.limits.max_elapsed_ms = 100.try_into().unwrap();
+    let agent = fixture.agent();
+    let handle = fixture.started(&agent).await;
+    let waiting = fixture.outcome(&handle).await;
+    let before = fixture.base.store.export_checkpoint(&scope()).unwrap();
+    let usage = fixture.saved(&handle).await.snapshot.usage;
+    assert!(!completed(agent.get_run(handle.run_id(), &context()).await.unwrap()).deadline_expired);
+    let saved = fixture.saved(&handle).await;
+    let remaining =
+        (saved.snapshot.timing.deadline_at_ms - fixture.base.clock.now().unwrap().utc_ms) as u64;
+    tokio::time::advance(Duration::from_millis(remaining - 1)).await;
+    assert!(!completed(agent.get_run(handle.run_id(), &context()).await.unwrap()).deadline_expired);
+    tokio::time::advance(Duration::from_millis(1)).await;
+    for _ in 0..2 {
+        let view = completed(agent.get_run(handle.run_id(), &context()).await.unwrap());
+        assert_eq!(view.status, RunStatus::Waiting);
+        assert!(view.deadline_expired);
+        assert_eq!(view.usage, usage);
+    }
+    assert_eq!(
+        fixture
+            .base
+            .store
+            .export_checkpoint(&scope())
+            .unwrap()
+            .digest(),
+        before.digest()
+    );
+    assert_eq!(fixture.outcome(&handle).await, waiting);
+    assert_eq!(fixture.model.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(fixture.tools[1].calls.load(Ordering::SeqCst), 0);
+    completed(
+        agent
+            .submit_control_command(
+                handle.run_id().clone(),
+                command("expire-observed", ControlAction::Expire),
+                context(),
+            )
+            .await
+            .unwrap(),
+    );
+    let view = completed(agent.get_run(handle.run_id(), &context()).await.unwrap());
+    assert_eq!(view.status, RunStatus::Exhausted);
+    assert!(!view.deadline_expired);
+}
+
+#[tokio::test(start_paused = true)]
+async fn interrupted_deadline_observation_is_read_only_at_the_original_deadline() {
+    let fixture = agent_support::Fixture::new(agent_support::Response::Text, true);
+    let mut profile = agent_support::profile();
+    profile.limits.max_elapsed_ms = 100.try_into().unwrap();
+    let agent = create_agent(profile, fixture.bindings()).unwrap();
+    let handle = fixture.started(&agent, "request").await;
+    fixture.model.entered.notified().await;
+    completed(
+        handle
+            .stop_execution(InterruptionCause::HostShutdown, &context())
+            .await
+            .unwrap(),
+    );
+    let interrupted = completed(handle.outcome(&context()).await.unwrap());
+    let before = fixture.store.export_checkpoint(&scope()).unwrap();
+    let saved = fixture.store.load(&scope(), handle.run_id()).await.unwrap();
+    let remaining =
+        (saved.snapshot.timing.deadline_at_ms - fixture.clock.now().unwrap().utc_ms) as u64;
+    tokio::time::advance(Duration::from_millis(remaining)).await;
+    let view = completed(agent.get_run(handle.run_id(), &context()).await.unwrap());
+    assert_eq!(view.status, RunStatus::Interrupted);
+    assert!(view.deadline_expired);
+    assert_eq!(
+        fixture.store.export_checkpoint(&scope()).unwrap().digest(),
+        before.digest()
+    );
+    assert_eq!(
+        completed(handle.outcome(&context()).await.unwrap()),
+        interrupted
+    );
+    assert_eq!(fixture.model.calls.load(Ordering::SeqCst), 1);
+}
