@@ -21,14 +21,19 @@ The default API version is `v1`; `v1beta` is an explicit Host choice. Both use S
 
 The public `protocol` module also supplies shared wire primitives for the [Vertex AI adapter](vertex.md). Pair `encode_vertex_request` with `GenerateContentDecoder::for_vertex` for Vertex's JSON function schemas, structured output format and complete function-call metadata. The direct Gemini adapter uses `encode_request` and `GenerateContentDecoder::new`; its API-version rules remain as follows.
 
+The core obtains a versioned `GeminiToolSchemaCompiler` from the model port. It preserves supported input constraints and supplies canonical text constraints for validation that cannot be expressed natively. Only model-owned parameters enter this contract; system inputs are bound by the core after validation.
+
 | Declaration | `v1` | `v1beta` |
 | --- | --- | --- |
 | Function input | `parameters` using OpenAPI Schema | `parametersJsonSchema` |
-| Closed object (`additionalProperties: false`) | Rejected before HTTP | Preserved |
-| Numeric enum | Rejected before HTTP | Preserved |
-| Structured text output | `responseJsonSchema` and JSON MIME type | Same |
+| Closed objects | Enforced by the core; described in additional constraints | Also represented natively |
+| Numeric enum | Described in additional constraints and validated by the core | Also represented natively |
+| Unrepresentable object or tuple field | Reversible JSON text field | Reversible JSON text field when needed |
+| No exposed parameters | No parameter declaration | No parameter declaration |
 
-The adapter supports a conservative schema subset: type, properties, required, items, anyOf, enum, description, title, minimum/maximum, minItems/maxItems and format. JSON Schema additionally supports additionalProperties. Unsupported keywords are rejected instead of removed; OpenAPI additionally requires representable types and string enums. Wickle's usual closed Tool input schema therefore requires the JSON Schema declaration path. Configure the catalog's capabilities for the selected API and schema. No automatic version switch occurs.
+Optional fields remain optional and explicit null remains distinct from absence. Supported bounds, patterns and finite local references are preserved; reference expansion has depth, node and byte limits. Unsupported constraints remain in the original contract and its additional text. A complete but invalid call produces repair feedback without executing the Tool. No automatic API-version switch occurs.
+
+Direct protocol consumers must supply compiled tools and their additional context fragments, decode arguments using the saved contract, and validate against the original Tool schema. The encoder alone does not perform this core pipeline. `protocol::encode_request` and `encode_vertex_request` return serialized JSON bytes so invalid numeric tokens in signed replay data remain exact; send these bytes as the HTTP body without serializing them again.
 
 `ModelOutput::JsonSchema` requests native structured output. Model-specific combinations of tools and structured output must be enabled through the catalog only when supported by that model. The core still validates arguments before Tool execution and verifies final output separately.
 
@@ -38,7 +43,7 @@ Logical `thinking_level` maps to `thinkingConfig.thinkingLevel`; `thinking_budge
 
 System messages become `systemInstruction`. Tool declarations contain only the projected model input schema. Standard function calls become proposals for the core's Tool boundary; native code execution, search and other service tools are not enabled.
 
-Signed parts, including thought signatures attached to text or function calls, are retained in an opaque continuation bound to the exact route. Thought text is excluded from visible answer deltas. The adapter verifies visible text and calls against the stored parts before replay. It neither merges signed parts nor invents signatures.
+Signed parts, including thought signatures attached to text or function calls, are retained in an opaque continuation bound to the exact route. Thought text is excluded from visible answer deltas. The adapter verifies visible text and calls against the stored parts before replay. It neither merges signed parts nor invents signatures. Complete calls with invalid argument shapes, duplicate keys or nonrepresentable numeric tokens retain their original signed part as protected raw JSON. Repair requests replay that part exactly, including after protected serialization; malformed outer envelopes still fail as protocol errors.
 
 When a response omits a function call ID, the adapter assigns a local projection ID. That ID pairs core calls with results and is not injected into the provider's original signed parts or functionResponse. Parallel results are emitted in original call order, including results delivered as separate Tool messages, so same-name calls without wire IDs remain associated correctly.
 

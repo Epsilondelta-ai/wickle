@@ -184,8 +184,11 @@ async fn parallel_calls_replay_signatures_without_inventing_wire_ids() {
     assert_eq!(server.requests.lock().unwrap().len(), 2);
 }
 #[tokio::test]
-async fn stable_schema_cannot_silently_drop_closed_object_constraints() {
-    let server = Server::new(vec![]).await;
+async fn stable_serialization_relaxes_closure_but_direct_collection_still_rejects_extra_arguments()
+{
+    let mut data = tool_events();
+    data[0]["candidates"][0]["content"]["parts"][0]["functionCall"]["args"]["extra"] = json!(true);
+    let server = Server::new(vec![reply(&data)]).await;
     let connection = GeminiConnection::new(
         scope(),
         reference("account"),
@@ -199,35 +202,34 @@ async fn stable_schema_cannot_silently_drop_closed_object_constraints() {
     let mut request = request(&connection, MODEL);
     tool(&mut request);
     let model = GeminiModel::new(connection);
-    let failure = collect_model_response(&request, model.generate(&request, &context(&request)))
+    let response = collect_model_response(&request, model.generate(&request, &context(&request)))
         .await
-        .unwrap_err();
-    assert_eq!(failure.kind, ModelFailureKind::Unsupported);
-    assert!(server.requests.lock().unwrap().is_empty());
-    request.tools[0]
-        .model_input_schema
-        .as_object_mut()
-        .unwrap()
-        .remove("additionalProperties");
+        .unwrap();
+    assert_eq!(
+        response.tool_calls[0].validation,
+        ToolCallValidation::InvalidArguments
+    );
+    assert!(server.requests.lock().unwrap()[0].body["tools"][0]["functionDeclarations"][0]["parameters"].get("additionalProperties").is_none());
     request.tools[0].model_input_schema["properties"]["query"]["enum"] = json!(["alpha", "beta"]);
-    let encoded =
-        protocol::encode_request(&request, protocol::FunctionSchemaFormat::OpenApi).unwrap();
+    let encoded: Value = serde_json::from_slice(
+        &protocol::encode_request(&request, protocol::FunctionSchemaFormat::OpenApi).unwrap(),
+    )
+    .unwrap();
     assert_eq!(
         encoded["tools"][0]["functionDeclarations"][0]["parameters"]["type"],
         "OBJECT"
     );
     assert_eq!(
-        encoded["tools"][0]["functionDeclarations"][0]["parameters"]["properties"]["query"]["type"],
-        "STRING"
+        encoded["tools"][0]["functionDeclarations"][0]["parameters"]["properties"]["query"]["enum"],
+        json!(["alpha", "beta"])
     );
+    // Direct callers bypassing the compiler must still provide a supported representation.
     request.tools[0].model_input_schema =
         json!({"type":"object","properties":{"choice":{"type":"integer","enum":[1,2]}}});
-    let failure = collect_model_response(&request, model.generate(&request, &context(&request)))
-        .await
-        .unwrap_err();
-    assert_eq!(failure.kind, ModelFailureKind::Unsupported);
-    assert!(server.requests.lock().unwrap().is_empty());
+    assert!(protocol::encode_request(&request, protocol::FunctionSchemaFormat::OpenApi).is_err());
+    assert_eq!(server.requests.lock().unwrap().len(), 1);
 }
+
 #[tokio::test]
 async fn unsupported_options_scope_and_route_fail_before_network() {
     for case in [
@@ -669,4 +671,473 @@ async fn two_documented_release_ids_keep_path_and_reported_revision_separate() {
                 .contains(&format!("/models/{release}:streamGenerateContent"))
         );
     }
+}
+
+fn compiled_input(schema: Value) -> CompiledTool {
+    let parameters = schema["properties"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .cloned()
+        .collect();
+    SchemaCompiler::new()
+        .compile(
+            ToolDescriptor {
+                tool: reference("lookup"),
+                name: id("lookup"),
+                description: "Read an authorized record".into(),
+                input_schema: schema,
+                agent_parameters: parameters,
+                system_bindings: None,
+                output_schema: json!({"type":"string"}),
+                side_effect: ToolSideEffect::ReadOnly,
+                concurrency: ToolConcurrency::Serial,
+                retry: ToolRetryPolicy::Never,
+                reconcile: false,
+                max_output_bytes: 4096.try_into().unwrap(),
+            },
+            &SystemInputRegistry::new(vec![]).unwrap(),
+        )
+        .unwrap()
+}
+
+#[tokio::test]
+async fn compiled_dialects_preserve_native_constraints_and_keep_relaxed_rules_authoritative() {
+    for version in ["v1", "v1beta"] {
+        let server = Server::new(vec![reply(&events("done"))]).await;
+        let connection = GeminiConnection::new(
+            scope(),
+            reference("account"),
+            "fixture",
+            GeminiOptions {
+                base_url: server.base.trim_end_matches("v1/").into(),
+                api_version: version.into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let model = GeminiModel::new(connection.clone());
+        let mut request = request(&connection, MODEL);
+        let original = compiled_input(json!({"type":"object","properties":{
+            "query":{"type":"string","pattern":"^[a-z]+$","minLength":2},
+            "limit":{"type":"integer","minimum":1,"maximum":10,"default":1},
+            "note":{"type":["string","null"],"enum":["brief",null]},
+            "choice":{"type":"integer","enum":[1,2]}
+        },"required":["query"],"additionalProperties":false,"if":{"properties":{"query":{"const":"latest"}}},"then":{"properties":{"limit":{"minimum":8}}}}));
+        let contract = CompiledToolContract::compile(
+            &original,
+            ProviderToolTarget::for_route(&request.route),
+            model.tool_schema_compiler().as_ref(),
+            Default::default(),
+        )
+        .unwrap();
+        assert!(
+            contract
+                .enforcement()
+                .iter()
+                .any(|rule| rule.canonical_pointer == "/additionalProperties"
+                    && rule.core
+                    && rule.context_text
+                    && !rule.provider_native)
+        );
+        assert!(
+            contract
+                .enforcement()
+                .iter()
+                .any(|rule| rule.canonical_pointer == "/if" && rule.core && rule.context_text)
+        );
+        for canonical in [
+            JsonObject::from([("query".into(), json!("alpha"))]),
+            JsonObject::from([
+                ("query".into(), json!("alpha")),
+                ("note".into(), Value::Null),
+            ]),
+        ] {
+            let wire = contract.encode_arguments(&canonical).unwrap();
+            assert_eq!(
+                contract
+                    .decode_arguments(&serde_json::to_string(&wire).unwrap(), Default::default())
+                    .unwrap(),
+                canonical
+            );
+        }
+        let invalid = contract
+            .decode_arguments(r#"{"query":"latest","limit":7}"#, Default::default())
+            .unwrap();
+        assert!(original.validate_model_inputs(&invalid).is_err());
+        let canonical = JsonObject::from([
+            ("query".into(), json!("latest")),
+            ("limit".into(), json!(8)),
+            ("note".into(), Value::Null),
+            ("choice".into(), json!(2)),
+        ]);
+        original.validate_model_inputs(&canonical).unwrap();
+        request.tools = vec![contract.wire_tool().clone()];
+        for fragment in contract.constraint_fragments() {
+            request.messages[0].content.push(ModelContent::Text {
+                text: fragment.text.clone(),
+            });
+        }
+        collect_model_response(&request, model.generate(&request, &context(&request)))
+            .await
+            .unwrap();
+        let requests = server.requests.lock().unwrap();
+        let declaration = &requests[0].body["tools"][0]["functionDeclarations"][0];
+        let wire = &declaration[if version == "v1" {
+            "parameters"
+        } else {
+            "parametersJsonSchema"
+        }];
+        assert_eq!(wire["properties"]["query"]["pattern"], "^[a-z]+$");
+        assert_eq!(
+            wire["properties"]["query"]["minLength"],
+            if version == "v1" {
+                json!("2")
+            } else {
+                json!(2)
+            }
+        );
+        assert_eq!(wire["properties"]["limit"]["minimum"], 1);
+        assert_eq!(wire["properties"]["limit"]["maximum"], 10);
+        let note = &wire["properties"]["note"]["anyOf"];
+        assert_eq!(note[0]["enum"], json!(["brief"]));
+        assert_eq!(
+            note[1]["type"],
+            if version == "v1" {
+                json!("NULL")
+            } else {
+                json!("null")
+            }
+        );
+        if version == "v1" {
+            assert!(wire.get("additionalProperties").is_none());
+            assert_eq!(wire["properties"]["choice"]["type"], "INTEGER");
+            assert!(wire["properties"]["choice"].get("enum").is_none());
+            assert!(declaration.get("parametersJsonSchema").is_none());
+        } else {
+            assert_eq!(wire["additionalProperties"], false);
+            assert_eq!(wire["properties"]["choice"]["enum"], json!([1, 2]));
+            assert!(declaration.get("parameters").is_none());
+        }
+    }
+}
+
+#[tokio::test]
+async fn openapi_free_form_values_use_json_text_and_parameterless_tools_omit_parameters() {
+    let server = Server::new(vec![]).await;
+    let connection = GeminiConnection::new(
+        scope(),
+        reference("account"),
+        "fixture",
+        GeminiOptions {
+            base_url: server.base.trim_end_matches("v1/").into(),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let model = GeminiModel::new(connection.clone());
+    let request = request(&connection, MODEL);
+    let original = compiled_input(
+        json!({"type":"object","properties":{"metadata":{"type":"object","additionalProperties":true},"tuple":{"type":"array","prefixItems":[{"type":"string"}],"items":false}},"required":[],"additionalProperties":false}),
+    );
+    let contract = CompiledToolContract::compile(
+        &original,
+        ProviderToolTarget::for_route(&request.route),
+        model.tool_schema_compiler().as_ref(),
+        Default::default(),
+    )
+    .unwrap();
+    for value in [
+        JsonObject::new(),
+        JsonObject::from([
+            ("metadata".into(), json!({"key":"value"})),
+            ("tuple".into(), json!(["first"])),
+        ]),
+    ] {
+        let encoded = contract.encode_arguments(&value).unwrap();
+        assert_eq!(
+            contract
+                .decode_arguments(
+                    &serde_json::to_string(&encoded).unwrap(),
+                    Default::default()
+                )
+                .unwrap(),
+            value
+        );
+    }
+    let original = compiled_input(
+        json!({"type":"object","properties":{},"required":[],"additionalProperties":false}),
+    );
+    let contract = CompiledToolContract::compile(
+        &original,
+        ProviderToolTarget::for_route(&request.route),
+        model.tool_schema_compiler().as_ref(),
+        Default::default(),
+    )
+    .unwrap();
+    let mut request = request;
+    request.tools = vec![contract.wire_tool().clone()];
+    let body: Value = serde_json::from_slice(
+        &protocol::encode_request(&request, protocol::FunctionSchemaFormat::OpenApi).unwrap(),
+    )
+    .unwrap();
+    assert!(
+        body["tools"][0]["functionDeclarations"][0]
+            .get("parameters")
+            .is_none()
+    );
+    assert!(
+        original
+            .validate_model_inputs(&JsonObject::from([("extra".into(), json!(true))]))
+            .is_err()
+    );
+}
+
+fn raw_content_part(body: &str, content: usize, part: usize) -> String {
+    type Raw<'a> = std::collections::BTreeMap<String, &'a serde_json::value::RawValue>;
+    let body: Raw<'_> = serde_json::from_str(body).unwrap();
+    let contents: Vec<&serde_json::value::RawValue> =
+        serde_json::from_str(body["contents"].get()).unwrap();
+    let content: Raw<'_> = serde_json::from_str(contents[content].get()).unwrap();
+    let parts: Vec<&serde_json::value::RawValue> =
+        serde_json::from_str(content["parts"].get()).unwrap();
+    parts[part].get().into()
+}
+
+#[tokio::test]
+async fn rejected_numeric_tokens_and_signed_parts_survive_exact_request_byte_replay() {
+    let original = r#"{"functionCall": {"name":"lookup","args":{"query":0.12345678901234567890123456789}},"thoughtSignature":"signed-call"}"#;
+    let mut data = tool_events();
+    data[0]["candidates"][0]["content"]["parts"][1]["functionCall"]["args"]["query"] = json!(1);
+    let part = data[0]["candidates"][0]["content"]["parts"][0].to_string();
+    let mut response = reply(&data);
+    response.body = String::from_utf8(response.body)
+        .unwrap()
+        .replace(&part, original)
+        .into_bytes();
+    let server = Server::new(vec![response, reply(&events("done"))]).await;
+    let connection = connection(&server);
+    let model = GeminiModel::new(connection.clone());
+    let mut request = request(&connection, MODEL);
+    tool(&mut request);
+    request.tools[0].model_input_schema["properties"]["query"] = json!({"type":"number"});
+    let first = collect_model_response(&request, model.generate(&request, &context(&request)))
+        .await
+        .unwrap();
+    assert_eq!(
+        first.tool_calls[0].raw_arguments.as_deref(),
+        Some(r#"{"query":0.12345678901234567890123456789}"#)
+    );
+    assert_eq!(
+        first.tool_calls[0].validation,
+        ToolCallValidation::InvalidArguments
+    );
+    assert_eq!(first.tool_calls[1].validation, ToolCallValidation::Valid);
+    let mut content: Vec<_> = first
+        .tool_calls
+        .iter()
+        .map(|call| ModelContent::ToolCall {
+            provider_call_id: call.provider_call_id.clone(),
+            name: call.name.clone(),
+            arguments: call.model_inputs.clone(),
+        })
+        .collect();
+    content.push(ModelContent::Opaque {
+        continuation: first.continuation[0].clone(),
+    });
+    request.messages.push(ModelMessage {
+        role: ModelRole::Assistant,
+        content,
+    });
+    request.messages.push(ModelMessage {
+        role: ModelRole::Tool,
+        content: first
+            .tool_calls
+            .iter()
+            .map(|call| ModelContent::ToolResult {
+                provider_call_id: call.provider_call_id.clone(),
+                content: json!({"error":"repair input"}),
+            })
+            .collect(),
+    });
+    request.request_id = id("next");
+    // Prepared requests cross this protected JSON boundary before retry/recovery.
+    let stored = serde_json::to_vec(&request).unwrap();
+    let mut request: ModelRequest = serde_json::from_slice(&stored).unwrap();
+    collect_model_response(&request, model.generate(&request, &context(&request)))
+        .await
+        .unwrap();
+    let calls = server.requests.lock().unwrap();
+    assert_eq!(raw_content_part(&calls[1].raw_body, 1, 0), original);
+    assert!(
+        calls[1].body["contents"][2]["parts"][0]["functionResponse"]
+            .get("id")
+            .is_none()
+    );
+    assert_eq!(
+        calls[1].body["contents"][2]["parts"][1]["functionResponse"]["id"],
+        "provider-call"
+    );
+    drop(calls);
+    for mode in ["signature", "valid-raw", "extra-index", "extra-key"] {
+        let mut data = first.continuation[0].data().clone();
+        match mode {
+            "signature" => data["parts"][0]["thoughtSignature"] = json!("tampered"),
+            "valid-raw" => {
+                data["raw_parts"]["0"] = json!(
+                    r#"{"functionCall":{"name":"lookup","args":{}},"thoughtSignature":"signed-call"}"#
+                )
+            }
+            "extra-index" => data["raw_parts"]["99"] = json!(original),
+            _ => data["extra"] = json!(true),
+        }
+        let last = request.messages[1].content.len() - 1;
+        request.messages[1].content[last] = ModelContent::Opaque {
+            continuation: OpaqueContinuation::new(&request.route, data),
+        };
+        assert!(
+            protocol::encode_request(&request, protocol::FunctionSchemaFormat::JsonSchema).is_err(),
+            "{mode}"
+        );
+    }
+    assert_eq!(server.requests.lock().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn root_constraints_and_reference_siblings_survive_projection_without_overwriting_intersections()
+ {
+    let server = Server::new(vec![reply(&events("done"))]).await;
+    let connection = GeminiConnection::new(
+        scope(),
+        reference("account"),
+        "fixture",
+        GeminiOptions {
+            base_url: server.base.trim_end_matches("v1/").into(),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let model = GeminiModel::new(connection.clone());
+    let mut request = request(&connection, MODEL);
+    let original = compiled_input(json!({"type":"object","properties":{
+        "query":{"$ref":"#/$defs/text","maxLength":20},
+        "limit":{"$ref":"#/$defs/number","minimum":3,"maximum":8},
+        "conflict":{"$ref":"#/$defs/text","pattern":"z$"}
+    },"required":["query"],"additionalProperties":false,"minProperties":2,"maxProperties":3,"title":"Bounded inputs","$defs":{"text":{"type":"string","pattern":"^[a-z]+$"},"number":{"type":"integer","minimum":1,"maximum":10}}}));
+    let contract = CompiledToolContract::compile(
+        &original,
+        ProviderToolTarget::for_route(&request.route),
+        model.tool_schema_compiler().as_ref(),
+        Default::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        contract.wire_tool().model_input_schema["properties"]["query"]["pattern"],
+        "^[a-z]+$"
+    );
+    assert_eq!(
+        contract.wire_tool().model_input_schema["properties"]["query"]["maxLength"],
+        20
+    );
+    assert_eq!(
+        contract.wire_tool().model_input_schema["properties"]["limit"]["minimum"],
+        3
+    );
+    assert_eq!(
+        contract.wire_tool().model_input_schema["properties"]["limit"]["maximum"],
+        8
+    );
+    let canonical = JsonObject::from([
+        ("query".into(), json!("alpha")),
+        ("conflict".into(), json!("az")),
+    ]);
+    let encoded = contract.encode_arguments(&canonical).unwrap();
+    assert_eq!(encoded["conflict"], json!("\"az\""));
+    assert_eq!(
+        contract
+            .decode_arguments(
+                &serde_json::to_string(&encoded).unwrap(),
+                Default::default()
+            )
+            .unwrap(),
+        canonical
+    );
+    assert!(
+        original
+            .validate_model_inputs(&JsonObject::from([("query".into(), json!("alpha"))]))
+            .is_err()
+    );
+    request.tools = vec![contract.wire_tool().clone()];
+    collect_model_response(&request, model.generate(&request, &context(&request)))
+        .await
+        .unwrap();
+    let requests = server.requests.lock().unwrap();
+    let schema = &requests[0].body["tools"][0]["functionDeclarations"][0]["parameters"];
+    assert_eq!(schema["minProperties"], "2");
+    assert_eq!(schema["maxProperties"], "3");
+}
+
+#[tokio::test]
+async fn compiler_rejects_a_dialect_that_does_not_match_the_saved_destination() {
+    let server = Server::new(vec![]).await;
+    let connection = connection(&server);
+    let request = request(&connection, MODEL);
+    let tool = ModelTool {
+        name: id("lookup"),
+        description: "Lookup".into(),
+        model_input_schema: json!({"type":"object","properties":{},"required":[],"additionalProperties":false}),
+    };
+    let mut target = ProviderToolTarget::for_route(&request.route);
+    let openapi = protocol::GeminiToolSchemaCompiler::new(protocol::FunctionSchemaFormat::OpenApi);
+    let json = protocol::GeminiToolSchemaCompiler::new(protocol::FunctionSchemaFormat::JsonSchema);
+    assert!(openapi.compile(&tool, &target).is_err());
+    json.compile(&tool, &target).unwrap();
+    target.api_contract.version = id("v1");
+    openapi.compile(&tool, &target).unwrap();
+    assert!(json.compile(&tool, &target).is_err());
+    target.provider = id("google-vertex");
+    json.compile(&tool, &target).unwrap();
+    assert!(openapi.compile(&tool, &target).is_err());
+}
+
+#[tokio::test]
+async fn compact_branching_references_exhaust_a_shared_budget_and_fall_back_without_expanding() {
+    let server = Server::new(vec![]).await;
+    let connection = connection(&server);
+    let request = request(&connection, MODEL);
+    let mut defs = serde_json::Map::new();
+    defs.insert("level7".into(), json!({"type":"string"}));
+    for level in (0..7).rev() {
+        let props: serde_json::Map<String, Value> = (0..4)
+            .map(|branch| {
+                (
+                    format!("branch{branch}"),
+                    json!({"$ref":format!("#/$defs/level{}",level+1)}),
+                )
+            })
+            .collect();
+        let required: Vec<_> = props.keys().cloned().collect();
+        defs.insert(format!("level{level}"),json!({"type":"object","properties":props,"required":required,"additionalProperties":false}));
+    }
+    let tool = ModelTool {
+        name: id("lookup"),
+        description: "Lookup".into(),
+        model_input_schema: json!({"type":"object","properties":{"query":{"$ref":"#/$defs/level0"}},"required":["query"],"additionalProperties":false,"$defs":defs}),
+    };
+    let compiler =
+        protocol::GeminiToolSchemaCompiler::new(protocol::FunctionSchemaFormat::JsonSchema);
+    let projection = compiler
+        .compile(&tool, &ProviderToolTarget::for_route(&request.route))
+        .unwrap();
+    assert_eq!(
+        projection.wire_tool.model_input_schema["properties"]["query"],
+        json!({"type":"string"})
+    );
+    let ArgumentDecodePlan::Fields { fields } = projection.decode_plan else {
+        panic!("missing field codec")
+    };
+    assert!(matches!(
+        fields[0].encoding,
+        ArgumentValueEncoding::JsonText { optional: false }
+    ));
 }

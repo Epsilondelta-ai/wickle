@@ -19,6 +19,15 @@ impl GeminiModel {
     }
 }
 impl ModelPort for GeminiModel {
+    fn tool_schema_compiler(&self) -> std::sync::Arc<dyn ProviderToolSchemaCompiler> {
+        std::sync::Arc::new(crate::schema::GeminiToolSchemaCompiler::new(
+            if self.connection.0.options.api_version == "v1" {
+                crate::codec::FunctionSchemaFormat::OpenApi
+            } else {
+                crate::codec::FunctionSchemaFormat::JsonSchema
+            },
+        ))
+    }
     fn binding(&self) -> ModelPortBinding {
         self.connection.binding()
     }
@@ -129,9 +138,7 @@ impl State<'_> {
         } else {
             crate::codec::FunctionSchemaFormat::JsonSchema
         };
-        let value = encode_request(self.request, format)?;
-        let body =
-            serde_json::to_vec(&value).map_err(|_| error(ErrorCode::InvalidJson, "request"))?;
+        let body = encode_request(self.request, format)?;
         if body.len() > self.request.limits.max_input_bytes {
             return Err(error(ErrorCode::ModelCapabilityUnsupported, "request_size"));
         }

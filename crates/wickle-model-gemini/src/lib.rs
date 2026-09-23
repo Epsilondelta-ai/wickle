@@ -4,7 +4,9 @@ mod codec;
 mod connection;
 mod inspection;
 mod model;
+mod raw;
 mod response;
+mod schema;
 pub use connection::{GeminiConnection, GeminiOptions};
 pub use inspection::{GeminiInspector, GeminiSnapshot};
 pub use model::GeminiModel;
@@ -12,6 +14,7 @@ pub use model::GeminiModel;
 pub mod protocol {
     pub use crate::codec::{FunctionSchemaFormat, encode_request, encode_vertex_request};
     pub use crate::response::Decoder as GenerateContentDecoder;
+    pub use crate::schema::GeminiToolSchemaCompiler;
 }
 use wickle::{ContractError, ErrorCode};
 fn error(code: ErrorCode, location: &str) -> ContractError {
