@@ -12,13 +12,13 @@
 
 ## Установка
 
-Требуются Rust 1.85 или новее и Tokio. Используйте один Git-тег для ядра и адаптеров. Версия 0.1.0 распространяется через GitHub Releases.
+Требуются Rust 1.85 или новее и Tokio. Используйте один Git-тег для ядра и адаптеров. Версия 0.2.0 распространяется через GitHub Releases.
 
 ```toml
 [dependencies]
-wickle = { git = "https://github.com/Epsilondelta-ai/wickle", tag = "v0.1.0" }
-wickle-model-openai = { git = "https://github.com/Epsilondelta-ai/wickle", tag = "v0.1.0" }
-wickle-model-router = { git = "https://github.com/Epsilondelta-ai/wickle", tag = "v0.1.0" }
+wickle = { git = "https://github.com/Epsilondelta-ai/wickle", tag = "v0.2.0" }
+wickle-model-openai = { git = "https://github.com/Epsilondelta-ai/wickle", tag = "v0.2.0" }
+wickle-model-router = { git = "https://github.com/Epsilondelta-ai/wickle", tag = "v0.2.0" }
 ```
 
 ## Запуск агента
@@ -101,4 +101,4 @@ pub async fn run_once(
 
 ## Лицензия
 
-[MIT](LICENSE) · MIT © EpsilonDelta. Серия 0.1 содержит начальную версию API, которая может изменяться.
+[MIT](LICENSE) · MIT © EpsilonDelta. API серии 0.2 может измениться в последующих версиях.

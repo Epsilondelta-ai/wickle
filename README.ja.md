@@ -12,13 +12,13 @@
 
 ## インストール
 
-Rust 1.85 以上と Tokio ランタイムが必要です。コアとアダプターには同じ Git タグを使用します。v0.1.0 は GitHub Releases で配布します。
+Rust 1.85 以上と Tokio ランタイムが必要です。コアとアダプターには同じ Git タグを使用します。v0.2.0 は GitHub Releases で配布します。
 
 ```toml
 [dependencies]
-wickle = { git = "https://github.com/Epsilondelta-ai/wickle", tag = "v0.1.0" }
-wickle-model-openai = { git = "https://github.com/Epsilondelta-ai/wickle", tag = "v0.1.0" }
-wickle-model-router = { git = "https://github.com/Epsilondelta-ai/wickle", tag = "v0.1.0" }
+wickle = { git = "https://github.com/Epsilondelta-ai/wickle", tag = "v0.2.0" }
+wickle-model-openai = { git = "https://github.com/Epsilondelta-ai/wickle", tag = "v0.2.0" }
+wickle-model-router = { git = "https://github.com/Epsilondelta-ai/wickle", tag = "v0.2.0" }
 ```
 
 ## エージェントの実行
@@ -101,4 +101,4 @@ pub async fn run_once(
 
 ## ライセンス
 
-[MIT](LICENSE) · MIT © EpsilonDelta。0.1 系は初期 API のため変更される場合があります。
+[MIT](LICENSE) · MIT © EpsilonDelta. 0.2 系の API は今後変更される場合があります。

@@ -9,7 +9,7 @@ description = "Reviewed MCP stdio Tool adapters for Wickle"
 publish = false
 include = ["Cargo.toml", "LICENSE", "src/**"]
 [dependencies]
-wickle = { path = "../wickle", version = "=0.1.0" }
+wickle = { path = "../wickle", version = "=0.2.0" }
 rmcp = { version = "=0.8.5", features = ["client", "transport-async-rw"] }
 serde.workspace = true
 serde_json.workspace = true

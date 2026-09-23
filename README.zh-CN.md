@@ -12,13 +12,13 @@
 
 ## 安装
 
-需要 Rust 1.85 或更新版本及 Tokio 运行时。核心与适配器使用相同的 Git 标签。v0.1.0 通过 GitHub Releases 发布。
+需要 Rust 1.85 或更新版本及 Tokio 运行时。核心与适配器使用相同的 Git 标签。v0.2.0 通过 GitHub Releases 发布。
 
 ```toml
 [dependencies]
-wickle = { git = "https://github.com/Epsilondelta-ai/wickle", tag = "v0.1.0" }
-wickle-model-openai = { git = "https://github.com/Epsilondelta-ai/wickle", tag = "v0.1.0" }
-wickle-model-router = { git = "https://github.com/Epsilondelta-ai/wickle", tag = "v0.1.0" }
+wickle = { git = "https://github.com/Epsilondelta-ai/wickle", tag = "v0.2.0" }
+wickle-model-openai = { git = "https://github.com/Epsilondelta-ai/wickle", tag = "v0.2.0" }
+wickle-model-router = { git = "https://github.com/Epsilondelta-ai/wickle", tag = "v0.2.0" }
 ```
 
 ## 运行智能体
@@ -101,4 +101,4 @@ pub async fn run_once(
 
 ## 许可证
 
-[MIT](LICENSE) · MIT © EpsilonDelta。0.1 系列属于初始 API，后续版本可能调整。
+[MIT](LICENSE) · MIT © EpsilonDelta. 0.2 系列 API 可能在后续版本中调整。
