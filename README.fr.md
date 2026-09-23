@@ -12,13 +12,13 @@ Intégrez des agents à votre application à partir de profils, de modèles et d
 
 ## Installation
 
-Nécessite Rust 1.85 ou supérieur et Tokio. Utilisez le même tag Git pour le cœur et les adaptateurs. La version 0.1.0 est distribuée via GitHub Releases.
+Nécessite Rust 1.85 ou supérieur et Tokio. Utilisez le même tag Git pour le cœur et les adaptateurs. La version 0.2.0 est distribuée via GitHub Releases.
 
 ```toml
 [dependencies]
-wickle = { git = "https://github.com/Epsilondelta-ai/wickle", tag = "v0.1.0" }
-wickle-model-openai = { git = "https://github.com/Epsilondelta-ai/wickle", tag = "v0.1.0" }
-wickle-model-router = { git = "https://github.com/Epsilondelta-ai/wickle", tag = "v0.1.0" }
+wickle = { git = "https://github.com/Epsilondelta-ai/wickle", tag = "v0.2.0" }
+wickle-model-openai = { git = "https://github.com/Epsilondelta-ai/wickle", tag = "v0.2.0" }
+wickle-model-router = { git = "https://github.com/Epsilondelta-ai/wickle", tag = "v0.2.0" }
 ```
 
 ## Exécuter un agent
@@ -101,4 +101,4 @@ Utilisez `wickle-state-sqlite` pour la persistance locale et `wickle-adapter-run
 
 ## Licence
 
-[MIT](LICENSE) · MIT © EpsilonDelta. La série 0.1 est une API initiale susceptible de changer.
+[MIT](LICENSE) · MIT © EpsilonDelta. L’API de la série 0.2 est susceptible de changer.

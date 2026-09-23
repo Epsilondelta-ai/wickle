@@ -10,7 +10,7 @@ publish = false
 include = ["Cargo.toml", "LICENSE", "src/**"]
 
 [dependencies]
-wickle = { path = "../wickle", version = "=0.1.0" }
+wickle = { path = "../wickle", version = "=0.2.0" }
 rusqlite.workspace = true
 serde_json.workspace = true
 tokio.workspace = true

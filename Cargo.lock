@@ -2517,7 +2517,7 @@ dependencies = [
 
 [[package]]
 name = "wickle"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "futures-util",
  "getrandom 0.3.4",
@@ -2532,7 +2532,7 @@ dependencies = [
 
 [[package]]
 name = "wickle-adapter-runtime"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "futures-util",
  "serde_json",
@@ -2545,7 +2545,7 @@ dependencies = [
 
 [[package]]
 name = "wickle-mcp"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "futures-util",
  "rmcp",
@@ -2558,7 +2558,7 @@ dependencies = [
 
 [[package]]
 name = "wickle-model-anthropic"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "futures-util",
  "reqwest",
@@ -2571,7 +2571,7 @@ dependencies = [
 
 [[package]]
 name = "wickle-model-azure-openai"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "futures-util",
  "reqwest",
@@ -2584,7 +2584,7 @@ dependencies = [
 
 [[package]]
 name = "wickle-model-bedrock"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "aws-credential-types",
  "aws-sigv4",
@@ -2607,7 +2607,7 @@ dependencies = [
 
 [[package]]
 name = "wickle-model-gemini"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "futures-util",
  "reqwest",
@@ -2620,7 +2620,7 @@ dependencies = [
 
 [[package]]
 name = "wickle-model-openai"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "futures-util",
  "reqwest",
@@ -2633,7 +2633,7 @@ dependencies = [
 
 [[package]]
 name = "wickle-model-responses"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde_json",
  "wickle",
@@ -2641,7 +2641,7 @@ dependencies = [
 
 [[package]]
 name = "wickle-model-router"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "futures-util",
  "serde",
@@ -2653,7 +2653,7 @@ dependencies = [
 
 [[package]]
 name = "wickle-model-vertex"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "futures-util",
  "reqwest",
@@ -2667,7 +2667,7 @@ dependencies = [
 
 [[package]]
 name = "wickle-model-xai"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "futures-util",
  "reqwest",
@@ -2680,7 +2680,7 @@ dependencies = [
 
 [[package]]
 name = "wickle-state-sqlite"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "futures-util",
  "rusqlite",

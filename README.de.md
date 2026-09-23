@@ -12,13 +12,13 @@ Bette Agenten mit konfigurierbaren Profilen, Modellen und Werkzeugen in deine An
 
 ## Installation
 
-Benötigt Rust 1.85 oder neuer und Tokio. Verwende denselben Git-Tag für den Kern und die Adapter. v0.1.0 wird über GitHub Releases verteilt.
+Benötigt Rust 1.85 oder neuer und Tokio. Verwende denselben Git-Tag für den Kern und die Adapter. v0.2.0 wird über GitHub Releases verteilt.
 
 ```toml
 [dependencies]
-wickle = { git = "https://github.com/Epsilondelta-ai/wickle", tag = "v0.1.0" }
-wickle-model-openai = { git = "https://github.com/Epsilondelta-ai/wickle", tag = "v0.1.0" }
-wickle-model-router = { git = "https://github.com/Epsilondelta-ai/wickle", tag = "v0.1.0" }
+wickle = { git = "https://github.com/Epsilondelta-ai/wickle", tag = "v0.2.0" }
+wickle-model-openai = { git = "https://github.com/Epsilondelta-ai/wickle", tag = "v0.2.0" }
+wickle-model-router = { git = "https://github.com/Epsilondelta-ai/wickle", tag = "v0.2.0" }
 ```
 
 ## Einen Agenten ausführen
@@ -101,4 +101,4 @@ Verwende `wickle-state-sqlite` für lokale Persistenz und `wickle-adapter-runtim
 
 ## Lizenz
 
-[MIT](LICENSE) · MIT © EpsilonDelta. Die 0.1-Reihe ist eine erste API und kann sich ändern.
+[MIT](LICENSE) · MIT © EpsilonDelta. Die API der 0.2-Reihe kann sich in späteren Versionen ändern.

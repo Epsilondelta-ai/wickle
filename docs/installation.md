@@ -4,14 +4,14 @@ Wickle is an in-process Rust library. Use Rust 1.85 or later and a Tokio runtime
 for asynchronous execution. The repository pins its development compiler in
 `rust-toolchain.toml`.
 
-Version 0.1.0 is distributed through GitHub Releases. Add dependencies from the
+Version 0.2.0 is distributed through GitHub Releases. Add dependencies from the
 same Git tag so the core and optional adapters resolve together:
 
 ```toml
 [dependencies]
-wickle = { git = "https://github.com/Epsilondelta-ai/wickle", tag = "v0.1.0" }
-wickle-model-openai = { git = "https://github.com/Epsilondelta-ai/wickle", tag = "v0.1.0" }
-wickle-model-router = { git = "https://github.com/Epsilondelta-ai/wickle", tag = "v0.1.0" }
+wickle = { git = "https://github.com/Epsilondelta-ai/wickle", tag = "v0.2.0" }
+wickle-model-openai = { git = "https://github.com/Epsilondelta-ai/wickle", tag = "v0.2.0" }
+wickle-model-router = { git = "https://github.com/Epsilondelta-ai/wickle", tag = "v0.2.0" }
 ```
 
 Select only the adapters your Host uses. Model providers, SQLite persistence,
@@ -38,5 +38,7 @@ business workspaces. It does not contact paid model APIs. Additional live-test
 setup is described in [provider setup](provider-setup.md); consult the
 [model evidence matrix](model-support.md) before relying on a particular release.
 
-Wickle is licensed under [MIT](../LICENSE). Version 0.1.0 is an initial release;
-public contracts may change in later releases.
+Wickle is licensed under [MIT](../LICENSE). The 0.2 API may change in later
+releases; existing applications should follow the [migration guide](migration-v0.2.md).
+
+Source archives and checksum verification are described in [release artifacts](releases.md).
