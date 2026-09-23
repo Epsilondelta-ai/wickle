@@ -143,6 +143,7 @@ impl ProfileResolver for Catalog {
 pub struct Policy {
     pub calls: AtomicUsize,
     pub deny: AtomicUsize,
+    pub model_checks: AtomicUsize,
 }
 impl PolicyPort for Policy {
     fn authorize<'a>(
@@ -162,6 +163,10 @@ impl PolicyPort for Policy {
                 2 => matches!(request.action, PolicyAction::CancelRun {}),
                 3 => matches!(request.action, PolicyAction::StartRun {}),
                 4 => matches!(request.action, PolicyAction::ResumeRun { .. }),
+                10 => {
+                    matches!(request.action, PolicyAction::InvokeModel { .. })
+                        && self.model_checks.fetch_add(1, Ordering::SeqCst) > 0
+                }
                 _ => false,
             };
             Ok(if deny {
@@ -472,6 +477,8 @@ pub struct FinalCommitStore {
     paused_empty_page: AtomicBool,
     pub block_read: AtomicUsize,
     pub read_entered: Notify,
+    pub record_fault: Mutex<Option<(Id, ErrorCode)>>,
+    pub load_calls: AtomicUsize,
 }
 impl FinalCommitStore {
     pub fn new(inner: Arc<MemoryStateStore>, mode: FinalCommitMode) -> Self {
@@ -488,6 +495,8 @@ impl FinalCommitStore {
             paused_empty_page: AtomicBool::new(false),
             block_read: AtomicUsize::new(0),
             read_entered: Notify::new(),
+            record_fault: Mutex::new(None),
+            load_calls: AtomicUsize::new(0),
         }
     }
 }
@@ -518,6 +527,7 @@ impl StateStore for FinalCommitStore {
     }
     fn load<'a>(&'a self, s: &'a Scope, r: &'a Id) -> PortFuture<'a, StoredRun> {
         Box::pin(async move {
+            self.load_calls.fetch_add(1, Ordering::SeqCst);
             if self.block_read.load(Ordering::SeqCst) == 4 {
                 return Err(ContractError::new(
                     ErrorCode::PersistenceUnavailable,
@@ -618,7 +628,23 @@ impl StateStore for FinalCommitStore {
         s: &'a Scope,
         r: &'a RecordRef,
     ) -> PortFuture<'a, ProtectedRecord> {
-        self.inner.read_record(s, r)
+        Box::pin(async move {
+            if let Some((id, code)) = self.record_fault.lock().unwrap().as_ref() {
+                if *id == r.record_id {
+                    return Err(ContractError::new(*code, "record.retention"));
+                }
+            }
+            let record = self.inner.read_record(s, r).await?;
+            if self
+                .block_read
+                .compare_exchange(5, 0, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok()
+            {
+                self.read_entered.notify_one();
+                self.release.acquire().await.unwrap().forget();
+            }
+            Ok(record)
+        })
     }
     fn commit<'a>(
         &'a self,

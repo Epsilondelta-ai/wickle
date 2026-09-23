@@ -443,8 +443,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(SqliteStateStore::open(&database)?.load(&scope, stopped.run_id()).await?, before_read);
     assert_eq!(completed(agent.submit_control_command(stopped.run_id().clone(), cancellation, context.clone()).await?)?, receipt);
     assert_eq!(first.calls.load(Ordering::SeqCst), 2);
+    let prepared_id = restored.snapshot.prepared_steps.last().ok_or("missing saved preparation")?.record_id.clone();
+    let inspection = completed(agent.inspect_step(&run_id, StepRef::Prepared { record_id: prepared_id }, &context, InspectionOptions::default()).await?)?;
+    assert_eq!(inspection.status, InspectionStatus::Found);
+    let composition = inspection.composition.as_ref().ok_or("missing composition")?;
+    assert_eq!(composition.recorded_run_revision, restored.snapshot.revision);
+    assert_eq!(composition.recorded_run_outcome.as_ref().and_then(|outcome| outcome.completion_basis), Some(CompletionBasis::TurnEnded));
+    assert!(composition.attempts.iter().any(|attempt| attempt.evidence.contains(&InspectionEvidence::ResponseObserved)));
+    assert_eq!(composition.model.as_ref().and_then(|model| model.configuration.as_ref()).and_then(|configuration| configuration.effective.get("reasoning_effort")), Some(&json!("high")));
+    let encoded = serde_json::to_value(&inspection)?;
+    assert!(encoded["composition"]["model"].get("connection_ref").is_none());
+    assert!(encoded["composition"]["model"].get("target").is_none());
+    assert_eq!(SqliteStateStore::open(&database)?.load(&scope, &run_id).await?, restored);
+    assert_eq!(first.calls.load(Ordering::SeqCst), 2);
+    assert_eq!(second.calls.load(Ordering::SeqCst), 1);
     println!(
-        "agent consumer: pure construction, detached execution after observer drop, fallback under shared budgets, stored outcome and event replay, duplicate request without new model calls, SQLite reopen, recoverable host stop and durable replay"
+        "agent consumer: pure construction, detached execution after observer drop, fallback under shared budgets, stored outcome and event replay, duplicate request without new model calls, SQLite reopen, recoverable host stop, durable replay and read-only stored composition inspection"
     );
     Ok(())
 }
