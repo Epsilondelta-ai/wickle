@@ -132,6 +132,25 @@ pub enum PolicyAction {
     ReadRun {},
     /// Read the protected checkpoint, separately from the public view.
     ReadRunDetails {},
+    /// Inspect one saved model preparation without executing it.
+    InspectStep {
+        /// Caller-selected saved identity.
+        step: crate::StepRef,
+        /// Requested display scope; this never grants secret-input access.
+        options: crate::InspectionOptions,
+        /// Final raw-content set. Allow must authorize the whole set against one current ACL view.
+        /// Empty for the initial metadata/intent check.
+        context_fragments: Vec<crate::InspectionFragmentRef>,
+    },
+    /// Read content of one exact source fragment for diagnostic display.
+    InspectContextFragment {
+        /// Scoped original producer and fragment identity.
+        identity: Box<crate::FragmentIdentity>,
+        /// Core observation revision.
+        core_revision: std::num::NonZeroU64,
+        /// Exact saved content identity.
+        content_digest: JsonDigest,
+    },
     /// Resume a recorded wait or interruption.
     ResumeRun {
         /// Exact command, so authorization distinguishes approving, denying,

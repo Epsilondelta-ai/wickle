@@ -318,6 +318,35 @@ impl CompiledToolContract {
         }
         Ok(rebuilt)
     }
+    pub(crate) fn inspection(
+        value: Value,
+    ) -> Result<crate::inspection::SavedToolInspection, ContractError> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Saved {
+            data: ContractData,
+            digest: JsonDigest,
+        }
+        let saved: Saved =
+            serde_json::from_value(value).map_err(|_| invalid("provider_tool.record"))?;
+        if saved.data.schema_version != "wickle.provider-tool-contract.v1"
+            || data_digest(&saved.data) != saved.digest
+        {
+            return Err(invalid("provider_tool.identity"));
+        }
+        Ok(crate::inspection::SavedToolInspection {
+            tool: saved.data.tool,
+            canonical_name: saved.data.canonical_name,
+            canonical_schema_digest: saved.data.canonical_schema_digest,
+            compiler: saved.data.compiler,
+            target: saved.data.target,
+            wire_tool: saved.data.wire_tool,
+            decode_plan_digest: data_digest(&saved.data.decode_plan),
+            digest: saved.digest,
+            fragments: saved.data.fragments,
+            enforcement: saved.data.enforcement,
+        })
+    }
     /// Original model-facing Tool name to restore after provider name mapping.
     pub fn canonical_name(&self) -> &Id {
         &self.data.canonical_name

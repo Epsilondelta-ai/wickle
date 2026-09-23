@@ -125,6 +125,8 @@ pub enum ErrorCode {
     InvalidSnapshot,
     /// The requested run, session, or protected record is absent in this exact scope.
     StateNotFound,
+    /// A protected record was deliberately expired by the storage retention policy.
+    RecordExpired,
     /// An existing request identity was reused with different logical input.
     RequestConflict,
     /// The session already has a running or waiting run.

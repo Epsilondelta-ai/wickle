@@ -19,6 +19,7 @@ mod components;
 mod control;
 mod driver;
 mod hooks;
+mod inspection;
 mod interruption;
 mod persistence;
 pub use persistence::{PersistenceFailure, UnconfirmedToolEffect};

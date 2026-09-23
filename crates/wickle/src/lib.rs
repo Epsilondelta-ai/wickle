@@ -52,11 +52,18 @@ mod serialization;
 pub use canonical::{
     CanonicalizationVersion, JsonTextLimits, canonicalize_json_text, versioned_digest_json,
 };
+mod inspection;
 mod skills;
 mod state;
 mod tool_execution;
 mod tool_schema;
 mod views;
+pub use inspection::{
+    AttemptComposition, CompositionReport, ConstraintComposition, ContextDisclosure,
+    FragmentComposition, InspectionEvidence, InspectionFragmentRef, InspectionOptions,
+    InspectionStatus, ModelComposition, OutcomeComposition, SelectionComposition, StepComposition,
+    StepRef, ToolComposition, UnresolvedInspectionField,
+};
 
 pub use agent::{
     Agent, AgentBindings, AgentSettings, CancelReceipt, ComponentReleaseView, HookObservationView,
