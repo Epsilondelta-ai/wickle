@@ -19,6 +19,12 @@ impl VertexModel {
     }
 }
 impl ModelPort for VertexModel {
+    fn tool_schema_compiler(&self) -> std::sync::Arc<dyn ProviderToolSchemaCompiler> {
+        use wickle_model_gemini::protocol::{FunctionSchemaFormat, GeminiToolSchemaCompiler};
+        std::sync::Arc::new(GeminiToolSchemaCompiler::new(
+            FunctionSchemaFormat::JsonSchema,
+        ))
+    }
     fn binding(&self) -> ModelPortBinding {
         self.connection.binding()
     }

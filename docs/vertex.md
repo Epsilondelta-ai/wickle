@@ -36,10 +36,10 @@ The test Host uses `global` by default, so no location environment variable is r
 
 The adapter reuses [Gemini content and SSE handling](gemini.md), with explicit Vertex differences:
 
-- Vertex `v1` supports `parametersJsonSchema`, including closed Tool input objects. The direct Gemini API `v1` OpenAPI limitation does not apply.
+- Vertex `v1` uses the shared versioned Gemini JSON Schema compiler and `parametersJsonSchema`, including closed Tool input objects. Supported constraints stay native; additional canonical context and core validation preserve other constraints. A saved decode plan restores any JSON text fields before system inputs are bound. The direct Gemini API `v1` OpenAPI limitation does not apply.
 - Native JSON output uses `generationConfig.responseFormat: [{"text":{"mimeType":"APPLICATION_JSON","schema":...}}]`. Deprecated responseMimeType/responseJsonSchema fields are not sent alongside it.
 - Function argument streaming is disabled explicitly. Complete calls may retain `willContinue: false` and empty `partialArgs` in signed replay. An unfinished call or nonempty partialArgs is rejected instead of becoming executable arguments.
-- Signed parts and locally assigned IDs retain the same protected replay behavior. IDs absent from the provider response are not injected into the wire, and parallel Tool results are ordered by their original calls.
+- Signed parts, complete invalid arguments and locally assigned IDs retain the same protected replay behavior. Invalid calls receive core repair feedback before any Tool execution; raw signed parts survive replay without number rounding. IDs absent from the provider response are not injected into the wire, and parallel Tool results are ordered by their original calls.
 
 The supported schema subset, logical thinking/sampling options, single-candidate requirement and transport bounds are described in the Gemini guide. The catalog must restrict capabilities and option values for the selected Vertex model release. Service-native tools and multimodal/asynchronous function responses are not enabled.
 
