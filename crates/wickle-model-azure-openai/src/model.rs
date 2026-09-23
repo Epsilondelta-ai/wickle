@@ -19,6 +19,9 @@ impl AzureOpenAiModel {
     }
 }
 impl ModelPort for AzureOpenAiModel {
+    fn tool_schema_compiler(&self) -> std::sync::Arc<dyn ProviderToolSchemaCompiler> {
+        std::sync::Arc::new(wickle_model_responses::AzureResponsesToolSchemaCompiler)
+    }
     fn binding(&self) -> ModelPortBinding {
         self.connection.binding()
     }

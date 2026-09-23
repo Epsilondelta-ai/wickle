@@ -7,7 +7,7 @@ mod schema;
 mod sse;
 pub use codec::{encode_request, encode_xai_request};
 pub use response::Decoder as ResponsesDecoder;
-pub use schema::ResponsesToolSchemaCompiler;
+pub use schema::{AzureResponsesToolSchemaCompiler, ResponsesToolSchemaCompiler};
 pub use sse::{Decoder as SseDecoder, Event as SseEvent};
 use wickle::{ContractError, ErrorCode};
 fn error(code: ErrorCode, location: &str) -> ContractError {

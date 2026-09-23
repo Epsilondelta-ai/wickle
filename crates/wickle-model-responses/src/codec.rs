@@ -145,7 +145,7 @@ fn encode(request: &ModelRequest, xai: bool) -> Result<Value, ContractError> {
         }
         append_text(&mut input, role, &mut parts);
     }
-    let tools: Vec<_> = request.tools.iter().map(|tool| json!({"type":"function","name":tool.name,"description":tool.description,"parameters":tool.model_input_schema,"strict":!xai && request.route.provider.as_str() == "openai" && crate::schema::strict_schema_supported(&tool.model_input_schema, request.route.model_id.as_str().starts_with("ft:"))})).collect();
+    let tools: Vec<_> = request.tools.iter().map(|tool| json!({"type":"function","name":tool.name,"description":tool.description,"parameters":tool.model_input_schema,"strict":!xai && match request.route.provider.as_str() { "openai" => crate::schema::strict_schema_supported(&tool.model_input_schema, request.route.model_id.as_str().starts_with("ft:")), "azure-openai" => crate::schema::azure_strict_schema_supported(&tool.model_input_schema), _ => false }})).collect();
     let mut payload = json!({"model":request.route.model_id,"input":input,"max_output_tokens":request.max_output_tokens.get(),"store":false,"stream":true,"truncation":"disabled","include":["reasoning.encrypted_content"]});
     if !tools.is_empty() {
         payload["tools"] = json!(tools);

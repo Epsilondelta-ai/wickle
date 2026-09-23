@@ -18,95 +18,164 @@ impl ProviderToolSchemaCompiler for ResponsesToolSchemaCompiler {
         tool: &ModelTool,
         target: &ProviderToolTarget,
     ) -> Result<ProviderToolProjection, ContractError> {
-        if target.api_contract.operation.as_str() != "responses" {
-            return Err(invalid("operation"));
-        }
-        // Unqualified manual targets use the common fine-tuned subset. The
-        // normal core path supplies the exact selected model/release.
-        let fine_tuned = target
+        let restricted = target
             .model
             .as_ref()
             .is_none_or(|model| model.id.as_str().starts_with("ft:"));
-        if strict_schema_supported(&tool.model_input_schema, fine_tuned) {
-            return Ok(ProviderToolProjection {
-                wire_tool: tool.clone(),
-                decode_plan: ArgumentDecodePlan::Identity {},
-            });
-        }
-        let root = &tool.model_input_schema;
-        let properties = root
-            .get("properties")
-            .and_then(Value::as_object)
-            .ok_or_else(|| invalid("properties"))?;
-        let required: BTreeSet<_> = root
-            .get("required")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .filter_map(Value::as_str)
-            .collect();
-        let mut wire = Map::new();
-        let mut fields = vec![];
-        for (name, schema) in properties {
-            let optional = !required.contains(name.as_str());
-            let native = lower(schema, root, fine_tuned, 1, &mut BTreeSet::new());
-            let (schema, encoding) = match native {
-                Some(schema) if optional => (
-                    json!({"type":"object","properties":{"present":{"type":"boolean"},"value":{"anyOf":[schema,{"type":"null"}]}},"required":["present","value"],"additionalProperties":false}),
-                    ArgumentValueEncoding::Presence {
-                        present_key: "present".into(),
-                        value_key: "value".into(),
-                    },
-                ),
-                Some(schema) => (schema, ArgumentValueEncoding::Identity {}),
-                None => (
-                    json_text_schema(optional),
-                    ArgumentValueEncoding::JsonText { optional },
-                ),
-            };
-            wire.insert(name.clone(), schema);
-            fields.push(ArgumentFieldMapping {
-                wire_name: name.clone(),
-                canonical_name: name.clone(),
-                encoding,
-            });
-        }
-        let mut projected = tool.clone();
-        projected.model_input_schema = object_schema(wire);
-        // Representation overhead must not exceed either provider limits or
-        // the core's original per-schema byte bound. Compact the largest
-        // remaining native field, preserving every canonical field and rule.
-        while !strict_schema_supported(&projected.model_input_schema, fine_tuned)
-            || serde_json::to_vec(&projected)
-                .map_err(|_| invalid("json"))?
-                .len()
-                > ProviderToolSchemaLimits::default().max_schema_bytes
-        {
-            let candidate = fields
-                .iter()
-                .enumerate()
-                .filter(|(_, field)| {
-                    !matches!(field.encoding, ArgumentValueEncoding::JsonText { .. })
-                })
-                .max_by_key(|(_, field)| {
-                    projected.model_input_schema["properties"][&field.wire_name]
-                        .to_string()
-                        .len()
-                })
-                .map(|(index, _)| index)
-                .ok_or_else(|| invalid("limits"))?;
-            let field = &mut fields[candidate];
-            let optional = !required.contains(field.canonical_name.as_str());
-            projected.model_input_schema["properties"][&field.wire_name] =
-                json_text_schema(optional);
-            field.encoding = ArgumentValueEncoding::JsonText { optional };
-        }
-        Ok(ProviderToolProjection {
-            wire_tool: projected,
-            decode_plan: ArgumentDecodePlan::Fields { fields },
-        })
+        compile(tool, target, SchemaPolicy::openai(restricted))
     }
 }
+
+/// Azure Responses projection using its documented schema subset and limits.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct AzureResponsesToolSchemaCompiler;
+impl ProviderToolSchemaCompiler for AzureResponsesToolSchemaCompiler {
+    fn reference(&self) -> VersionedRef {
+        VersionedRef {
+            id: Id::new("wickle-azure-responses-tool-schema").expect("constant"),
+            version: Id::new("1").expect("constant"),
+        }
+    }
+    fn compile(
+        &self,
+        tool: &ModelTool,
+        target: &ProviderToolTarget,
+    ) -> Result<ProviderToolProjection, ContractError> {
+        if target.api_contract.operation.as_str() != "responses" {
+            return Err(invalid("operation"));
+        }
+        let policy = SchemaPolicy::azure();
+        let properties = tool
+            .model_input_schema
+            .get("properties")
+            .and_then(Value::as_object);
+        if properties.is_some_and(|properties| properties.len() > policy.max_properties) {
+            let mut wire_tool = tool.clone();
+            wire_tool.model_input_schema = object_schema(Map::from_iter([(
+                "arguments".into(),
+                json!({"type":"string"}),
+            )]));
+            return Ok(ProviderToolProjection {
+                wire_tool,
+                decode_plan: ArgumentDecodePlan::JsonObjectText {
+                    wire_name: "arguments".into(),
+                },
+            });
+        }
+        compile(tool, target, policy)
+    }
+}
+#[derive(Clone, Copy)]
+struct SchemaPolicy {
+    restricted_constraints: bool,
+    max_depth: usize,
+    max_properties: usize,
+    max_object_depth: usize,
+}
+impl SchemaPolicy {
+    fn openai(restricted_constraints: bool) -> Self {
+        Self {
+            restricted_constraints,
+            max_depth: 10,
+            max_properties: 5000,
+            max_object_depth: 10,
+        }
+    }
+    fn azure() -> Self {
+        Self {
+            restricted_constraints: true,
+            max_depth: 5,
+            max_properties: 100,
+            max_object_depth: 4,
+        }
+    }
+}
+fn compile(
+    tool: &ModelTool,
+    target: &ProviderToolTarget,
+    policy: SchemaPolicy,
+) -> Result<ProviderToolProjection, ContractError> {
+    if target.api_contract.operation.as_str() != "responses" {
+        return Err(invalid("operation"));
+    }
+    let fine_tuned = policy.restricted_constraints;
+    if supported_with(&tool.model_input_schema, policy) {
+        return Ok(ProviderToolProjection {
+            wire_tool: tool.clone(),
+            decode_plan: ArgumentDecodePlan::Identity {},
+        });
+    }
+    let root = &tool.model_input_schema;
+    let properties = root
+        .get("properties")
+        .and_then(Value::as_object)
+        .ok_or_else(|| invalid("properties"))?;
+    let required: BTreeSet<_> = root
+        .get("required")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect();
+    let mut wire = Map::new();
+    let mut fields = vec![];
+    for (name, schema) in properties {
+        let optional = !required.contains(name.as_str());
+        let native = lower(schema, root, fine_tuned, 1, &mut BTreeSet::new());
+        let (schema, encoding) = match native {
+            Some(schema) if optional => (
+                json!({"type":"object","properties":{"present":{"type":"boolean"},"value":{"anyOf":[schema,{"type":"null"}]}},"required":["present","value"],"additionalProperties":false}),
+                ArgumentValueEncoding::Presence {
+                    present_key: "present".into(),
+                    value_key: "value".into(),
+                },
+            ),
+            Some(schema) => (schema, ArgumentValueEncoding::Identity {}),
+            None => (
+                json_text_schema(optional),
+                ArgumentValueEncoding::JsonText { optional },
+            ),
+        };
+        wire.insert(name.clone(), schema);
+        fields.push(ArgumentFieldMapping {
+            wire_name: name.clone(),
+            canonical_name: name.clone(),
+            encoding,
+        });
+    }
+    let mut projected = tool.clone();
+    projected.model_input_schema = object_schema(wire);
+    // Representation overhead must not exceed either provider limits or
+    // the core's original per-schema byte bound. Compact the largest
+    // remaining native field, preserving every canonical field and rule.
+    while !supported_with(&projected.model_input_schema, policy)
+        || serde_json::to_vec(&projected)
+            .map_err(|_| invalid("json"))?
+            .len()
+            > ProviderToolSchemaLimits::default().max_schema_bytes
+    {
+        let candidate = fields
+            .iter()
+            .enumerate()
+            .filter(|(_, field)| !matches!(field.encoding, ArgumentValueEncoding::JsonText { .. }))
+            .max_by_key(|(_, field)| {
+                projected.model_input_schema["properties"][&field.wire_name]
+                    .to_string()
+                    .len()
+            })
+            .map(|(index, _)| index)
+            .ok_or_else(|| invalid("limits"))?;
+        let field = &mut fields[candidate];
+        let optional = !required.contains(field.canonical_name.as_str());
+        projected.model_input_schema["properties"][&field.wire_name] = json_text_schema(optional);
+        field.encoding = ArgumentValueEncoding::JsonText { optional };
+    }
+    Ok(ProviderToolProjection {
+        wire_tool: projected,
+        decode_plan: ArgumentDecodePlan::Fields { fields },
+    })
+}
+
 fn object_schema(properties: Map<String, Value>) -> Value {
     let required: Vec<_> = properties.keys().cloned().collect();
     json!({"type":"object","properties":properties,"required":required,"additionalProperties":false})
@@ -293,21 +362,27 @@ struct Bounds {
 }
 /// Check only; this never rewrites the already compiled wire schema.
 pub(crate) fn strict_schema_supported(schema: &Value, fine_tuned: bool) -> bool {
+    supported_with(schema, SchemaPolicy::openai(fine_tuned))
+}
+pub(crate) fn azure_strict_schema_supported(schema: &Value) -> bool {
+    supported_with(schema, SchemaPolicy::azure())
+}
+fn supported_with(schema: &Value, policy: SchemaPolicy) -> bool {
     schema.get("type") == Some(&json!("object"))
         && schema.get("anyOf").is_none()
-        && strict_node(schema, schema, fine_tuned, 0, &mut Bounds::default())
+        && strict_node(schema, schema, policy, 0, &mut Bounds::default())
 }
 fn strict_node(
     schema: &Value,
     root: &Value,
-    fine_tuned: bool,
+    policy: SchemaPolicy,
     depth: usize,
     bounds: &mut Bounds,
 ) -> bool {
     let Some(node) = schema.as_object() else {
         return false;
     };
-    if depth > 10
+    if depth > policy.max_depth
         || node.keys().any(|key| {
             !matches!(
                 key.as_str(),
@@ -336,7 +411,7 @@ fn strict_node(
     {
         return false;
     }
-    if fine_tuned
+    if policy.restricted_constraints
         && [
             "pattern",
             "format",
@@ -375,6 +450,9 @@ fn strict_node(
         None => return false,
     };
     if types.contains(&"object") {
+        if depth > policy.max_object_depth {
+            return false;
+        }
         let Some(properties) = node.get("properties").and_then(Value::as_object) else {
             return false;
         };
@@ -425,14 +503,14 @@ fn strict_node(
                     .sum::<usize>(),
             );
             for child in children.values() {
-                if !strict_node(child, root, fine_tuned, depth + 1, bounds) {
+                if !strict_node(child, root, policy, depth + 1, bounds) {
                     return false;
                 }
             }
         }
     }
     if let Some(items) = node.get("items") {
-        if !strict_node(items, root, fine_tuned, depth + 1, bounds) {
+        if !strict_node(items, root, policy, depth + 1, bounds) {
             return false;
         }
     }
@@ -443,12 +521,14 @@ fn strict_node(
         if branches.is_empty()
             || branches
                 .iter()
-                .any(|branch| !strict_node(branch, root, fine_tuned, depth + 1, bounds))
+                .any(|branch| !strict_node(branch, root, policy, depth + 1, bounds))
         {
             return false;
         }
     }
-    bounds.properties <= 5000 && bounds.enums <= 1000 && bounds.characters <= 120_000
+    bounds.properties <= policy.max_properties
+        && bounds.enums <= 1000
+        && bounds.characters <= 120_000
 }
 fn invalid(path: &str) -> ContractError {
     ContractError::new(
