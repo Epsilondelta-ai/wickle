@@ -65,6 +65,7 @@ impl Agent {
                 heartbeat_lease,
                 &heartbeat_budget,
                 &heartbeat_stop,
+                &heartbeat_local,
             ))
             .catch_unwind()
             .await
@@ -291,6 +292,7 @@ impl Agent {
         mut lease: RunLease,
         budget: &RunBudget,
         stop: &CancellationToken,
+        local: &Arc<LocalRun>,
     ) -> Result<(), ContractError> {
         let bindings = &self.inner.bindings;
         loop {
@@ -326,6 +328,8 @@ impl Agent {
                 Ok(current) => lease = current,
                 Err(error) => return Err(error),
             }
+            self.signal_pending_control(run_id, local, Some(now))
+                .await?;
         }
     }
 
@@ -646,6 +650,7 @@ impl Agent {
                     &bindings.scope,
                     run_id,
                     CommitInput {
+                        control_commands: vec![],
                         expected_revision,
                         lease: lease.clone(),
                         now_ms: now,
@@ -854,6 +859,7 @@ impl Agent {
         // plans; it never invents a result for an uncertain dispatched operation.
         let mut cleaned = false;
         let mut interruption_decision: Option<InterruptionDecisionRecord> = None;
+        let mut consumed_control = None;
         let (elapsed, now) = loop {
             tokio::task::yield_now().await;
             let (_, check_at) = budget.settlement_time(saved.snapshot.usage.elapsed_ms)?;
@@ -864,6 +870,20 @@ impl Agent {
             let (elapsed, now) = budget.settlement_time(saved.snapshot.usage.elapsed_ms)?;
             if now >= current_lease.expires_at_ms {
                 return Err(fail(ErrorCode::LeaseLost, "agent.finish"));
+            }
+            if let Some(command) = self
+                .signal_pending_control(run_id, local, Some(now))
+                .await?
+            {
+                consumed_control = Some(command.command_id);
+            }
+            if let Some(error) = local
+                .error
+                .lock()
+                .map_err(|_| fail(ErrorCode::InvalidContract, "control.error"))?
+                .as_ref()
+            {
+                return Err(error.clone());
             }
             let cancel_reason = local
                 .reason
@@ -1075,6 +1095,7 @@ impl Agent {
                 }
             } else if let Some(wait_record) = &wait_record {
                 RunEventPayload::RunWaiting {
+                    outcome_ref: Some(record.reference().clone()),
                     wait_ref: wait_record.reference().clone(),
                 }
             } else {
@@ -1153,6 +1174,7 @@ impl Agent {
                 &bindings.scope,
                 run_id,
                 CommitInput {
+                    control_commands: consumed_control.into_iter().collect(),
                     expected_revision,
                     lease: lease.clone(),
                     now_ms: now,

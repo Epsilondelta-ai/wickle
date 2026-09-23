@@ -127,6 +127,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let input = AdmissionInput {
         execution_principal_ref: id("execution-principal"),
+                execution_grant_ref: id("execution-grant"),
         submitted: None,
         snapshot,
         prompt_snapshot: prompt.reference().clone(),
@@ -183,6 +184,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             &scope,
             &id("run"),
             CommitInput {
+                control_commands: vec![],
                 expected_revision: 0,
                 lease,
                 now_ms: 1001,

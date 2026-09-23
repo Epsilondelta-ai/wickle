@@ -142,6 +142,13 @@ pub enum PolicyAction {
     },
     /// Request cancellation.
     CancelRun {},
+    /// Explicitly settle an elapsed Run deadline.
+    ExpireRun {},
+    /// Authorize a Worker to process an already authenticated durable control.
+    ProcessControl {
+        /// Immutable command being processed, including its original submitter.
+        command: Box<crate::ControlCommand>,
+    },
     /// Stop one execution interval without granting authority to cancel the Run.
     StopExecution {
         /// Host shutdown or explicit segment stop; protected causes are core-owned.

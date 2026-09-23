@@ -77,6 +77,8 @@ fn snapshots_reject_tampering_and_debug_omits_protected_values() {
 #[test]
 fn interrupted_segments_require_matching_recoverable_evidence() {
     let mut segment = ExecutionSegment {
+        last_event_seq: None,
+        source_snapshot_ref: None,
         schema_version: ExecutionRecordVersion::V1,
         execution_principal_ref: id("original-user"),
         run_id: id("run"),

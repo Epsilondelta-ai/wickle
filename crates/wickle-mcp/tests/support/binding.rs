@@ -81,6 +81,7 @@ async fn plan(
             scope,
             run,
             CommitInput {
+                control_commands: vec![],
                 expected_revision,
                 lease: lease.clone(),
                 now_ms: clock.now()?.utc_ms,
@@ -196,6 +197,7 @@ pub async fn bound_arguments(
             &scope,
             AdmissionInput {
                 execution_principal_ref: id("execution-principal"),
+                execution_grant_ref: id("execution-grant"),
                 submitted: None,
                 snapshot,
                 prompt_snapshot: prompt.reference().clone(),

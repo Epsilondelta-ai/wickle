@@ -1,7 +1,7 @@
 # Recovering an interrupted run
 
-Recovery continues a persisted `Running` run after its previous execution owner has
-stopped. Use a durable `StateStore` across processes and recreate compatible model,
+Recovery continues a persisted `Running` or `Interrupted` run after its previous
+execution owner has stopped. Use a durable `StateStore` across processes and recreate compatible model,
 Tool, adapter, hook, source, skill, and verification bindings. Recovery does not
 start a worker service or require a network API.
 
@@ -26,9 +26,9 @@ let recovered = agent.resume(command, context).await?;
 ```
 
 `recovery_record` constructs a fingerprint of the observed checkpoint; the Host does
-not need to save that record separately. Under a new lease, the core compares it
-with authoritative state and commits the source, command, receipt, and recovery
-event together. An active lease returns `LeaseBusy`; a changed checkpoint requires
+not need to save that record separately. The core prepares the transition without a lease, then `begin_segment` compares
+authoritative state and atomically acquires a new lease, consumes the command,
+and commits its source, receipt and recovery event. An active lease returns `LeaseBusy`; a changed checkpoint requires
 a fresh read. Reusing the same accepted command returns its existing segment
 without charging acceptance again. Reusing its ID with different contents fails.
 
@@ -78,3 +78,16 @@ cannot be read. They are local metadata, not a saved terminal result. They may l
 a commit whose acknowledgement was lost, and are unavailable in a new process
 until it successfully reads persisted state. Once storage recovers, read the
 latest checkpoint before constructing a recovery command.
+
+
+If segment acceptance commits but its acknowledgement is lost, the caller gets a
+storage error. Retrying that command finds the same interval but does not invent
+ownership or start another driver. Once the lease expires, use a new explicit
+recovery command based on the latest checkpoint.
+
+The original execution principal and capability-grant reference remain pinned.
+A reviewer authorizes the submitted decision; their identity stays in the resume
+receipt and never replaces the execution identity. Current Tool, model, source
+and adapter permissions are still checked using that original identity.
+
+See [durable controls](run-controls.md) for cancellation and explicit expiry.

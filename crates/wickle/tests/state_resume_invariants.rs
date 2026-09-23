@@ -294,6 +294,7 @@ async fn replay_acceptance(before: &Value, after: &Value) -> (MemoryStateStore, 
     (
         store,
         CommitInput {
+            control_commands: vec![],
             expected_revision: saved.snapshot.revision,
             lease,
             now_ms,

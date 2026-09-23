@@ -233,6 +233,7 @@ async fn historical_wait_and_resume_survive_a_finished_run_and_a_new_session_run
         &scope(),
         2,
         RunEventPayload::RunWaiting {
+            outcome_ref: Some(prior_outcome_ref.clone()),
             wait_ref: wait_record.reference().clone(),
         },
     ));

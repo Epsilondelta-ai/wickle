@@ -91,7 +91,7 @@ impl PolicyPort for Policy {
                 let approved = input.approval().is_some_and(|approval| {
                     approval.actor_ref() == &id("reviewer")
                         && approval.capability_grant_ref() == &id("reviewer-grant")
-                        && context.principal_ref == &id("reviewer")
+                        && context.principal_ref == &id("requester")
                 });
                 if !approved {
                     return Ok(PolicyDecision::RequireApproval {
@@ -335,8 +335,8 @@ impl ToolExecutor for Writer {
             args,
             &object(json!({"query":"report","workspace_id":WORKSPACE,"record_id":RECORD}))
         );
-        assert_eq!(context.principal_ref, id("reviewer"));
-        assert_eq!(context.capability_grant_ref, id("reviewer-grant"));
+        assert_eq!(context.principal_ref, id("requester"));
+        assert_eq!(context.capability_grant_ref, id("requester-grant"));
         self.seen
             .lock()
             .unwrap()

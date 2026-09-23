@@ -943,6 +943,7 @@ impl SerialToolRound {
                 budget.scope(),
                 budget.run_id(),
                 CommitInput {
+                    control_commands: vec![],
                     expected_revision,
                     lease: budget.lease().clone(),
                     now_ms: now,

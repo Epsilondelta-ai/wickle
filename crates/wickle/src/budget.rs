@@ -205,6 +205,21 @@ impl RunBudget {
         if after_check_ms >= current_lease.expires_at_ms {
             return Err(failure(ErrorCode::LeaseLost, "lease"));
         }
+        match self.store.read_execution(&self.scope, &self.run_id).await {
+            Ok(history)
+                if history.controls.iter().any(|item| {
+                    item.processed_segment_id.is_none()
+                        && (!matches!(item.command.action, crate::ControlAction::Expire)
+                            || after_check_ms >= saved.snapshot.timing.deadline_at_ms)
+                }) =>
+            {
+                return Err(failure(ErrorCode::Cancelled, "control.pending"));
+            }
+            Ok(_) => {}
+            Err(error) if error.code == ErrorCode::CapabilityUnsupported => {}
+            Err(error) => return Err(error),
+        }
+        self.progress(saved.snapshot.usage.elapsed_ms)?;
         Ok(())
     }
 
@@ -249,6 +264,7 @@ impl RunBudget {
         Ok((
             reservation,
             CommitInput {
+                control_commands: vec![],
                 expected_revision,
                 lease: self.lease.clone(),
                 now_ms,

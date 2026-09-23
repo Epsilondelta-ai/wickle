@@ -15,7 +15,9 @@ fn recovery_agent(fixture: &Fixture) -> Agent {
     create_agent(recovery_profile(), fixture.bindings()).unwrap()
 }
 fn recovery(snapshot: &RunSnapshot, name: &str) -> ResumeCommand {
-    let record = snapshot.recovery_record(id("recovery-source")).unwrap();
+    let record = snapshot
+        .recovery_record(id(&format!("recovery-source-{name}")))
+        .unwrap();
     ResumeCommand {
         run_id: snapshot.run_id.clone(),
         expected_revision: snapshot.revision,
@@ -290,8 +292,8 @@ async fn recovery_retries_an_interrupted_model_without_refunding_or_reusing_its_
     );
 }
 
-#[tokio::test]
-async fn lost_recovery_acknowledgement_reuses_the_one_committed_budget_reservation() {
+#[tokio::test(start_paused = true)]
+async fn lost_recovery_acknowledgement_does_not_guess_ownership_or_charge_a_duplicate_command() {
     let fixture = Fixture::new(Response::Text, false);
     let (old, snapshot) = unfinished(&fixture).await;
     let mut bindings = fixture.bindings();
@@ -301,17 +303,43 @@ async fn lost_recovery_acknowledgement_reuses_the_one_committed_budget_reservati
     ));
     let agent = create_agent(recovery_profile(), bindings).unwrap();
     let command = recovery(&snapshot, "lost-recovery-ack");
-    let handle = completed(agent.resume(command.clone(), context()).await.unwrap());
-    let outcome = completed(handle.outcome(&context()).await.unwrap());
-    assert_eq!(outcome.result.status(), RunStatus::Succeeded);
-    let replay = completed(agent.resume(command, context()).await.unwrap());
     assert_eq!(
-        completed(replay.outcome(&context()).await.unwrap()),
-        outcome
+        agent
+            .resume(command.clone(), context())
+            .await
+            .unwrap_err()
+            .code,
+        ErrorCode::PersistenceUnavailable
     );
     let saved = fixture.store.load(&scope(), old.run_id()).await.unwrap();
     assert_eq!(saved.snapshot.recovery_receipts.len(), 1);
     assert_eq!(saved.snapshot.usage.recovery_attempts, 1);
+    assert_eq!(fixture.model.calls.load(Ordering::SeqCst), 1);
+    let replay = completed(agent.resume(command, context()).await.unwrap());
+    assert_eq!(replay.run_id(), old.run_id());
+    assert_eq!(
+        fixture
+            .store
+            .load(&scope(), old.run_id())
+            .await
+            .unwrap()
+            .snapshot,
+        saved.snapshot
+    );
+    // Only a new recovery after expiry can obtain ownership and launch a driver.
+    tokio::time::advance(std::time::Duration::from_millis(1001)).await;
+    let recovered = completed(
+        recovery_agent(&fixture)
+            .resume(recovery(&saved.snapshot, "confirmed-owner"), context())
+            .await
+            .unwrap(),
+    );
+    assert_eq!(
+        completed(recovered.outcome(&context()).await.unwrap())
+            .result
+            .status(),
+        RunStatus::Succeeded
+    );
     assert_eq!(fixture.model.calls.load(Ordering::SeqCst), 1);
 }
 

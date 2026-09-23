@@ -1963,10 +1963,8 @@ async fn cancelling_an_entered_write_retains_its_unknown_effect_and_closes_unsta
     tokio::time::timeout(Duration::from_secs(5), fixture.tools[1].entered.notified())
         .await
         .expect("write must enter before cancellation is requested");
-    assert_eq!(
-        completed(handle.cancel(id("stop"), &context()).await.unwrap()),
-        CancelReceipt::Requested
-    );
+    let receipt = completed(handle.cancel(id("stop"), &context()).await.unwrap());
+    assert!(receipt.processed_segment_id.is_none());
     let outcome = fixture.outcome(&handle).await;
     assert_eq!(outcome.result.status(), RunStatus::Cancelled);
     assert!(!outcome.unresolved_effects.is_empty());

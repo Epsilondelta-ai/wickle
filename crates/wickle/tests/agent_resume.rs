@@ -55,11 +55,11 @@ async fn approval_continues_the_same_run_with_frozen_inputs_and_a_distinct_segme
         );
         assert_eq!(
             observed[0].context.principal_ref,
-            approver.data.principal_ref
+            context().data.principal_ref
         );
         assert_eq!(
             observed[0].context.capability_grant_ref,
-            approver.data.capability_grant_ref
+            context().data.capability_grant_ref
         );
     }
     let saved = fixture.saved(&resumed).await;
@@ -145,7 +145,7 @@ async fn approval_continues_the_same_run_with_frozen_inputs_and_a_distinct_segme
                 .approval()
                 .is_some_and(|approval| approval.command_id() == &command.command_id
                     && approval.actor_ref() == &approver.data.principal_ref)
-                && principal == &approver.data.principal_ref)
+                && principal == &context().data.principal_ref)
     );
 }
 
@@ -547,9 +547,13 @@ async fn cancelling_a_saved_wait_without_a_local_driver_prevents_new_resume_comm
     );
     fixture.policy.deny_cancel.store(false, Ordering::SeqCst);
     let receipt = completed(handle.cancel(id("stop-waiting"), &context()).await.unwrap());
-    assert_ne!(receipt, CancelReceipt::NotLocal);
+    assert!(receipt.processed_segment_id.is_some());
     let result = fixture.outcome(&handle).await;
-    assert_eq!(result.result.status(), RunStatus::Cancelled);
+    assert_eq!(result.result.status(), RunStatus::Waiting);
+    assert_eq!(
+        fixture.saved(&handle).await.snapshot.status,
+        RunStatus::Cancelled
+    );
     assert!(reopened.resume(command, context()).await.is_err());
     assert_eq!(fixture.tools[1].calls.load(Ordering::SeqCst), 0);
     assert_eq!(fixture.model.calls.load(Ordering::SeqCst), 1);
@@ -587,27 +591,49 @@ async fn failed_command_commit_leaves_the_wait_intact_and_a_retry_executes_once(
     );
 }
 
-#[tokio::test]
-async fn command_commit_ack_loss_is_recovered_without_consuming_or_executing_twice() {
-    let fixture = Fixture::new(Mode::Approval);
+#[tokio::test(start_paused = true)]
+async fn command_commit_ack_loss_requires_confirmed_ownership_before_dispatch() {
+    let mut fixture = Fixture::new(Mode::Approval);
+    fixture.profile.limits.max_recovery_attempts = 1;
     let agent = fixture.agent();
     let original = fixture.started(&agent).await;
     fixture.outcome(&original).await;
     let command = fixture.approve(&original, "lost-ack").await;
     fixture.store.mode.store(2, Ordering::SeqCst);
-    let initial = agent.resume(command.clone(), context()).await;
-    if let Err(error) = initial {
-        assert_eq!(error.code, ErrorCode::PersistenceUnavailable);
-    }
-    let replay = completed(agent.resume(command, context()).await.unwrap());
     assert_eq!(
-        fixture.outcome(&replay).await.result.status(),
-        RunStatus::Succeeded
+        agent
+            .resume(command.clone(), context())
+            .await
+            .unwrap_err()
+            .code,
+        ErrorCode::PersistenceUnavailable
     );
+    let replay = completed(agent.resume(command, context()).await.unwrap());
     assert_eq!(fixture.store.consumed_commits.load(Ordering::SeqCst), 1);
+    let accepted = fixture.saved(&replay).await.snapshot;
+    assert_eq!(accepted.resume_receipts.len(), 1);
+    assert_eq!(fixture.tools[1].calls.load(Ordering::SeqCst), 0);
+    tokio::time::advance(Duration::from_millis(1001)).await;
+    let source = accepted.recovery_record(id("ack-checkpoint")).unwrap();
+    let recovered = completed(
+        agent
+            .resume(
+                ResumeCommand {
+                    run_id: replay.run_id().clone(),
+                    expected_revision: accepted.revision,
+                    command_id: id("recover-ack"),
+                    action: ResumeAction::Recover {
+                        recovery_ref: source.reference().clone(),
+                    },
+                },
+                context(),
+            )
+            .await
+            .unwrap(),
+    );
     assert_eq!(
-        fixture.saved(&replay).await.snapshot.resume_receipts.len(),
-        1
+        fixture.outcome(&recovered).await.result.status(),
+        RunStatus::Succeeded
     );
     assert_eq!(fixture.tools[1].calls.load(Ordering::SeqCst), 1);
     assert_eq!(fixture.tools[1].applied.load(Ordering::SeqCst), 1);
@@ -660,6 +686,10 @@ async fn a_cancelled_wait_rejects_an_approval_still_paused_at_its_current_policy
     );
     assert_eq!(
         fixture.outcome(&original).await.result.status(),
+        RunStatus::Waiting
+    );
+    assert_eq!(
+        fixture.saved(&original).await.snapshot.status,
         RunStatus::Cancelled
     );
     fixture.policy.resume_release.add_permits(1);
@@ -962,7 +992,8 @@ async fn expiry_and_cancellation_of_an_external_wait_preserve_the_uncertain_effe
                     .await
                     .unwrap(),
             );
-            fixture.outcome(&original).await
+            assert_eq!(fixture.outcome(&original).await, waiting);
+            fixture.saved(&original).await.snapshot.outcome.unwrap()
         };
         assert_eq!(
             outcome.result.status(),
@@ -1058,7 +1089,7 @@ async fn an_approval_accepted_before_wait_expiry_keeps_running_after_that_old_de
 }
 
 #[tokio::test]
-async fn historical_segment_outcomes_recheck_permission_after_the_protected_record_read() {
+async fn historical_segment_outcomes_recheck_permission_after_the_protected_history_read() {
     let fixture = Fixture::new(Mode::Approval);
     let agent = fixture.agent();
     let original = fixture.started(&agent).await;
@@ -1066,11 +1097,7 @@ async fn historical_segment_outcomes_recheck_permission_after_the_protected_reco
     let command = fixture.approve(&original, "approval").await;
     let resumed = completed(agent.resume(command, context()).await.unwrap());
     fixture.outcome(&resumed).await;
-    let saved = fixture.saved(&resumed).await;
-    let previous_ref = saved.snapshot.resume_receipts[0]
-        .previous_outcome_ref
-        .clone();
-    *fixture.store.pause_record.lock().unwrap() = Some(previous_ref);
+    fixture.store.pause_execution.store(true, Ordering::SeqCst);
     let checks_before = fixture.policy.details_checks.load(Ordering::SeqCst);
     let observer = tokio::spawn(async move { original.outcome(&context()).await });
     gate(&fixture.store.record_entered).await;
@@ -1319,4 +1346,39 @@ async fn persistent_storage_failure_reports_the_last_confirmed_revision_and_unce
     let denied = original.outcome(&context()).await.unwrap_err();
     assert_eq!(denied.code, ErrorCode::AccessDenied);
     assert!(denied.persistence.is_none());
+}
+
+#[tokio::test]
+async fn a_concurrent_duplicate_acceptance_cannot_override_a_fresh_permission_denial() {
+    let fixture = Fixture::new(Mode::Approval);
+    let agent = fixture.agent();
+    let original = fixture.started(&agent).await;
+    fixture.outcome(&original).await;
+    let command = fixture.approve(&original, "concurrent-permission").await;
+    fixture.policy.pause_resume_check.store(2, Ordering::SeqCst);
+    let first_agent = agent.clone();
+    let first_command = command.clone();
+    let denied = tokio::spawn(async move { first_agent.resume(first_command, context()).await });
+    gate(&fixture.policy.resume_entered).await;
+    let accepted = completed(agent.resume(command, context()).await.unwrap());
+    fixture.policy.deny_resume.store(true, Ordering::SeqCst);
+    fixture.policy.resume_release.add_permits(1);
+    assert_eq!(
+        denied.await.unwrap().unwrap_err().code,
+        ErrorCode::AccessDenied
+    );
+    assert_eq!(
+        fixture.outcome(&accepted).await.result.status(),
+        RunStatus::Succeeded
+    );
+    assert_eq!(fixture.tools[1].calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        fixture
+            .saved(&accepted)
+            .await
+            .snapshot
+            .resume_receipts
+            .len(),
+        1
+    );
 }
