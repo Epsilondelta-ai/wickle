@@ -2,6 +2,7 @@ use crate::error;
 use serde_json::{Value, json};
 use wickle::*;
 
+pub(crate) const INVALID_REPLAY_KIND: &str = "wickle.anthropic.messages.v2";
 pub(crate) const REPLAY_KIND: &str = "wickle.anthropic.messages.v1";
 pub(crate) fn invalid() -> ContractError {
     error(ErrorCode::InvalidContract, "content")
@@ -19,6 +20,7 @@ pub fn encode_request(request: &ModelRequest) -> Result<Value, ContractError> {
     }
     let mut messages: Vec<Value> = vec![];
     let mut system = vec![];
+    let mut invalid_tools = std::collections::BTreeMap::<String, String>::new();
     for message in &request.messages {
         let opaque: Vec<_> = message
             .content
@@ -38,7 +40,14 @@ pub fn encode_request(request: &ModelRequest) -> Result<Value, ContractError> {
                     ModelContent::Text{text} if message.role != ModelRole::Tool => json!({"type":"text","text":text}),
                     ModelContent::Json{value} if message.role != ModelRole::Tool => json!({"type":"text","text":serde_json::to_string(value).map_err(|_|invalid())?}),
                     ModelContent::ToolCall{provider_call_id,name,arguments} if message.role==ModelRole::Assistant => json!({"type":"tool_use","id":provider_call_id,"name":name,"input":arguments}),
-                    ModelContent::ToolResult{provider_call_id,content} if message.role==ModelRole::Tool => json!({"type":"tool_result","tool_use_id":provider_call_id,"content":serde_json::to_string(content).map_err(|_|invalid())?}),
+                    ModelContent::ToolResult{provider_call_id,content} if message.role==ModelRole::Tool => {
+                        let raw = invalid_tools.remove(provider_call_id.as_str());
+                        let failed = raw.is_some();
+                        let content = match raw { Some(raw) => json!({"INVALID_JSON":raw,"feedback":content}), None => content.clone() };
+                        let mut block = json!({"type":"tool_result","tool_use_id":provider_call_id,"content":serde_json::to_string(&content).map_err(|_|invalid())?});
+                        if failed { block["is_error"] = json!(true); }
+                        block
+                    },
                     _=>return Err(error(ErrorCode::ModelContextIncompatible,"message")),
                 });
             }
@@ -48,16 +57,29 @@ pub fn encode_request(request: &ModelRequest) -> Result<Value, ContractError> {
                 return Err(invalid());
             }
             let data = opaque[0].data();
-            if data.get("kind") != Some(&json!(REPLAY_KIND))
-                || data.as_object().is_none_or(|o| o.len() != 2)
-            {
-                return Err(error(ErrorCode::ModelContextIncompatible, "replay"));
-            }
+            let invalid_arguments = match data.get("kind").and_then(Value::as_str) {
+                Some(REPLAY_KIND) if data.as_object().is_some_and(|o| o.len() == 2) => None,
+                Some(INVALID_REPLAY_KIND) if data.as_object().is_some_and(|o| o.len() == 3) => {
+                    Some(
+                        data.get("invalid_arguments")
+                            .and_then(Value::as_object)
+                            .filter(|map| !map.is_empty())
+                            .ok_or_else(invalid)?,
+                    )
+                }
+                _ => return Err(error(ErrorCode::ModelContextIncompatible, "replay")),
+            };
             let blocks = data
                 .get("blocks")
                 .and_then(Value::as_array)
                 .ok_or_else(invalid)?;
             let decoded = inspect_blocks(blocks)?;
+            if invalid_arguments.is_some_and(|map| {
+                map.keys()
+                    .any(|id| !decoded.calls.iter().any(|call| &call.id == id))
+            }) {
+                return Err(error(ErrorCode::ModelContextIncompatible, "replay"));
+            }
             let text: String = message
                 .content
                 .iter()
@@ -101,7 +123,24 @@ pub fn encode_request(request: &ModelRequest) -> Result<Value, ContractError> {
             for ((id, name, args), original) in calls.iter().zip(&decoded.calls) {
                 if id.as_str() != original.id
                     || name.as_str() != original.name
-                    || serde_json::to_value(args).map_err(|_| invalid())? != original.input
+                    || match invalid_arguments.and_then(|map| map.get(&original.id)) {
+                        Some(raw) => {
+                            let raw = raw.as_str().ok_or_else(invalid)?;
+                            if parse_provider_arguments(raw, request.limits.max_input_bytes).is_ok()
+                                || original.input != json!({})
+                                || !args.is_empty()
+                            {
+                                true
+                            } else {
+                                invalid_tools
+                                    .insert(original.id.clone(), raw.into())
+                                    .is_some()
+                            }
+                        }
+                        None => {
+                            serde_json::to_value(args).map_err(|_| invalid())? != original.input
+                        }
+                    }
                 {
                     return Err(error(ErrorCode::ModelContextIncompatible, "replay"));
                 }
@@ -109,6 +148,14 @@ pub fn encode_request(request: &ModelRequest) -> Result<Value, ContractError> {
             let mut replay = blocks.clone();
             for block in &mut replay {
                 if block["type"] == "tool_use" {
+                    if let Some(raw) = invalid_arguments.and_then(|map| {
+                        block
+                            .get("id")
+                            .and_then(Value::as_str)
+                            .and_then(|id| map.get(id))
+                    }) {
+                        block["input"] = json!({"INVALID_JSON":raw});
+                    }
                     for key in ["caller", "toolset_name"] {
                         if block.get(key).is_some_and(Value::is_null) {
                             block.as_object_mut().ok_or_else(invalid)?.remove(key);
@@ -193,7 +240,11 @@ pub fn encode_request(request: &ModelRequest) -> Result<Value, ContractError> {
                     .as_str()
                     .strip_prefix("anthropic.")
                     .unwrap_or(request.route.model_id.as_str()),
-                "claude-opus-5" | "claude-sonnet-5" | "claude-opus-4-7" | "claude-opus-4-8"
+                "claude-opus-5"
+                    | "claude-opus-5-5"
+                    | "claude-sonnet-5"
+                    | "claude-opus-4-7"
+                    | "claude-opus-4-8"
             ) {
                 return Err(error(ErrorCode::ModelOptionUnsupported, "manual_thinking"));
             }
@@ -203,18 +254,19 @@ pub fn encode_request(request: &ModelRequest) -> Result<Value, ContractError> {
             if budget.is_some() {
                 return Err(error(ErrorCode::ModelOptionUnsupported, "thinking_budget"));
             }
+            let model = request
+                .route
+                .model_id
+                .as_str()
+                .strip_prefix("anthropic.")
+                .unwrap_or(request.route.model_id.as_str());
             if mode == Some("disabled")
-                && request
-                    .route
-                    .model_id
-                    .as_str()
-                    .strip_prefix("anthropic.")
-                    .unwrap_or(request.route.model_id.as_str())
-                    == "claude-opus-5"
-                && matches!(
-                    request.options.get("effort").and_then(Value::as_str),
-                    Some("xhigh" | "max")
-                )
+                && (model == "claude-opus-5-5"
+                    || (model == "claude-opus-5"
+                        && matches!(
+                            request.options.get("effort").and_then(Value::as_str),
+                            Some("xhigh" | "max")
+                        )))
             {
                 return Err(error(ErrorCode::ModelOptionUnsupported, "disabled_effort"));
             }
