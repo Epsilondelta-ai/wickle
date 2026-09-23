@@ -67,3 +67,21 @@ execution; recovery depends on stored checkpoints and lease fencing.
 Timeouts require cooperative asynchronous implementations. Blocking callbacks
 cannot be forcibly stopped by a Rust future timeout. Isolate such extensions
 in a Host-managed process when hard termination is required.
+
+## Runnable policy and recovery example
+
+The [agent consumer](../tests/support/agent_consumer.rs) supplies a
+`MaintenancePolicy` with a pinned identity, configuration and application-state
+schema. On `info.interruption.cause == HostShutdown`, it returns `Pause` with
+an `operations` state; other causes use the protected default. The state records
+application metadata and does not replace the core status.
+
+```sh
+python3 scripts/check-package.py --consumer agent
+```
+
+After the stop, the example reads the authorized snapshot, obtains its
+`recovery_record`, and submits a `ResumeAction::Recover` with a new stable command
+ID. The model becomes available again, the new handle succeeds, the old handle
+retains its interrupted outcome, and repeating the command performs no new work.
+The example uses synthetic model ports and real SQLite, not a live provider.

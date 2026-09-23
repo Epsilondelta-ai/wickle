@@ -1,5 +1,8 @@
 # Run an agent
 
+For a runnable Host, begin with [the quickstart](quickstart.md). Existing
+applications can follow [the v0.2.0 migration guide](migration-v0.2.md).
+
 `create_agent` builds a scope-bound facade from an `AgentProfile` and existing
 Host components. The runtime executes text requests through admission, context
 preparation, model routing, and serial tool calls until a turn ends or execution
@@ -388,3 +391,16 @@ The submitted snapshot records caller options and Host-provided system inputs,
 not newly resolved catalog defaults. Current effective configuration remains in
 the separate execution snapshot. Older records without submitted-input evidence
 use their historical comparison path rather than fabricated new metadata.
+
+## Saved execution configuration
+
+The selected model port compiles exposed Tool schemas into a saved
+[provider contract](provider-tool-schemas.md). The core restores proposed
+arguments before defaults, validation and system binding. Binding, Profile and
+Run options follow the [documented precedence](model-routing.md); auxiliary
+purposes keep separate configuration. Use [saved-step inspection](step-inspection.md)
+to read that evidence without repeating execution.
+
+An [interruption policy](interruption-policy.md) can attach validated application
+state to a recoverable stop. Use [durable controls](run-controls.md) for command
+receipts, interval-specific outcomes and read-only deadline observation.

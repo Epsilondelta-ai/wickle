@@ -46,6 +46,8 @@ pub async fn run_once(
 
 `start` は実行ハンドル、`outcome` は保存済みの結果を返します。`Guarded::ApprovalRequired` は承認が必要な状態です。例の構成要素はアプリケーション側で用意します。詳細は実行ガイドを参照してください。
 
+モデルの認証情報なしで試すには、ソースを取得して `python3 scripts/check-package.py --consumer agent` を実行します。手順は[クイックスタート](docs/quickstart.md)を参照してください。
+
 ## 主な機能
 
 - **ツール入力の分離:** モデル用引数だけを公開し、workspace ID などはシステム入力から注入します。
@@ -54,6 +56,10 @@ pub async fn run_once(
 - **実行上限:** モデル呼び出し、ツール試行、修正、経過時間を制限します。
 - **アクセス制御:** Host ポリシーで組織とワークスペースの範囲を分離します。
 - **文脈と出力:** アーティファクトと根拠、文脈圧縮、構造化出力、verifier に対応します。
+
+- **ツールスキーマの変換:** 元の入力制約を保ち、プロバイダーごとのスキーマと引数表現に変換します。
+- **明示的なモデルオプション:** バインディングの既定値を Profile、Run の順に上書きし、設定の由来を保存します。
+- **中断と診断:** 復旧可能な中断にアプリ状態を記録し、機密値を伏せた保存済みステップを確認できます。
 
 ## モデルとアダプター
 
@@ -72,6 +78,12 @@ pub async fn run_once(
 ローカル永続化には `wickle-state-sqlite`、拡張の構成には `wickle-adapter-runtime` を使用します。メモリやグラフは ContextSource またはツールとして接続し、実行後の更新は外部イベントコンシューマーが担当します。
 
 ## ドキュメント
+
+- [クイックスタート](docs/quickstart.md)
+- [v0.2.0 への移行](docs/migration-v0.2.md)
+- [プロバイダー別ツール契約](docs/provider-tool-schemas.md)
+- [中断ポリシー](docs/interruption-policy.md)
+- [保存済みステップの診断](docs/step-inspection.md)
 
 - [依存関係の設定](docs/installation.md)
 - [バインディング・リクエスト・結果](docs/agents.md)

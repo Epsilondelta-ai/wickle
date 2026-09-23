@@ -26,7 +26,8 @@ A successful database open or JSON decode is not a successful recovery test. Ver
 
 ## Upgrade support
 
-No automatic migration to a future runtime format is promised by this guide. Use the migration and compatibility instructions shipped with the target release. Where an active execution cannot be migrated safely, stop accepting new work, resolve or finish active executions with the original runtime, and then upgrade using a backed-up store.
+No automatic migration to a future runtime format is promised by this guide. Use the migration and compatibility instructions shipped with the target release.
+For this contract change, follow [the v0.2.0 migration guide](migration-v0.2.md). Where an active execution cannot be migrated safely, stop accepting new work, resolve or finish active executions with the original runtime, and then upgrade using a backed-up store.
 
 Do not start an older runtime against a store that has written a newer format unless downgrade support is explicitly documented. Restoring a database backup does not undo external tool effects; reconcile those effects before resuming restored executions.
 

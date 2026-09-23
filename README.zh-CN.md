@@ -46,6 +46,8 @@ pub async fn run_once(
 
 `start` 返回执行句柄，`outcome` 返回已保存的结果。`Guarded::ApprovalRequired` 表示应用需要取得批准。示例中的组件由应用预先配置，详见运行指南。
 
+无需模型凭据即可运行示例：在源码目录执行 `python3 scripts/check-package.py --consumer agent`。完整步骤见[快速开始](docs/quickstart.md)。
+
 ## 主要功能
 
 - **工具输入分离：** 仅向模型公开其负责的参数，工作区 ID 等可信值由系统输入注入。
@@ -54,6 +56,10 @@ pub async fn run_once(
 - **执行限制：** 限制模型调用、工具尝试、修复次数与运行时间。
 - **访问范围：** 通过 Host 策略隔离组织与工作区。
 - **上下文与输出：** 管理原始文件和证据，支持上下文压缩、结构化输出与 verifier。
+
+- **工具模式转换：** 保留原始输入约束，并转换为各提供者支持的模式和参数表示。
+- **显式模型选项：** 按绑定默认值、Profile、Run 的顺序覆盖设置，并保存选项来源。
+- **中断与诊断：** 为可恢复的中断记录应用状态，查看已保存步骤时隐藏敏感值。
 
 ## 模型和适配器
 
@@ -72,6 +78,12 @@ pub async fn run_once(
 使用 `wickle-state-sqlite` 实现本地持久化，使用 `wickle-adapter-runtime` 组装扩展。记忆与图服务通过 ContextSource 或工具连接，执行后的写入由外部事件消费者负责。
 
 ## 使用文档
+
+- [快速开始](docs/quickstart.md)
+- [迁移到 v0.2.0](docs/migration-v0.2.md)
+- [提供者工具契约](docs/provider-tool-schemas.md)
+- [中断策略](docs/interruption-policy.md)
+- [已保存步骤诊断](docs/step-inspection.md)
 
 - [安装依赖](docs/installation.md)
 - [绑定、请求和结果](docs/agents.md)

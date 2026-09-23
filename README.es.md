@@ -46,6 +46,8 @@ pub async fn run_once(
 
 `start` devuelve un identificador de ejecución y `outcome` su resultado guardado. `Guarded::ApprovalRequired` indica que la aplicación debe obtener aprobación. El ejemplo recibe componentes previamente configurados; consulta la guía de agentes para prepararlos.
 
+Prueba un ejemplo sin credenciales de modelos con `python3 scripts/check-package.py --consumer agent` desde una copia del código fuente. Consulta el [inicio rápido](docs/quickstart.md).
+
 ## Características
 
 - **Entradas separadas:** el modelo aporta sus argumentos; los identificadores de confianza se inyectan desde entradas del sistema.
@@ -54,6 +56,10 @@ pub async fn run_once(
 - **Límites:** llamadas al modelo, intentos de herramientas, correcciones y tiempo de ejecución.
 - **Autorización:** políticas del Host y ámbitos de organización y espacio de trabajo.
 - **Contexto y resultados:** artefactos, evidencias, compresión y validación de salidas.
+
+- **Adaptación de esquemas:** conserva las restricciones originales al traducir esquemas y argumentos para cada proveedor.
+- **Opciones explícitas:** Profile y Run reemplazan los valores de la vinculación; el origen de cada opción queda guardado.
+- **Interrupción e inspección:** adjunta estado de la aplicación a pausas recuperables e inspecciona pasos guardados con datos sensibles ocultos.
 
 ## Proveedores y adaptadores
 
@@ -72,6 +78,12 @@ Conecta estos servicios mediante crates opcionales. Configura explícitamente ve
 Usa `wickle-state-sqlite` para persistencia local y `wickle-adapter-runtime` para componer extensiones. Los servicios de memoria y grafos se conectan como ContextSource o herramientas; un consumidor externo gestiona las escrituras posteriores.
 
 ## Documentación
+
+- [Inicio rápido](docs/quickstart.md)
+- [Migrar a v0.2.0](docs/migration-v0.2.md)
+- [Contratos de herramientas por proveedor](docs/provider-tool-schemas.md)
+- [Políticas de interrupción](docs/interruption-policy.md)
+- [Inspección de pasos guardados](docs/step-inspection.md)
 
 - [Instalación](docs/installation.md)
 - [Agentes, solicitudes y resultados](docs/agents.md)

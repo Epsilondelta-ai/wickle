@@ -62,8 +62,9 @@ SQLite serializes writers. It is a reference implementation for local persistenc
 applications with larger storage or concurrency needs can supply another
 `StateStore` implementation.
 
-All committed events and protected records are retained. No pruning or schema
-migration is performed. The Host controls database file access and should treat
+All committed events and protected records are retained. No pruning is performed.
+The supported execution-history checkpoint upgrade is described below; arbitrary
+future database migrations are not implied. The Host controls database file access and should treat
 checkpoint data as protected application state. A checksum detects inconsistent
 data; it does not replace access control.
 

@@ -58,7 +58,7 @@ fn routing_snapshot(scope: &Scope) -> Result<RoutingSnapshot, ContractError> {
         let capabilities = ModelCapabilities {
             revision: id("capabilities"),
             features: BTreeSet::from([id("text")]),
-            options_schema: json!({"type":"object","properties":{"reasoning_effort":{"enum":["high"]}},"additionalProperties":false}),
+            options_schema: json!({"type":"object","properties":{"reasoning_effort":{"enum":["low","medium","high"]}},"additionalProperties":false}),
             context_window: 4096.try_into().unwrap(),
             max_output_tokens: 512.try_into().unwrap(),
         };
@@ -74,7 +74,7 @@ fn routing_snapshot(scope: &Scope) -> Result<RoutingSnapshot, ContractError> {
             evidence: vec![],
         };
         let mut binding = ModelBinding {
-            default_options: Default::default(),
+            default_options: JsonObject::from([("reasoning_effort".into(), json!("low"))]),
             binding: reference(name),
             model: model.reference(),
             requested_model: model.model_id.clone(),
@@ -196,7 +196,7 @@ struct ExampleModel {
     entered: tokio::sync::Notify,
     route: ResolvedModelRoute,
     calls: AtomicUsize,
-    fail: bool,
+    fail: AtomicBool,
 }
 impl ModelPort for ExampleModel {
     fn binding(&self) -> ModelPortBinding {
@@ -221,7 +221,7 @@ impl ModelPort for ExampleModel {
             self.entered.notify_one();
             return Box::pin(stream::pending());
         }
-        let events = if self.fail {
+        let events = if self.fail.load(Ordering::SeqCst) {
             vec![Ok(ModelEvent::ResponseError {
                 kind: ModelFailureKind::RateLimited,
                 metadata: ModelResponseMetadata::default(),
@@ -229,7 +229,7 @@ impl ModelPort for ExampleModel {
         } else {
             vec![
                 Ok(ModelEvent::TextDelta {
-                    text: "second provider result".into(),
+                    text: format!("{} provider result", self.route.provider),
                 }),
                 Ok(ModelEvent::ResponseCompleted {
                     finish: ModelFinish::Stop,
@@ -239,6 +239,23 @@ impl ModelPort for ExampleModel {
             ]
         };
         Box::pin(stream::iter(events))
+    }
+}
+// Application metadata remains separate from the runtime status.
+struct MaintenancePolicy;
+impl InterruptionPolicy for MaintenancePolicy {
+    fn identity(&self) -> VersionedRef { reference("maintenance-policy") }
+    fn decide<'a>(&'a self, info: &'a InterruptionInfo) -> PortFuture<'a, InterruptionDecision> {
+        Box::pin(async move {
+            Ok(if matches!(&info.interruption.cause, InterruptionCause::HostShutdown) {
+                InterruptionDecision {
+                    action: InterruptionAction::Pause,
+                    app_state: Some(AppState { namespace: id("operations"), status: id("maintenance"), metadata: info.configuration.clone() }),
+                }
+            } else {
+                InterruptionDecision { action: InterruptionAction::UseDefault, app_state: None }
+            })
+        })
     }
 }
 struct Estimate;
@@ -276,14 +293,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         entered: tokio::sync::Notify::new(),
         route: snapshot.route_for_binding(&reference("first"))?,
         calls: AtomicUsize::new(0),
-        fail: true,
+        fail: AtomicBool::new(true),
     });
     let second = Arc::new(ExampleModel {
         hold: AtomicBool::new(false),
         entered: tokio::sync::Notify::new(),
         route: snapshot.route_for_binding(&reference("second"))?,
         calls: AtomicUsize::new(0),
-        fail: false,
+        fail: AtomicBool::new(false),
     });
     let policy = Arc::new(PolicyGate::new(
         Arc::new(ExamplePolicy),
@@ -309,7 +326,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         r#"{
         "schema_version":"wickle.agent-profile.v1","agent_id":"assistant","version":"1.0.0",
         "name":"Assistant","description":"Agent consumer","instructions":{"text":"Use supplied information"},
-        "model_binding":"primary","tools":[],"skills":[],"connectors":[],
+        "model_binding":"primary","model_options":{"reasoning_effort":"medium"},"tools":[],"skills":[],"connectors":[],
         "context_policy":{"strategy":"bounded"},"output_contract":{"type":"text"},
         "limits":{"max_model_calls":4,"max_tool_attempts":0,"max_repair_attempts":0,"max_recovery_attempts":2,"max_elapsed_ms":10000}
     }"#,
@@ -317,7 +334,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let agent = create_agent(
         profile,
         AgentBindings {
-            interruption_policy: None,
+            interruption_policy: Some(InterruptionPolicyBinding {
+                policy: Arc::new(MaintenancePolicy),
+                configuration: JsonObject::from([("reason".into(), json!("maintenance"))]),
+                app_state_schema: Some(AppStateSchema {
+                    namespace: id("operations"),
+                    schema: json!({"type":"object","properties":{"namespace":{"const":"operations"},"status":{"enum":["maintenance"]},"metadata":{"type":"object","properties":{"reason":{"type":"string"}},"required":["reason"],"additionalProperties":false}},"required":["namespace","status","metadata"],"additionalProperties":false}),
+                }),
+                timeout_ms: 1000.try_into()?,
+            }),
             scope: scope.clone(),
             state: store.clone(),
             policy,
@@ -397,6 +422,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(second.calls.load(Ordering::SeqCst), 1);
     let view = completed(agent.get_run(&run_id, &context).await?)?;
     assert_eq!(view.status, RunStatus::Succeeded);
+    assert!(!view.deadline_expired);
     let events: Vec<_> = handle
         .events(started.seq.get(), context.clone())
         .try_collect()
@@ -424,6 +450,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let stopped_outcome = completed(tokio::time::timeout(Duration::from_secs(5), stopped.outcome(&context)).await??)?;
     assert!(matches!(&stopped_outcome.result, OutcomeResult::Interrupted { interruption }
         if interruption.cause == InterruptionCause::HostShutdown && interruption.recoverable));
+    assert_eq!(stopped_outcome.app_state.as_ref().map(|state| &state.status), Some(&id("maintenance")));
     let reopened = SqliteStateStore::open(&database)?;
     let saved = reopened.load(&scope, stopped.run_id()).await?;
     assert_eq!(saved.snapshot.outcome, Some(stopped_outcome.clone()));
@@ -451,14 +478,39 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(composition.recorded_run_outcome.as_ref().and_then(|outcome| outcome.completion_basis), Some(CompletionBasis::TurnEnded));
     assert!(composition.attempts.iter().any(|attempt| attempt.evidence.contains(&InspectionEvidence::ResponseObserved)));
     assert_eq!(composition.model.as_ref().and_then(|model| model.configuration.as_ref()).and_then(|configuration| configuration.effective.get("reasoning_effort")), Some(&json!("high")));
+    assert_eq!(composition.model.as_ref().and_then(|model| model.configuration.as_ref()).and_then(|configuration| configuration.sources.get("reasoning_effort")), Some(&ModelOptionSource::Run));
     let encoded = serde_json::to_value(&inspection)?;
     assert!(encoded["composition"]["model"].get("connection_ref").is_none());
     assert!(encoded["composition"]["model"].get("target").is_none());
     assert_eq!(SqliteStateStore::open(&database)?.load(&scope, &run_id).await?, restored);
     assert_eq!(first.calls.load(Ordering::SeqCst), 2);
     assert_eq!(second.calls.load(Ordering::SeqCst), 1);
+    // Recover a separate cooperatively interrupted interval through the public
+    // API. The synthetic primary becomes available after the stop.
+    let recover_request = RunRequest { request_id: id("recoverable-request"), session_id: id("recoverable-session"), input: vec![InputContent::Text { text: "Continue after maintenance".into() }], trigger: RunTrigger::User {}, model_options: JsonObject::from([("reasoning_effort".into(), json!("high"))]), max_output_tokens: None, output_contract: None };
+    let paused = completed(agent.start(recover_request.clone(), context.clone()).await?)?;
+    tokio::time::timeout(Duration::from_secs(5), first.entered.notified()).await?;
+    completed(paused.stop_execution(InterruptionCause::HostShutdown, &context).await?)?;
+    let paused_outcome = completed(paused.outcome(&context).await?)?;
+    assert_eq!(paused_outcome.result.status(), RunStatus::Interrupted);
+    let checkpoint = SqliteStateStore::open(&database)?.load(&scope, paused.run_id()).await?;
+    let source = checkpoint.snapshot.recovery_record(id("maintenance-recovery"))?;
+    first.hold.store(false, Ordering::SeqCst);
+    first.fail.store(false, Ordering::SeqCst);
+    let command = ResumeCommand { run_id: paused.run_id().clone(), expected_revision: checkpoint.snapshot.revision, command_id: id("recover-maintenance"), action: ResumeAction::Recover { recovery_ref: source.reference().clone() } };
+    let recovered = completed(agent.resume(command.clone(), context.clone()).await?)?;
+    let recovered_outcome = completed(recovered.outcome(&context).await?)?;
+    assert_eq!(recovered_outcome.result.status(), RunStatus::Succeeded);
+    assert_eq!(recovered_outcome.output, vec![InputContent::Text { text: "first provider result".into() }]);
+    assert_ne!(paused.segment_id(), recovered.segment_id());
+    assert_eq!(completed(paused.outcome(&context).await?)?, paused_outcome);
+    let duplicate = completed(agent.resume(command, context.clone()).await?)?;
+    assert_eq!(duplicate.segment_id(), recovered.segment_id());
+    assert_eq!(completed(duplicate.outcome(&context).await?)?, recovered_outcome);
+    assert_eq!(first.calls.load(Ordering::SeqCst), 4);
+    assert_eq!(second.calls.load(Ordering::SeqCst), 1);
     println!(
-        "agent consumer: pure construction, detached execution after observer drop, fallback under shared budgets, stored outcome and event replay, duplicate request without new model calls, SQLite reopen, recoverable host stop, durable replay and read-only stored composition inspection"
+        "agent consumer: pure construction, detached execution after observer drop, fallback under shared budgets, stored outcome and event replay, duplicate request without new model calls, SQLite reopen, custom interruption state and recovery, immutable prior outcomes, option provenance, durable replay and read-only stored composition inspection"
     );
     Ok(())
 }

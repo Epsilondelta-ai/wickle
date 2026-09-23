@@ -46,6 +46,8 @@ pub async fn run_once(
 
 `start` returns a handle to the Run; `outcome` returns its saved result. `Guarded::ApprovalRequired` means the application must obtain approval. The example accepts components configured by your application; see the agent guide for binding setup.
 
+Run an example without model credentials: `python3 scripts/check-package.py --consumer agent` from a source checkout. See the [quickstart](docs/quickstart.md).
+
 ## Features
 
 - **Tool input ownership:** expose only model-owned arguments; inject workspace IDs, user IDs and other trusted values through registered system inputs.
@@ -54,6 +56,10 @@ pub async fn run_once(
 - **Bounded execution:** limit model calls, tool attempts, repairs and elapsed time; use shared budgets for compression and verification.
 - **Scoped access:** separate organizations and workspaces through Host policy and scoped bindings.
 - **Context and output:** preserve artifacts and evidence, compact context, and validate structured outputs or verifier criteria.
+
+- **Tool schema adaptation:** preserve canonical constraints while compiling schemas and argument encodings for each provider.
+- **Explicit model options:** override binding defaults with Profile and Run settings, with stored option provenance.
+- **Interruption and inspection:** attach application state to recoverable stops and inspect saved steps with sensitive fields redacted.
 
 ## Model providers and adapters
 
@@ -72,6 +78,12 @@ Optional crates connect the core to the following services. Model versions, depl
 Use `wickle-state-sqlite` for local persistence and `wickle-adapter-runtime` to assemble scoped extensions. Memory and graph services can implement `ContextSource` or tools; post-run writes belong to an external event consumer.
 
 ## Documentation
+
+- [Quickstart](docs/quickstart.md)
+- [Migrate to v0.2.0](docs/migration-v0.2.md)
+- [Provider Tool contracts](docs/provider-tool-schemas.md)
+- [Interruption policies](docs/interruption-policy.md)
+- [Saved-step inspection](docs/step-inspection.md)
 
 - [Install and configure dependencies](docs/installation.md)
 - [Agent bindings, requests and results](docs/agents.md)

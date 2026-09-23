@@ -46,6 +46,8 @@ pub async fn run_once(
 
 `start`는 실행 핸들을 반환하고, `outcome`은 저장된 결과를 반환합니다. `Guarded::ApprovalRequired`이면 애플리케이션에서 승인을 받아야 합니다. 이 예제의 구성요소는 호출하는 애플리케이션에서 준비하며, 바인딩 설정은 에이전트 실행 가이드를 참고하세요.
 
+모델 자격증명 없이 예제를 실행하려면 소스 체크아웃에서 `python3 scripts/check-package.py --consumer agent`를 실행하세요. [빠른 시작](docs/quickstart.md)에 전체 절차가 있습니다.
+
 ## 주요 기능
 
 - **도구 입력 분리:** 모델이 작성할 인자만 노출하고, workspace ID·user ID 등 신뢰할 값은 등록된 시스템 입력으로 주입합니다.
@@ -54,6 +56,10 @@ pub async fn run_once(
 - **실행 한도:** 모델 호출·도구 시도·보완·경과 시간을 제한하며 압축과 검증에도 같은 실행 예산을 적용합니다.
 - **범위별 접근 제어:** Host 정책과 바인딩으로 조직·워크스페이스의 접근 범위를 구분합니다.
 - **문맥과 결과 처리:** 원본 artifact와 근거를 유지하고 문맥 압축, 구조화 출력 검사, verifier 기반 검증을 수행합니다.
+
+- **도구 스키마 변환:** 원래 입력 제약을 유지하면서 공급자별 스키마와 인자 표현으로 변환합니다.
+- **명시적 모델 옵션:** 바인딩 기본값에 Profile·Run 설정을 순서대로 적용하고 옵션의 출처를 저장합니다.
+- **중단과 진단:** 복구 가능한 중단에 앱 상태를 기록하고, 민감한 값을 가린 저장 단계 진단을 조회합니다.
 
 ## 모델 제공자와 어댑터
 
@@ -72,6 +78,12 @@ pub async fn run_once(
 로컬 영속 저장에는 `wickle-state-sqlite`, 범위별 확장 구성에는 `wickle-adapter-runtime`을 사용합니다. 메모리·그래프 서비스는 ContextSource나 도구로 연결하며, 실행 후 기록 갱신은 외부 이벤트 소비자가 담당합니다.
 
 ## 사용 문서
+
+- [빠른 시작](docs/quickstart.md)
+- [v0.2.0 이관](docs/migration-v0.2.md)
+- [공급자별 도구 계약](docs/provider-tool-schemas.md)
+- [중단 정책](docs/interruption-policy.md)
+- [저장 단계 진단](docs/step-inspection.md)
 
 - [설치와 의존성 구성](docs/installation.md)
 - [에이전트 바인딩·요청·결과](docs/agents.md)
