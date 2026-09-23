@@ -389,3 +389,66 @@ fn qualified_models_are_pinned_without_rewriting_an_older_unqualified_contract()
         .is_err()
     );
 }
+
+#[test]
+fn stored_v1_contract_keeps_original_guidance_digest_and_codec_while_new_runs_use_v2() {
+    let original = tool();
+    let text = include_str!("fixtures/provider-tool-contract-v1.json");
+    let saved: Value = parse_json(text).unwrap();
+    let digest: JsonDigest = serde_json::from_value(saved["digest"].clone()).unwrap();
+    let restored =
+        CompiledToolContract::restore(text, &original, &target(), &digest, Default::default())
+            .unwrap();
+    assert_eq!(serde_json::to_value(&restored).unwrap(), saved);
+    let current =
+        CompiledToolContract::compile(&original, target(), &Restricted, Default::default())
+            .unwrap();
+    assert_ne!(restored.digest(), current.digest());
+    assert_eq!(restored.wire_tool(), current.wire_tool());
+    for raw in [
+        r#"{"q":"ok","n":{"present":false,"value":null}}"#,
+        r#"{"q":"ok","n":{"present":true,"value":null}}"#,
+    ] {
+        let before = restored.decode_arguments(raw, Default::default()).unwrap();
+        let after = current.decode_arguments(raw, Default::default()).unwrap();
+        assert_eq!(before, after);
+        original.validate_model_inputs(&after).unwrap();
+    }
+    let current_text = serde_json::to_string(&current).unwrap();
+    let again = CompiledToolContract::restore(
+        &current_text,
+        &original,
+        &target(),
+        current.digest(),
+        Default::default(),
+    )
+    .unwrap();
+    assert_eq!(again.digest(), current.digest());
+    assert!(
+        restored
+            .decode_arguments(
+                r#"{"q":"ok","n":{"present":false,"value":"extra"}}"#,
+                Default::default()
+            )
+            .is_err()
+    );
+    let mut unknown = saved;
+    unknown["data"]["schema_version"] = json!("wickle.provider-tool-contract.v999");
+    let changed = versioned_digest_json(
+        &serde_json::to_string(&unknown["data"]).unwrap(),
+        CanonicalizationVersion::SortedJsonV1,
+        JsonTextLimits::default(),
+    )
+    .unwrap();
+    unknown["digest"] = serde_json::to_value(&changed).unwrap();
+    assert!(
+        CompiledToolContract::restore(
+            &serde_json::to_string(&unknown).unwrap(),
+            &original,
+            &target(),
+            &changed,
+            Default::default()
+        )
+        .is_err()
+    );
+}

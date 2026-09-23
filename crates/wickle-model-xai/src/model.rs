@@ -18,6 +18,9 @@ impl XaiModel {
     }
 }
 impl ModelPort for XaiModel {
+    fn tool_schema_compiler(&self) -> std::sync::Arc<dyn ProviderToolSchemaCompiler> {
+        std::sync::Arc::new(crate::XaiToolSchemaCompiler)
+    }
     fn binding(&self) -> ModelPortBinding {
         self.connection.binding()
     }
