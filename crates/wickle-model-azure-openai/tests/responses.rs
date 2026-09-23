@@ -209,7 +209,7 @@ async fn azure_tools_and_json_output_keep_original_route_bound_replay() {
     );
     assert_eq!(calls[1].body["model"], "finance-deployment");
     assert_eq!(calls[1].body["text"]["format"]["strict"], true);
-    assert_eq!(calls[0].body["tools"][0]["strict"], false);
+    assert_eq!(calls[0].body["tools"][0]["strict"], true);
 }
 
 fn inspection_context() -> ModelInspectionContext {
@@ -557,5 +557,345 @@ async fn two_documented_releases_keep_deployment_and_model_identity_distinct() {
     for (index, request) in requests.iter().enumerate() {
         assert_eq!(request.body["model"], format!("deployment-{index}"));
         assert_eq!(request.path, "/openai/v1/responses");
+    }
+}
+
+fn compiled_tool(schema: Value) -> CompiledTool {
+    let parameters = schema["properties"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .cloned()
+        .collect();
+    SchemaCompiler::new()
+        .compile(
+            ToolDescriptor {
+                tool: reference("lookup"),
+                name: id("lookup"),
+                description: "Read data".into(),
+                input_schema: schema,
+                agent_parameters: parameters,
+                system_bindings: None,
+                output_schema: json!({"type":"string"}),
+                side_effect: ToolSideEffect::ReadOnly,
+                concurrency: ToolConcurrency::Serial,
+                retry: ToolRetryPolicy::Never,
+                reconcile: false,
+                max_output_bytes: 4096.try_into().unwrap(),
+            },
+            &SystemInputRegistry::new(vec![]).unwrap(),
+        )
+        .unwrap()
+}
+
+#[tokio::test]
+async fn azure_projection_respects_its_native_limits_and_preserves_validation_and_release_identity()
+{
+    let server = Server::new(vec![Reply::sse(&events("base-model", "done"))]).await;
+    let connection = connection(&server);
+    let model = AzureOpenAiModel::new(connection.clone());
+    let mut request = request(&connection, "base-model");
+    let original = compiled_tool(
+        json!({"type":"object","properties":{"query":{"type":"string","pattern":"^[a-z]+$","minLength":2}},"required":["query"],"additionalProperties":false}),
+    );
+    let target = ProviderToolTarget::for_route(&request.route);
+    let contract = CompiledToolContract::compile(
+        &original,
+        target.clone(),
+        model.tool_schema_compiler().as_ref(),
+        Default::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        contract.wire_tool().model_input_schema["properties"]["query"],
+        json!({"type":"string"})
+    );
+    let decoded = contract
+        .decode_arguments(r#"{"query":"INVALID"}"#, Default::default())
+        .unwrap();
+    assert!(original.validate_model_inputs(&decoded).is_err());
+    assert!(
+        contract
+            .enforcement()
+            .iter()
+            .any(
+                |entry| entry.canonical_pointer == "/properties/query/pattern"
+                    && entry.core
+                    && entry.context_text
+                    && !entry.provider_native
+            )
+    );
+    let saved = serde_json::to_string(&contract).unwrap();
+    CompiledToolContract::restore(
+        &saved,
+        &original,
+        &target,
+        contract.digest(),
+        Default::default(),
+    )
+    .unwrap();
+    request.route.model_version = id("new-release");
+    assert!(
+        CompiledToolContract::restore(
+            &saved,
+            &original,
+            &ProviderToolTarget::for_route(&request.route),
+            contract.digest(),
+            Default::default()
+        )
+        .is_err()
+    );
+    request.route.model_version = id("release");
+    request.tools = vec![contract.wire_tool().clone()];
+    collect_model_response(&request, model.generate(&request, &context(&request)))
+        .await
+        .unwrap();
+    let calls = server.requests.lock().unwrap();
+    assert_eq!(calls[0].body["tools"][0]["strict"], true);
+    assert_eq!(
+        calls[0].body["tools"][0]["parameters"],
+        contract.wire_tool().model_input_schema
+    );
+    assert_eq!(calls[0].body["model"], "finance-deployment");
+}
+
+#[tokio::test]
+async fn azure_compacts_wide_and_deep_values_without_narrowing_the_canonical_shape() {
+    let server = Server::new(vec![]).await;
+    let connection = connection(&server);
+    let model = AzureOpenAiModel::new(connection.clone());
+    let target = ProviderToolTarget::for_route(&request(&connection, "base-model").route);
+    let properties: serde_json::Map<String, Value> = (0..100)
+        .map(|i| (format!("field{i}"), json!({"type":"string"})))
+        .collect();
+    let required: Vec<_> = properties.keys().cloned().collect();
+    let wide = json!({"type":"object","properties":properties,"required":required,"additionalProperties":false});
+    let wide_value: serde_json::Map<String, Value> = (0..100)
+        .map(|i| (format!("field{i}"), json!("value")))
+        .collect();
+    let mut deep =
+        json!({"type":"object","properties":{},"required":[],"additionalProperties":false});
+    let mut deep_value = json!({});
+    for _ in 0..5 {
+        deep = json!({"type":"object","properties":{"child":deep},"required":["child"],"additionalProperties":false});
+        deep_value = json!({"child":deep_value});
+    }
+    for (schema, value) in [(wide, Value::Object(wide_value)), (deep, deep_value)] {
+        let original = compiled_tool(
+            json!({"type":"object","properties":{"query":schema},"required":["query"],"additionalProperties":false}),
+        );
+        let azure = CompiledToolContract::compile(
+            &original,
+            target.clone(),
+            model.tool_schema_compiler().as_ref(),
+            Default::default(),
+        )
+        .unwrap();
+        let openai = CompiledToolContract::compile(
+            &original,
+            target.clone(),
+            &wickle_model_responses::ResponsesToolSchemaCompiler,
+            Default::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            openai.wire_tool().model_input_schema,
+            *original.model_input_schema()
+        );
+        assert_eq!(
+            azure.wire_tool().model_input_schema["properties"]["query"],
+            json!({"type":"string"})
+        );
+        assert_ne!(azure.compiler(), openai.compiler());
+        let canonical = JsonObject::from([("query".into(), value)]);
+        let encoded = azure.encode_arguments(&canonical).unwrap();
+        let decoded = azure
+            .decode_arguments(
+                &serde_json::to_string(&encoded).unwrap(),
+                Default::default(),
+            )
+            .unwrap();
+        assert_eq!(decoded, canonical);
+        original.validate_model_inputs(&decoded).unwrap();
+        let invalid = azure
+            .decode_arguments(r#"{"query":"42"}"#, Default::default())
+            .unwrap();
+        assert!(original.validate_model_inputs(&invalid).is_err());
+    }
+}
+
+#[tokio::test]
+async fn top_level_property_limit_uses_one_json_object_without_exposing_system_fields() {
+    let server = Server::new(vec![
+        Reply::sse(&events("base-model", "done")),
+        Reply::sse(&events("base-model", "done")),
+    ])
+    .await;
+    let connection = connection(&server);
+    let model = AzureOpenAiModel::new(connection.clone());
+    for count in [100, 101] {
+        let properties: serde_json::Map<String, Value> = (0..count)
+            .map(|i| (format!("field{i}"), json!({"type":["string","null"]})))
+            .collect();
+        let mut required: Vec<_> = properties.keys().cloned().collect();
+        // Omission/null preservation is checked on the packed case.
+        if count == 101 {
+            required.retain(|name| name != "field0");
+        }
+        let original = compiled_tool(
+            json!({"type":"object","properties":properties,"required":required,"additionalProperties":false}),
+        );
+        let registry = SystemInputRegistry::new(vec![SystemInputDefinition {
+            key: id("workspace_id"),
+            version: id("1"),
+            value_schema: json!({"type":"string","format":"uuid"}),
+            source: SystemInputSource::Run {},
+        }])
+        .unwrap();
+        let mut descriptor = original.descriptor().clone();
+        descriptor.input_schema["properties"]["workspace_id"] =
+            json!({"type":"string","format":"uuid","description":"hidden-system-schema"});
+        descriptor.input_schema["required"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!("workspace_id"));
+        let original = SchemaCompiler::new()
+            .compile(descriptor, &registry)
+            .unwrap();
+        let mut request = request(&connection, "base-model");
+        let target = ProviderToolTarget::for_route(&request.route);
+        let contract = CompiledToolContract::compile(
+            &original,
+            target.clone(),
+            model.tool_schema_compiler().as_ref(),
+            Default::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            contract.wire_tool().model_input_schema["properties"]
+                .as_object()
+                .unwrap()
+                .len(),
+            if count == 100 { 100 } else { 1 }
+        );
+        let canonical: JsonObject = (0..count)
+            .filter(|i| count == 100 || *i != 0)
+            .map(|i| {
+                (
+                    format!("field{i}"),
+                    if i == 1 { Value::Null } else { json!("value") },
+                )
+            })
+            .collect();
+        let encoded = contract.encode_arguments(&canonical).unwrap();
+        let decoded = contract
+            .decode_arguments(
+                &serde_json::to_string(&encoded).unwrap(),
+                Default::default(),
+            )
+            .unwrap();
+        assert_eq!(decoded, canonical);
+        original.validate_model_inputs(&decoded).unwrap();
+        let saved = serde_json::to_string(&contract).unwrap();
+        let restored = CompiledToolContract::restore(
+            &saved,
+            &original,
+            &target,
+            contract.digest(),
+            Default::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            restored
+                .decode_arguments(
+                    &serde_json::to_string(&encoded).unwrap(),
+                    Default::default()
+                )
+                .unwrap(),
+            canonical
+        );
+        for fragment in contract.constraint_fragments() {
+            assert!(!fragment.text.contains("hidden-system-schema"));
+        }
+        if count == 101 {
+            for invalid in [
+                json!({"arguments":"{"}),
+                json!({"arguments":"[]"}),
+                json!({"arguments":{}}),
+                json!({"arguments":"{}","extra":1}),
+                json!({}),
+                json!({"arguments":"{\"field1\":1,\"field1\":2}"}),
+                json!({"arguments":"{\"field1\":0.1234567890123456789012345}"}),
+            ] {
+                assert!(
+                    contract
+                        .decode_arguments(&invalid.to_string(), Default::default())
+                        .is_err()
+                );
+            }
+            let invalid = contract
+                .decode_arguments(r#"{"arguments":"{}"}"#, Default::default())
+                .unwrap();
+            assert!(original.validate_model_inputs(&invalid).is_err());
+            let hidden = contract
+                .decode_arguments(
+                    r#"{"arguments":"{\"workspace_id\":\"invented\"}"}"#,
+                    Default::default(),
+                )
+                .unwrap();
+            assert!(original.validate_model_inputs(&hidden).is_err());
+        }
+        request.tools = vec![contract.wire_tool().clone()];
+        collect_model_response(&request, model.generate(&request, &context(&request)))
+            .await
+            .unwrap();
+    }
+    for request in server.requests.lock().unwrap().iter() {
+        assert_eq!(request.body["tools"][0]["strict"], true);
+    }
+}
+
+#[tokio::test]
+async fn empty_object_depth_boundaries_keep_openai_compiler_revision_compatible() {
+    let server = Server::new(vec![]).await;
+    let connection = connection(&server);
+    let target = ProviderToolTarget::for_route(&request(&connection, "base-model").route);
+    for levels in [5, 6, 11] {
+        let mut schema =
+            json!({"type":"object","properties":{},"required":[],"additionalProperties":false});
+        for _ in 1..levels {
+            schema = json!({"type":"object","properties":{"child":schema},"required":["child"],"additionalProperties":false});
+        }
+        let original = compiled_tool(schema);
+        let openai = CompiledToolContract::compile(
+            &original,
+            target.clone(),
+            &wickle_model_responses::ResponsesToolSchemaCompiler,
+            Default::default(),
+        )
+        .unwrap();
+        assert_eq!(openai.compiler().version, id("1"));
+        assert_eq!(
+            openai.wire_tool().model_input_schema,
+            *original.model_input_schema()
+        );
+        let azure = CompiledToolContract::compile(
+            &original,
+            target.clone(),
+            &wickle_model_responses::AzureResponsesToolSchemaCompiler,
+            Default::default(),
+        )
+        .unwrap();
+        if levels == 5 {
+            assert_eq!(
+                azure.wire_tool().model_input_schema,
+                *original.model_input_schema()
+            );
+        } else {
+            assert_eq!(
+                azure.wire_tool().model_input_schema["properties"]["child"],
+                json!({"type":"string"})
+            );
+        }
     }
 }

@@ -81,13 +81,32 @@ function calls/results, strict-schema output, bounded SSE parsing, and route-bou
 opaque replay. Azure retains its own resource validation, credentials, transport,
 and metadata inspection. The [xAI adapter](xai.md) also uses this codec, with
 separate reasoning-item validation, replay identity, and usage decoding. OpenAI
-and Azure retain their original validation mode. The shared codec does not imply
+and Azure apply separate provider schema policies. The shared codec does not imply
 identical model features; model and binding option schemas must describe each
 deployment's supported options.
 The adapter explicitly maps `reasoning_effort`, `temperature`, `top_p` and
 `verbosity`, and rejects arbitrary option/body overrides. Native provider tools,
 stored conversation state, automatic truncation and incomplete executable Tool
 plans are disabled.
+
+`AzureOpenAiModel::tool_schema_compiler()` supplies a versioned Azure projection.
+It shares the reversible Presence/JSON-text lowering with OpenAI while applying
+Azure's documented limit of 100 object properties and five nesting levels.
+Tools with more than 100 top-level model-owned fields use one JSON-string
+property containing the whole original argument object. The core restores it
+before validation, preserving omitted fields and null values.
+Unsupported native constraints, including patterns and numeric bounds, remain in
+the model's constraint context and the core's canonical validator. The underlying
+model/release, rather than the deployment alias, identifies the saved Tool target.
+[Azure structured output rules](https://learn.microsoft.com/en-us/azure/foundry/openai/how-to/structured-outputs).
+
+Compatible projected Tools use `strict: true` with `parallel_tool_calls: false`.
+Direct low-level callers supplying incompatible uncompiled schemas retain explicit
+non-strict mode. The encoder does not rewrite either form. Complete malformed Tool
+arguments are preserved for the core repair loop; incomplete or conflicting SSE
+responses remain protocol failures. The core restores ordinary inputs, validates
+original constraints, and binds system inputs before any executor is called.
+See [Tool schema contracts](provider-tool-schemas.md) for omission/null handling.
 
 Local HTTP tests and an extracted-package consumer cover the transport contract.
 Live availability and model-release support require checks against configured Azure

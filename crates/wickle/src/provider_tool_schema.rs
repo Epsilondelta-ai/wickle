@@ -103,6 +103,11 @@ pub struct ArgumentFieldMapping {
 pub enum ArgumentDecodePlan {
     /// Property names and values are unchanged.
     Identity {},
+    /// Entire canonical argument object encoded as one JSON string property.
+    JsonObjectText {
+        /// The sole wire property; its decoded value must be an object.
+        wire_name: String,
+    },
     /// Explicit complete field mapping; unknown wire properties are errors.
     Fields {
         /// Ordered mappings with unique wire and canonical names.
@@ -271,6 +276,12 @@ impl CompiledToolContract {
             {
                 text.push_str(" For json_text, the wire value is a JSON string parsed by the core. With optional=false it encodes the canonical value itself. With optional=true it must encode [] for omission or [value] for a supplied value, including [null] for explicit null. Nested optional properties remain absent inside that JSON document; do not replace absence with null.");
             }
+            if matches!(
+                &projection.decode_plan,
+                ArgumentDecodePlan::JsonObjectText { .. }
+            ) {
+                text.push_str(" For json_object_text, send exactly the named wire property as a JSON string containing the entire canonical argument object. Preserve absent properties and explicit null values inside it; do not include system-owned fields.");
+            }
             let digest = data_digest(&text);
             vec![ToolConstraintFragment {
                 id: Id::new(format!(
@@ -420,6 +431,10 @@ impl CompiledToolContract {
     pub fn encode_arguments(&self, input: &JsonObject) -> Result<JsonObject, ContractError> {
         match &self.data.decode_plan {
             ArgumentDecodePlan::Identity {} => Ok(input.clone()),
+            ArgumentDecodePlan::JsonObjectText { wire_name } => Ok(JsonObject::from([(
+                wire_name.clone(),
+                Value::String(serde_json::to_string(input).map_err(|_| arguments())?),
+            )])),
             ArgumentDecodePlan::Fields { fields } => {
                 if input
                     .keys()
@@ -474,6 +489,16 @@ impl CompiledToolContract {
         let object = parse_provider_arguments(raw, limits.max_argument_bytes)?;
         match &self.data.decode_plan {
             ArgumentDecodePlan::Identity {} => Ok(object.clone()),
+            ArgumentDecodePlan::JsonObjectText { wire_name } => {
+                if object.len() != 1 {
+                    return Err(arguments());
+                }
+                let text = object
+                    .get(wire_name)
+                    .and_then(Value::as_str)
+                    .ok_or_else(arguments)?;
+                parse_provider_arguments(text, limits.max_argument_bytes)
+            }
             ArgumentDecodePlan::Fields { fields } => {
                 let mut result = JsonObject::new();
                 for (name, value) in &object {
@@ -540,6 +565,13 @@ fn validate_codec(
         .ok_or_else(|| invalid("provider_tool.wire_properties"))?;
     match plan {
         ArgumentDecodePlan::Identity {} if canonical.keys().eq(wire.keys()) => Ok(()),
+        ArgumentDecodePlan::JsonObjectText { wire_name }
+            if wire.len() == 1
+                && wire.get(wire_name).and_then(|value| value.get("type"))
+                    == Some(&json!("string")) =>
+        {
+            Ok(())
+        }
         ArgumentDecodePlan::Fields { fields } => {
             let mut from = BTreeSet::new();
             let mut to = BTreeSet::new();

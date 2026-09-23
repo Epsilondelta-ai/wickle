@@ -49,6 +49,12 @@ Invalid JSON, duplicate keys, and precision-losing numbers are argument errors.
 The OpenAI adapter selects this representation for nested optional/open objects
 and provider schema limits; the original validator remains authoritative.
 
+`ArgumentDecodePlan::JsonObjectText` packs the entire model-owned argument object
+into one JSON-string property when a provider cannot represent its root property
+count. Decoding requires exactly that outer field and a valid inner object; the
+original model schema still rejects missing required fields or unknown keys.
+System bindings remain outside the model-owned object.
+
 After decoding, apply the canonical model defaults and validation, run the
 before-tool transformation and revalidation, bind system inputs, and validate the
 full original execution schema. This contract does not execute or authorize a
