@@ -1,7 +1,6 @@
 //! AWS signing, endpoint, binary/SSE framing and metadata contracts without AWS calls.
 mod support;
 use aws_smithy_types::event_stream::{Header, HeaderValue, Message};
-use base64::{Engine, engine::general_purpose::STANDARD};
 use futures_util::StreamExt;
 use serde_json::{Value, json};
 use std::{sync::Arc, time::Duration};
@@ -9,37 +8,6 @@ use support::*;
 use wickle::*;
 use wickle_model_bedrock::*;
 
-fn frame(value: &Value) -> Vec<u8> {
-    let payload =
-        serde_json::to_vec(&json!({"bytes":STANDARD.encode(serde_json::to_vec(value).unwrap())}))
-            .unwrap();
-    let message = Message::new(payload)
-        .add_header(Header::new(
-            ":message-type",
-            HeaderValue::String("event".into()),
-        ))
-        .add_header(Header::new(
-            ":event-type",
-            HeaderValue::String("chunk".into()),
-        ))
-        .add_header(Header::new(
-            ":content-type",
-            HeaderValue::String("application/json".into()),
-        ));
-    let mut bytes = vec![];
-    aws_smithy_eventstream::frame::write_message_to(&message, &mut bytes).unwrap();
-    bytes
-}
-fn reply(operation: BedrockOperation, data: &[Value]) -> Reply {
-    let mut reply = Reply::sse(data);
-    reply.headers = vec![("x-amzn-requestid", "aws-request".into())];
-    if operation == BedrockOperation::InvokeStream {
-        reply.content_type = "application/vnd.amazon.eventstream";
-        reply.body = data.iter().flat_map(frame).collect();
-        reply.chunk = 3;
-    }
-    reply
-}
 fn configured(
     server: &Server,
     operation: BedrockOperation,
@@ -692,5 +660,116 @@ async fn two_documented_releases_keep_independent_selectors() {
             assert_eq!(request.body["model"], release);
             assert_eq!(request.path, "/anthropic/v1/messages");
         }
+    }
+}
+
+#[tokio::test]
+async fn named_http_stream_errors_are_recoverable_without_classifying_every_424_as_transient() {
+    for (header, body, expected) in [
+        (
+            Some("ModelStreamErrorException"),
+            json!({}),
+            ModelFailureKind::Transport,
+        ),
+        (
+            Some("aws.bedrock#ModelStreamErrorException:legacy"),
+            json!({}),
+            ModelFailureKind::Transport,
+        ),
+        (
+            None,
+            json!({"__type":"aws.bedrock#ModelStreamErrorException"}),
+            ModelFailureKind::Transport,
+        ),
+        (
+            None,
+            json!({"code":"ModelStreamErrorException:legacy"}),
+            ModelFailureKind::Transport,
+        ),
+        (
+            Some("ModelErrorException"),
+            json!({"__type":"ModelStreamErrorException"}),
+            ModelFailureKind::Unsupported,
+        ),
+        (
+            None,
+            json!({"code":"ModelErrorException"}),
+            ModelFailureKind::Unsupported,
+        ),
+        (None, json!({}), ModelFailureKind::Unsupported),
+        (
+            None,
+            json!({"code":"UnknownException","message":"ModelStreamErrorException"}),
+            ModelFailureKind::Unsupported,
+        ),
+    ] {
+        let mut response = Reply::json(424, body);
+        if let Some(header) = header {
+            response.headers.push(("x-amzn-errortype", header.into()));
+        }
+        let server = Server::new(vec![response]).await;
+        let connection = configured(
+            &server,
+            BedrockOperation::InvokeStream,
+            BedrockEndpoint::Runtime,
+            false,
+        );
+        let request = request(&connection, MODEL);
+        let model = BedrockModel::new(connection);
+        let failure =
+            collect_model_response(&request, model.generate(&request, &context(&request)))
+                .await
+                .unwrap_err();
+        assert_eq!(failure.kind, expected, "header {header:?}");
+        assert_eq!(server.requests.lock().unwrap().len(), 1);
+    }
+}
+
+#[tokio::test]
+async fn error_classification_does_not_wait_for_named_bodies_and_bounds_unknown_bodies() {
+    for case in ["header-stall", "body-deadline", "body-limit"] {
+        let mut response = Reply::json(
+            424,
+            json!({"__type":"ModelStreamErrorException","message":"x".repeat(10000)}),
+        );
+        response.stall = case != "body-limit";
+        if case == "header-stall" {
+            response
+                .headers
+                .push(("x-amzn-errortype", "ModelStreamErrorException".into()));
+        }
+        let server = Server::new(vec![response]).await;
+        let mut options = options(&server);
+        options.operation = BedrockOperation::InvokeStream;
+        if case == "body-limit" {
+            options.max_transport_bytes = 64;
+            options.max_event_bytes = 64;
+        }
+        let connection =
+            BedrockConnection::new(scope(), reference("account"), credentials(), options)
+                .unwrap()
+                .with_clock(Arc::new(FixedClock));
+        let request = request(&connection, MODEL);
+        let model = BedrockModel::new(connection);
+        let mut context = context(&request);
+        if case == "body-deadline" {
+            context.deadline = tokio::time::Instant::now() + Duration::from_millis(50);
+        }
+        let failure = tokio::time::timeout(
+            Duration::from_secs(1),
+            collect_model_response(&request, model.generate(&request, &context)),
+        )
+        .await
+        .unwrap()
+        .unwrap_err();
+        assert_eq!(
+            failure.kind,
+            match case {
+                "header-stall" => ModelFailureKind::Transport,
+                "body-deadline" => ModelFailureKind::Timeout,
+                _ => ModelFailureKind::Unsupported,
+            }
+        );
+        assert_eq!(server.requests.lock().unwrap().len(), 1);
     }
 }

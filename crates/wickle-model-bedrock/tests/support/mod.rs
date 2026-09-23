@@ -1,3 +1,5 @@
+use aws_smithy_types::event_stream::{Header, HeaderValue, Message};
+use base64::{Engine, engine::general_purpose::STANDARD};
 use serde_json::{Value, json};
 use wickle::*;
 use wickle_model_bedrock::*;
@@ -125,3 +127,35 @@ pub fn events(model: &str, text: &str) -> Vec<Value> {
 #[path = "../../../../tests/support/model_http.rs"]
 mod http;
 pub use http::*;
+
+pub fn frame(value: &Value) -> Vec<u8> {
+    let payload =
+        serde_json::to_vec(&json!({"bytes":STANDARD.encode(serde_json::to_vec(value).unwrap())}))
+            .unwrap();
+    let message = Message::new(payload)
+        .add_header(Header::new(
+            ":message-type",
+            HeaderValue::String("event".into()),
+        ))
+        .add_header(Header::new(
+            ":event-type",
+            HeaderValue::String("chunk".into()),
+        ))
+        .add_header(Header::new(
+            ":content-type",
+            HeaderValue::String("application/json".into()),
+        ));
+    let mut bytes = vec![];
+    aws_smithy_eventstream::frame::write_message_to(&message, &mut bytes).unwrap();
+    bytes
+}
+pub fn reply(operation: BedrockOperation, data: &[Value]) -> Reply {
+    let mut reply = Reply::sse(data);
+    reply.headers = vec![("x-amzn-requestid", "aws-request".into())];
+    if operation == BedrockOperation::InvokeStream {
+        reply.content_type = "application/vnd.amazon.eventstream";
+        reply.body = data.iter().flat_map(frame).collect();
+        reply.chunk = 3;
+    }
+    reply
+}

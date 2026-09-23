@@ -29,11 +29,23 @@ Native Messages uses `/anthropic/v1/messages`, header `anthropic-version: 2023-0
 
 Implement `BedrockCredentialProvider` to obtain or refresh AWS credentials through the Host's chosen credential chain. The callback receives scope, region, audience, cancellation and deadline. Return `BedrockCredential::Aws` for SigV4, including a session token and expiry when appropriate. Inference also accepts `BedrockCredential::Bearer`. Metadata inspection requires a separate IAM provider; an inference bearer token is not reused for control-plane calls. Static credential values implement the provider interface for simple Hosts and fixtures. Debug output excludes credential values.
 
-The adapter signs the final URL, headers and serialized payload. It refuses expired credentials and disables redirects and transport retries. Core attempt accounting and retry policy remain authoritative. Cancellation and deadlines stop credential lookup or the active HTTP stream.
+The adapter signs the final URL, headers and serialized payload. It refuses expired credentials and disables redirects and transport retries. Core attempt accounting and retry policy remain authoritative. HTTP 424 is
+recoverable only when the AWS error identifier names `ModelStreamErrorException`;
+other 424 failures retain their existing classification. The adapter reads bounded
+error bodies only when the header does not identify the error, and never retries
+locally. [AWS streaming errors](https://docs.aws.amazon.com/bedrock/latest/APIReference/API_runtime_InvokeModelWithResponseStream.html),
+[Error identifier format](https://smithy.io/2.0/aws/protocols/aws-restjson1-protocol.html#operation-error-serialization). Cancellation and deadlines stop credential lookup or the active HTTP stream.
 
 ## Messages, tools and output
 
 The adapter reuses the [Anthropic Messages protocol](anthropic.md) for system instructions, ordinary tool calls/results, effort/thinking options and signed continuation blocks. Native service tools and unsupported options fail explicitly. AWS binary frames additionally undergo length, CRC, header, event-count and total-byte validation before Messages decoding. Incomplete or corrupt streams cannot complete an attempt.
+
+The native Tool compiler preserves the model-owned JSON Schema, optional fields,
+and conditional constraints. Core validation restores defaults and binds system
+inputs before execution. Complete invalid argument text is retained for bounded
+repair, including through AWS binary framing; signed thinking and unrelated valid
+calls remain intact. Transport truncation and frame corruption cannot produce an
+executable Tool plan. See the [shared repair contract](anthropic.md#streaming-and-replay).
 
 Register capabilities for the specific model, endpoint and operation. Mantle Messages rejects JSON-schema output; the adapter refuses that combination before HTTP. Runtime structured output still depends on the selected model and operation. A shared codec does not establish service capability or account availability.
 

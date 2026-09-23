@@ -229,6 +229,12 @@ impl State<'_> {
             .transpose()?;
         if !response.status().is_success() {
             let status = response.status().as_u16();
+            let error_type = response
+                .headers()
+                .get("x-amzn-errortype")
+                .and_then(|value| value.to_str().ok())
+                .map(aws_error_name)
+                .map(str::to_owned);
             let mut kind = match status {
                 401 | 403 => ModelFailureKind::Authentication,
                 404 => ModelFailureKind::Unavailable,
@@ -238,7 +244,12 @@ impl State<'_> {
                 500..=599 => ModelFailureKind::Transport,
                 _ => ModelFailureKind::Unsupported,
             };
-            if status == 400 {
+            // Only the named stream error is documented as retryable at 424.
+            // Generic ModelErrorException shares that status and stays unchanged.
+            if status == 424 && error_type.as_deref() == Some("ModelStreamErrorException") {
+                kind = ModelFailureKind::Transport;
+            }
+            if status == 400 || (status == 424 && error_type.is_none()) {
                 let mut bytes = vec![];
                 loop {
                     let chunk = tokio::select! { biased;
@@ -260,8 +271,19 @@ impl State<'_> {
                     .map_err(|_| ())
                     .and_then(|text| parse_json(text).map_err(|_| ()))
                 {
-                    if value.pointer("/error/code").and_then(Value::as_str)
-                        == Some("context_length_exceeded")
+                    if status == 424
+                        && value
+                            .get("code")
+                            .or_else(|| value.get("__type"))
+                            .and_then(Value::as_str)
+                            .map(aws_error_name)
+                            == Some("ModelStreamErrorException")
+                    {
+                        kind = ModelFailureKind::Transport;
+                    }
+                    if status == 400
+                        && value.pointer("/error/code").and_then(Value::as_str)
+                            == Some("context_length_exceeded")
                     {
                         kind = ModelFailureKind::ContextOverflow;
                     }
@@ -333,4 +355,10 @@ fn transport_error(error_value: reqwest::Error) -> ContractError {
         },
         "transport",
     )
+}
+
+// AWS restJson1 error names may include a colon suffix and namespace prefix.
+fn aws_error_name(value: &str) -> &str {
+    let value = value.split_once(':').map_or(value, |(name, _)| name);
+    value.split_once('#').map_or(value, |(_, name)| name)
 }
