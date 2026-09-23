@@ -1276,7 +1276,7 @@ async fn legacy_terminal_records_keep_read_only_start_outcome_and_event_replay()
     while let Some(event) = events.next().await {
         last = Some(event.unwrap().event_type);
     }
-    assert_eq!(last.as_deref(), Some("run.finished"));
+    assert_eq!(last, Some("run.finished"));
     assert_eq!(fixture.model.calls.load(Ordering::SeqCst), 1);
     assert_eq!(
         restored
