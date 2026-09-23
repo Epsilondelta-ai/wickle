@@ -98,6 +98,10 @@ async fn signed_empty_thinking_and_tool_inputs_are_replayed_once_with_results() 
     let response = collect_model_response(&request, model.generate(&request, &context(&request)))
         .await
         .unwrap();
+    assert_eq!(
+        response.continuation[0].data()["kind"],
+        "wickle.anthropic.messages.v1"
+    );
     assert_eq!(response.tool_calls.len(), 1);
     assert_eq!(response.tool_calls[0].model_inputs["query"], "alpha");
     request.messages.push(ModelMessage {
@@ -237,13 +241,8 @@ async fn truncated_unsigned_misordered_and_conflicting_streams_are_not_successes
         "usage",
         "double-stop",
         "native-tool",
-        "partial-json",
     ] {
-        let mut data = if case == "partial-json" {
-            tool_events()
-        } else {
-            events("claude-opus-5", "answer")
-        };
+        let mut data = events("claude-opus-5", "answer");
         match case {
             "truncated" => {
                 data.pop();
@@ -259,7 +258,6 @@ async fn truncated_unsigned_misordered_and_conflicting_streams_are_not_successes
             "usage" => data[7]["usage"]["output_tokens"] = json!(0),
             "double-stop" => data.push(json!({"type":"message_stop"})),
             "native-tool" => data[4]["content_block"]["type"] = json!("server_tool_use"),
-            "partial-json" => data[6]["delta"]["partial_json"] = json!("\"alpha\""),
             _ => unreachable!(),
         }
         let server = Server::new(vec![Reply::sse(&data)]).await;
@@ -566,4 +564,289 @@ async fn two_documented_release_ids_coexist_without_replacing_connection_state()
     for (request, release) in requests.iter().zip(releases) {
         assert_eq!(request.body["model"], release);
     }
+}
+
+fn invalid_tool_reply(raw: &str, initial: bool) -> Reply {
+    let mut data = tool_events();
+    data[5]["delta"]["partial_json"] = json!(raw);
+    data.remove(6);
+    if initial {
+        data[4]["content_block"]["input"] = json!({"query":"initial"});
+        data.remove(5);
+    }
+    let mut reply = Reply::sse(&data);
+    if initial {
+        reply.body = String::from_utf8(reply.body)
+            .unwrap()
+            .replace(
+                r#""input":{"query":"initial"}"#,
+                &format!("\"input\":{raw}"),
+            )
+            .into_bytes();
+    }
+    reply
+}
+#[tokio::test]
+async fn complete_invalid_arguments_preserve_raw_evidence_and_signed_thinking_for_repair() {
+    for (raw, initial) in [
+        (r#"{"query":"unfinished""#, false),
+        (r#"{"query":0.12345678901234567890123456789}"#, false),
+        (r#"{"query":0.12345678901234567890123456789}"#, true),
+        (r#"{"query":"one","query":"two"}"#, false),
+        (r#"{"query":"one","query":"two"}"#, true),
+        (r#"{"query":1e400}"#, true),
+        (r#"["not an object"]"#, true),
+        (r#"["not an object"]"#, false),
+    ] {
+        let server = Server::new(vec![
+            invalid_tool_reply(raw, initial),
+            Reply::sse(&events("claude-opus-5", "repair acknowledged")),
+        ])
+        .await;
+        let connection = connection(&server);
+        let model = AnthropicModel::new(connection.clone());
+        let mut request = request(&connection, "claude-opus-5");
+        tool(&mut request);
+        let first = collect_model_response(&request, model.generate(&request, &context(&request)))
+            .await
+            .unwrap();
+        assert_eq!(first.finish, ModelFinish::ToolCalls);
+        assert_eq!(first.tool_calls[0].raw_arguments.as_deref(), Some(raw));
+        assert!(first.tool_calls[0].model_inputs.is_empty());
+        assert_eq!(
+            first.tool_calls[0].validation,
+            ToolCallValidation::InvalidArguments
+        );
+        assert_eq!(
+            first.continuation[0].data()["kind"],
+            "wickle.anthropic.messages.v2"
+        );
+        request.messages.push(ModelMessage {
+            role: ModelRole::Assistant,
+            content: vec![
+                ModelContent::ToolCall {
+                    provider_call_id: id("toolu_1"),
+                    name: id("lookup"),
+                    arguments: JsonObject::new(),
+                },
+                ModelContent::Opaque {
+                    continuation: first.continuation[0].clone(),
+                },
+            ],
+        });
+        request.messages.push(ModelMessage {
+            role: ModelRole::Tool,
+            content: vec![ModelContent::ToolResult {
+                provider_call_id: id("toolu_1"),
+                content: json!({"status":"failed","error":{"code":"invalid_arguments"}}),
+            }],
+        });
+        request.request_id = id("repair");
+        let second = collect_model_response(&request, model.generate(&request, &context(&request)))
+            .await
+            .unwrap();
+        assert_eq!(second.text, "repair acknowledged");
+        let requests = server.requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        let body = &requests[1].body;
+        assert_eq!(
+            body["messages"][1]["content"][0],
+            json!({"type":"thinking","thinking":"","signature":"signature-fixture"})
+        );
+        assert_eq!(
+            body["messages"][1]["content"][1]["input"],
+            json!({"INVALID_JSON":raw})
+        );
+        let result = &body["messages"][2]["content"][0];
+        assert_eq!(result["is_error"], true);
+        assert_eq!(
+            parse_json(result["content"].as_str().unwrap()).unwrap()["INVALID_JSON"],
+            raw
+        );
+        drop(requests);
+        for mode in ["valid-raw", "unknown-call", "changed-input", "extra-field"] {
+            let mut changed = first.continuation[0].data().clone();
+            match mode {
+                "valid-raw" => changed["invalid_arguments"]["toolu_1"] = json!("{}"),
+                "unknown-call" => changed["invalid_arguments"]["other"] = json!("{"),
+                "changed-input" => changed["blocks"][1]["input"] = json!({"query":"tampered"}),
+                _ => changed["extra"] = json!(true),
+            }
+            request.messages[1].content[1] = ModelContent::Opaque {
+                continuation: OpaqueContinuation::new(&request.route, changed),
+            };
+            assert!(
+                wickle_model_anthropic::protocol::encode_request(&request).is_err(),
+                "{mode}"
+            );
+        }
+        request.messages[1].content[1] = ModelContent::Opaque {
+            continuation: first.continuation[0].clone(),
+        };
+        if let ModelContent::ToolCall { arguments, .. } = &mut request.messages[1].content[0] {
+            arguments.insert("query".into(), json!("tampered"));
+        }
+        assert!(wickle_model_anthropic::protocol::encode_request(&request).is_err());
+        assert_eq!(server.requests.lock().unwrap().len(), 2);
+    }
+}
+
+#[tokio::test]
+async fn length_limited_tool_input_never_becomes_a_repairable_completed_proposal() {
+    let mut data = tool_events();
+    data[6]["delta"]["partial_json"] = json!("\"cut off");
+    data[8]["delta"]["stop_reason"] = json!("max_tokens");
+    let server = Server::new(vec![Reply::sse(&data)]).await;
+    let connection = connection(&server);
+    let model = AnthropicModel::new(connection.clone());
+    let mut request = request(&connection, "claude-opus-5");
+    tool(&mut request);
+    let result =
+        collect_model_response(&request, model.generate(&request, &context(&request))).await;
+    assert!(result.is_err());
+    assert_eq!(server.requests.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn opus_five_point_five_keeps_adaptive_thinking_and_rejects_disabled_or_manual_modes() {
+    let server = Server::new(vec![Reply::sse(&events("claude-opus-5-5", "done"))]).await;
+    let connection = connection(&server);
+    let model = AnthropicModel::new(connection.clone());
+    let mut request = request(&connection, "claude-opus-5-5");
+    request.max_output_tokens = 4096.try_into().unwrap();
+    for mode in ["disabled", "enabled"] {
+        request.options.insert("thinking_mode".into(), json!(mode));
+        if mode == "enabled" {
+            request
+                .options
+                .insert("thinking_budget_tokens".into(), json!(1024));
+        }
+        assert!(
+            collect_model_response(&request, model.generate(&request, &context(&request)))
+                .await
+                .is_err()
+        );
+        assert!(server.requests.lock().unwrap().is_empty());
+    }
+    request.options.remove("thinking_budget_tokens");
+    request
+        .options
+        .insert("thinking_mode".into(), json!("adaptive"));
+    collect_model_response(&request, model.generate(&request, &context(&request)))
+        .await
+        .unwrap();
+    let requests = server.requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].body["thinking"], json!({"type":"adaptive"}));
+    assert_eq!(requests[0].body["output_config"]["effort"], "medium");
+}
+
+#[tokio::test]
+async fn initial_input_exemption_never_hides_duplicate_or_malformed_envelope_fields() {
+    for mode in ["duplicate-index", "duplicate-input", "malformed-outer"] {
+        let mut reply = invalid_tool_reply(r#"{"query":1e400}"#, true);
+        let body = String::from_utf8(reply.body).unwrap();
+        reply.body = match mode {
+            "duplicate-index" => body.replacen("\"index\":1", "\"index\":1,\"index\":2", 1),
+            "duplicate-input" => body.replacen("\"input\":", "\"input\":{},\"input\":", 1),
+            _ => body.replacen("\"index\":1", "\"index\":1,\"unexpected\":", 1),
+        }
+        .into_bytes();
+        let server = Server::new(vec![reply]).await;
+        let connection = connection(&server);
+        let model = AnthropicModel::new(connection.clone());
+        let mut request = request(&connection, "claude-opus-5");
+        tool(&mut request);
+        assert!(
+            collect_model_response(&request, model.generate(&request, &context(&request)))
+                .await
+                .is_err(),
+            "{mode}"
+        );
+        assert_eq!(server.requests.lock().unwrap().len(), 1);
+    }
+}
+
+#[tokio::test]
+async fn mixed_valid_and_invalid_calls_keep_each_result_and_error_marker_with_its_call() {
+    let mut data = tool_events();
+    data[5]["delta"]["partial_json"] = json!("{");
+    data.remove(6);
+    data.truncate(7);
+    data.extend([
+        json!({"type":"content_block_start","index":2,"content_block":{"type":"tool_use","id":"toolu_2","name":"lookup","input":{}}}),
+        json!({"type":"content_block_delta","index":2,"delta":{"type":"input_json_delta","partial_json":"{\"query\":\"beta\"}"}}),
+        json!({"type":"content_block_stop","index":2}),
+        json!({"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":20}}),
+        json!({"type":"message_stop"}),
+    ]);
+    let server = Server::new(vec![
+        Reply::sse(&data),
+        Reply::sse(&events("claude-opus-5", "done")),
+    ])
+    .await;
+    let connection = connection(&server);
+    let model = AnthropicModel::new(connection.clone());
+    let mut request = request(&connection, "claude-opus-5");
+    tool(&mut request);
+    let first = collect_model_response(&request, model.generate(&request, &context(&request)))
+        .await
+        .unwrap();
+    assert_eq!(first.tool_calls.len(), 2);
+    assert_eq!(
+        first.tool_calls[0].validation,
+        ToolCallValidation::InvalidArguments
+    );
+    let mut content: Vec<_> = first
+        .tool_calls
+        .iter()
+        .map(|call| ModelContent::ToolCall {
+            provider_call_id: call.provider_call_id.clone(),
+            name: call.name.clone(),
+            arguments: call.model_inputs.clone(),
+        })
+        .collect();
+    content.push(ModelContent::Opaque {
+        continuation: first.continuation[0].clone(),
+    });
+    request.messages.push(ModelMessage {
+        role: ModelRole::Assistant,
+        content,
+    });
+    request.messages.push(ModelMessage {
+        role: ModelRole::Tool,
+        content: vec![
+            ModelContent::ToolResult {
+                provider_call_id: id("toolu_1"),
+                content: json!({"error":"invalid_arguments"}),
+            },
+            ModelContent::ToolResult {
+                provider_call_id: id("toolu_2"),
+                content: json!({"answer":42}),
+            },
+        ],
+    });
+    request.request_id = id("second");
+    collect_model_response(&request, model.generate(&request, &context(&request)))
+        .await
+        .unwrap();
+    let requests = server.requests.lock().unwrap();
+    let body = &requests[1].body;
+    assert_eq!(
+        body["messages"][1]["content"][1]["input"],
+        json!({"INVALID_JSON":"{"})
+    );
+    assert_eq!(
+        body["messages"][1]["content"][2]["input"],
+        json!({"query":"beta"})
+    );
+    let results = &body["messages"][2]["content"];
+    assert_eq!(results[0]["tool_use_id"], "toolu_1");
+    assert_eq!(results[0]["is_error"], true);
+    assert_eq!(results[1]["tool_use_id"], "toolu_2");
+    assert!(results[1].get("is_error").is_none());
+    assert_eq!(
+        parse_json(results[1]["content"].as_str().unwrap()).unwrap(),
+        json!({"answer":42})
+    );
 }

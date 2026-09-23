@@ -25,7 +25,11 @@ POST, with redirects and transport retries disabled. [Authentication](https://pl
 
 Initial system messages become the top-level `system` field. User content is text
 or serialized JSON. Client tools use `input_schema`; their results become user
-`tool_result` blocks. The original schema and optional model parameters are retained.
+`tool_result` blocks. The default native Tool compiler retains the complete model-owned JSON Schema,
+including optional parameters, under non-strict tool use. System-bound fields stay
+outside it. The core validates the original contract before binding system inputs
+and executing a Tool; provider schema acceptance is not execution authorization.
+[Tool definitions](https://platform.claude.com/docs/en/agents-and-tools/tool-use/define-tools).
 The adapter does not enable server tools, server-side fallback, or assistant prefill.
 
 Supported logical options are `effort`, `thinking_mode`, and
@@ -35,6 +39,10 @@ binding schemas must restrict options for the selected release. `adaptive` is a
 thinking mode, not an effort. Opus 5 runs with thinking by default; omitting the
 thinking option preserves that behavior. Unsupported combinations, including manual
 thinking on Opus 5 and disabled thinking with its highest effort levels, are rejected.
+Opus 5.5 accepts adaptive thinking or omission of the thinking option; disabled
+thinking and manual budgets are rejected at every effort level. The adapter does
+not replace an omitted effort with a model-independent default.
+[Opus 5.5 changes](https://platform.claude.com/docs/en/models/opus-5-5/whats-new-opus-5-5),
 [Effort](https://platform.claude.com/docs/en/build-with-claude/effort),
 [Opus 5 behavior](https://platform.claude.com/docs/en/models/opus-5/whats-new-opus-5).
 
@@ -55,12 +63,26 @@ Direct tool-caller metadata is retained; server callers and toolset members are 
 converted into local tool requests. [Streaming](https://platform.claude.com/docs/en/build-with-claude/streaming),
 [Tool-use response type](https://github.com/anthropics/anthropic-sdk-python/blob/main/src/anthropic/types/tool_use_block.py).
 
-Completion is emitted only after a valid terminal and clean transport EOF. Partial
-JSON, duplicate terminals, unsigned completed thinking, open or misordered blocks,
+Completion is emitted only after a valid terminal and clean transport EOF.
+Duplicate terminals, unsigned completed thinking, open or misordered blocks,
 unknown native tools, and exceeded limits cannot become completed Tool plans.
+A length-limited or transport-truncated Tool input remains incomplete.
 Cancellation and deadlines drop the HTTP response. Provider error messages are not
 exposed as model text. Length limits, refusals and unsupported continuation modes
 remain distinct from successful completion.
+
+A complete Tool proposal with malformed JSON, duplicate keys, a non-object value,
+or precision-losing numbers reaches the bounded core repair loop without execution.
+Both accumulated deltas and populated initial inputs retain their raw argument
+text. The surrounding SSE envelope still undergoes strict validation.
+
+Normal stored continuations keep their existing format. Invalid arguments use a
+versioned protected replay record that checks call identity and empty normalized
+placeholders before encoding an `INVALID_JSON` wrapper. The matching `tool_result`
+sets `is_error: true` and includes the original argument text with the core feedback.
+Thinking signatures and unrelated valid calls are preserved. This supports invalid
+input recovery without enabling eager streaming or running invalid Tool handlers.
+[Invalid Tool input handling](https://platform.claude.com/docs/en/agents-and-tools/tool-use/fine-grained-tool-streaming#handling-invalid-json-in-tool-responses).
 
 Usage updates are cumulative, not per-event increments. The adapter records the
 reported input/output counts and actual model ID. It does not fill in a separate

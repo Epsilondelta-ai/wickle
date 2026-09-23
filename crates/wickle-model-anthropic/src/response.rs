@@ -47,7 +47,7 @@ impl<'a> Decoder<'a> {
         if self.terminal.is_some() {
             return Err(invalid());
         }
-        let value = parse_json(&event.data)?;
+        let (value, initial_input) = parse_event(&event.data)?;
         let kind = nonempty(&value, "type")?;
         if event
             .name
@@ -115,12 +115,13 @@ impl<'a> Decoder<'a> {
                         {
                             return Err(invalid());
                         }
-                        let input = block
-                            .get("input")
-                            .and_then(Value::as_object)
-                            .ok_or_else(invalid)?;
-                        if !input.is_empty() {
-                            arguments = serde_json::to_string(input).map_err(|_| invalid())?;
+                        let input = initial_input.ok_or_else(invalid)?;
+                        // Only an empty object is the standard streaming placeholder.
+                        // Everything else retains its original bytes for core validation.
+                        if !parse_provider_arguments(input, self.request.limits.max_response_bytes)
+                            .is_ok_and(|input| input.is_empty())
+                        {
+                            arguments = input.to_owned();
                         }
                         self.charge(id.len() + name.len() + arguments.len())?;
                         for (position, delta) in self.fragments(&arguments)?.into_iter().enumerate()
@@ -239,15 +240,32 @@ impl<'a> Decoder<'a> {
                 self.terminal = Some(if let Some(finish) = finish {
                     let mut continuation = vec![];
                     if matches!(finish, ModelFinish::Stop | ModelFinish::ToolCalls) {
+                        let mut invalid_arguments = serde_json::Map::new();
                         for block in &mut self.blocks {
                             if block.value["type"] == "tool_use" {
-                                block.value["input"] = parse_json(&block.arguments)?;
+                                match parse_provider_arguments(
+                                    &block.arguments,
+                                    self.request.limits.max_response_bytes,
+                                ) {
+                                    Ok(input) => block.value["input"] = json!(input),
+                                    Err(_) => {
+                                        invalid_arguments.insert(
+                                            nonempty(&block.value, "id")?.into(),
+                                            json!(block.arguments),
+                                        );
+                                        block.value["input"] = json!({});
+                                    }
+                                }
                             }
                         }
                         let blocks: Vec<_> = self.blocks.iter().map(|b| b.value.clone()).collect();
                         codec::inspect_blocks(&blocks)?;
                         if !blocks.is_empty() {
-                            let data = json!({"kind":codec::REPLAY_KIND,"blocks":blocks});
+                            let data = if invalid_arguments.is_empty() {
+                                json!({"kind":codec::REPLAY_KIND,"blocks":blocks})
+                            } else {
+                                json!({"kind":codec::INVALID_REPLAY_KIND,"blocks":blocks,"invalid_arguments":invalid_arguments})
+                            };
                             self.charge(serde_json::to_vec(&data).map_err(|_| invalid())?.len())?;
                             continuation.push(OpaqueContinuation::new(&self.request.route, data));
                         }
@@ -367,4 +385,43 @@ fn index(value: &Value) -> Result<usize, ContractError> {
         .and_then(Value::as_u64)
         .and_then(|v| usize::try_from(v).ok())
         .ok_or_else(invalid)
+}
+
+// Keep Tool input out of envelope parsing: duplicate keys, non-object values
+// and numbers outside Value's representation belong to the core repair path.
+// Strict parsing still sees every original byte outside that single value.
+fn parse_event(event: &str) -> Result<(Value, Option<&str>), ContractError> {
+    type RawMap<'a> = std::collections::BTreeMap<String, &'a serde_json::value::RawValue>;
+    let fields: RawMap<'_> = serde_json::from_str(event).map_err(|_| invalid())?;
+    let kind = fields
+        .get("type")
+        .and_then(|value| serde_json::from_str::<String>(value.get()).ok());
+    if kind.as_deref() != Some("content_block_start") {
+        return Ok((parse_json(event)?, None));
+    }
+    let block = *fields.get("content_block").ok_or_else(invalid)?;
+    let block: RawMap<'_> = serde_json::from_str(block.get()).map_err(|_| invalid())?;
+    let kind = block
+        .get("type")
+        .and_then(|value| serde_json::from_str::<String>(value.get()).ok());
+    if kind.as_deref() != Some("tool_use") {
+        return Ok((parse_json(event)?, None));
+    }
+    let input = *block.get("input").ok_or_else(invalid)?;
+    let input = input.get();
+    // Borrowed RawValue points into this event. Check the span before slicing;
+    // retaining surrounding bytes also retains duplicate envelope keys for rejection.
+    let start = (input.as_ptr() as usize)
+        .checked_sub(event.as_ptr() as usize)
+        .ok_or_else(invalid)?;
+    let end = start.checked_add(input.len()).ok_or_else(invalid)?;
+    if event.get(start..end) != Some(input) {
+        return Err(invalid());
+    }
+    let envelope = format!(
+        "{}{{}}{}",
+        event.get(..start).ok_or_else(invalid)?,
+        event.get(end..).ok_or_else(invalid)?
+    );
+    Ok((parse_json(&envelope)?, Some(input)))
 }
