@@ -126,7 +126,7 @@ async fn adapter_source_batch_survives_waiting_while_fresh_instances_reauthorize
         first.context.execution.binding_set_id,
         second.context.execution.binding_set_id
     );
-    assert_eq!(second.context.execution.principal_ref, id("reviewer"));
+    assert_eq!(second.context.execution.principal_ref, id("caller"));
     assert_eq!(second.source.queries.lock().unwrap().len(), 0);
     assert!(!second.source.uses.lock().unwrap().is_empty());
     assert!(
@@ -140,7 +140,7 @@ async fn adapter_source_batch_survives_waiting_while_fresh_instances_reauthorize
                 |(request, context)| request.batch_ref == saved.snapshot.context_batches[0]
                     && context.binding_set_id.as_ref()
                         == Some(&second.context.execution.binding_set_id)
-                    && context.principal_ref == id("reviewer")
+                    && context.principal_ref == id("caller")
                     && request.items[0].item_id == id("local-item")
             )
     );

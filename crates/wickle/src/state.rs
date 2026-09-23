@@ -89,6 +89,8 @@ impl fmt::Debug for ProtectedRecord {
 pub struct AdmissionInput {
     /// Authenticated original execution principal, not the latest reviewer.
     pub execution_principal_ref: Id,
+    /// Original capability grant reference; never replaced by a resume submitter.
+    pub execution_grant_ref: Id,
     /// Original submitted inputs when supplied by the versioned admission path.
     pub submitted: Option<crate::RequestSnapshot>,
     /// Running/admission checkpoint at revision zero.
@@ -155,6 +157,8 @@ pub struct RunLease {
 /// A complete candidate checkpoint and append-only data for one atomic commit.
 #[derive(Clone)]
 pub struct CommitInput {
+    /// Pending control IDs consumed atomically by this owned settlement.
+    pub control_commands: Vec<Id>,
     /// Compare-and-swap revision of the currently saved checkpoint.
     pub expected_revision: u64,
     /// Current unexpired execution lease.
@@ -531,6 +535,7 @@ impl StateStore for MemoryStateStore {
             let execution = execution::initial_history(
                 &input.snapshot,
                 &input.execution_principal_ref,
+                &input.execution_grant_ref,
                 input.submitted.as_ref(),
             )?;
             // All fallible checks precede these mutations.
@@ -1541,7 +1546,7 @@ fn validate_events(
                 verification_state::event(state, additions, snapshot, verification_ref)?;
                 verification_ref
             }
-            RunEventPayload::RunWaiting { wait_ref } => {
+            RunEventPayload::RunWaiting { wait_ref, .. } => {
                 let wait: WaitState = event_record(state, additions, wait_ref)?;
                 if snapshot.status != RunStatus::Waiting || snapshot.wait.as_ref() != Some(&wait) {
                     return Err(error(ErrorCode::InvalidEvent, "events.run_waiting"));
@@ -1749,7 +1754,7 @@ fn validate_resume_history(
             .iter()
             .find(|event| event.seq.get() == receipt.previous_last_event_seq)
             .ok_or_else(invalid)?;
-        let RunEventPayload::RunWaiting { wait_ref } = &waiting_event.payload else {
+        let RunEventPayload::RunWaiting { wait_ref, .. } = &waiting_event.payload else {
             return Err(invalid());
         };
         let saved_wait: WaitState = event_record(state, additions, wait_ref)?;
@@ -2267,7 +2272,7 @@ impl MemoryStateStore {
         &self,
         scope: &Scope,
         run_id: &Id,
-        input: CommitInput,
+        mut input: CommitInput,
         segment_override: Option<&Id>,
     ) -> Result<StoredRun, ContractError> {
         check_scope(scope, &input.snapshot.scope)?;
@@ -2324,6 +2329,20 @@ impl MemoryStateStore {
                 ));
             }
         }
+        if let Some(last) = state
+            .executions
+            .get(run_id)
+            .and_then(|history| history.segments.last())
+        {
+            let starts_segment = segment_override.is_some_and(|id| *id != last.segment_id)
+                || input.snapshot.recovery_receipts.len() > run.snapshot.recovery_receipts.len()
+                || input.snapshot.resume_receipts.len() > run.snapshot.resume_receipts.len();
+            if last.outcome.is_none() && starts_segment {
+                input
+                    .records
+                    .push(execution::archived_source(&run.snapshot, last)?);
+            }
+        }
         let additions = validate_records(state, &input.records)?;
         validate_snapshot_refs(state, &additions, &input.snapshot)?;
         context_state::validate_update(&run.snapshot, &input.snapshot, &input.events)?;
@@ -2374,7 +2393,7 @@ impl MemoryStateStore {
             session: session_snapshot.clone(),
             messages: messages.clone(),
         };
-        let execution = state
+        let mut execution = state
             .executions
             .get(run_id)
             .map(|history| {
@@ -2386,6 +2405,26 @@ impl MemoryStateStore {
                 )
             })
             .transpose()?;
+        if !input.control_commands.is_empty() {
+            let history = execution
+                .as_mut()
+                .ok_or_else(|| error(ErrorCode::CapabilityUnsupported, "execution.controls"))?;
+            execution::complete_controls(
+                history,
+                &input.snapshot,
+                &input.control_commands,
+                input.now_ms,
+            )?;
+        }
+        if let Some(execution) = &execution {
+            execution::validate_settlements(
+                state,
+                &additions,
+                &input.snapshot,
+                execution,
+                &history,
+            )?;
+        }
         let state = scopes
             .get_mut(&scope_key(scope))
             .expect("validated namespace");
@@ -2415,4 +2454,8 @@ impl MemoryStateStore {
         }
         Ok(result)
     }
+}
+
+pub(crate) fn initial_segment_id(run_id: &Id) -> Result<Id, ContractError> {
+    execution::segment_id(run_id, 0)
 }

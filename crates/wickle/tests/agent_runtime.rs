@@ -243,7 +243,8 @@ async fn cancelling_a_running_request_preserves_its_reserved_attempt_and_saves_c
             .await
             .unwrap(),
     );
-    assert_eq!(receipt, CancelReceipt::Requested);
+    assert_eq!(&receipt.run_id, handle.run_id());
+    assert!(receipt.processed_segment_id.is_none());
     let outcome = completed(handle.outcome(&context()).await.unwrap());
     assert_eq!(outcome.result.status(), RunStatus::Cancelled);
     assert_eq!(outcome.usage.model_calls, 1);
@@ -255,9 +256,11 @@ async fn cancelling_a_running_request_preserves_its_reserved_attempt_and_saves_c
         .snapshot;
     assert_eq!(saved.status, RunStatus::Cancelled);
     assert_eq!(saved.reservations.len(), 1);
+    let repeated = completed(handle.cancel(id("again"), &context()).await.unwrap());
+    assert!(repeated.processed_segment_id.is_some());
     assert_eq!(
-        completed(handle.cancel(id("again"), &context()).await.unwrap()),
-        CancelReceipt::AlreadyTerminal
+        completed(handle.outcome(&context()).await.unwrap()),
+        outcome
     );
 }
 
@@ -389,10 +392,8 @@ async fn cancellation_receipt_is_not_a_terminal_outcome_until_the_final_commit_s
     let agent = create_agent(profile(), bindings).unwrap();
     let handle = fixture.started(&agent, "request").await;
     fixture.model.entered.notified().await;
-    assert_eq!(
-        completed(handle.cancel(id("cancel"), &context()).await.unwrap()),
-        CancelReceipt::Requested
-    );
+    let receipt = completed(handle.cancel(id("cancel"), &context()).await.unwrap());
+    assert!(receipt.processed_segment_id.is_none());
     store.final_entered.notified().await;
     let saved = fixture.store.load(&scope(), handle.run_id()).await.unwrap();
     assert_eq!(saved.snapshot.status, RunStatus::Running);
@@ -1246,4 +1247,43 @@ async fn invalid_tool_rounds_have_a_separate_finite_repair_budget() {
             .collect();
         assert_eq!(rounds.len(), capacity as usize);
     }
+}
+
+#[tokio::test]
+async fn legacy_terminal_records_keep_read_only_start_outcome_and_event_replay() {
+    let fixture = Fixture::new(Response::Text, false);
+    let original = fixture.started(&fixture.agent(), "legacy-read").await;
+    let outcome = completed(original.outcome(&context()).await.unwrap());
+    let mut image =
+        serde_json::to_value(fixture.store.export_checkpoint(&scope()).unwrap()).unwrap();
+    image["schema_version"] = serde_json::json!("wickle.state-store.v1");
+    image.as_object_mut().unwrap().remove("executions");
+    image.as_object_mut().unwrap().remove("legacy_runs");
+    let checkpoint =
+        StateStoreCheckpoint::from_json(&image.to_string(), &scope(), &canonical_digest(&image))
+            .unwrap();
+    let restored = std::sync::Arc::new(MemoryStateStore::from_checkpoint(checkpoint));
+    let mut bindings = fixture.bindings();
+    bindings.state = restored.clone();
+    let agent = create_agent(profile(), bindings).unwrap();
+    let handle = fixture.started(&agent, "legacy-read").await;
+    assert_eq!(
+        completed(handle.outcome(&context()).await.unwrap()),
+        outcome
+    );
+    let mut events = handle.events(0, context());
+    let mut last = None;
+    while let Some(event) = events.next().await {
+        last = Some(event.unwrap().event_type);
+    }
+    assert_eq!(last, Some("run.finished"));
+    assert_eq!(fixture.model.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        restored
+            .read_execution(&scope(), handle.run_id())
+            .await
+            .unwrap_err()
+            .code,
+        ErrorCode::CapabilityUnsupported
+    );
 }

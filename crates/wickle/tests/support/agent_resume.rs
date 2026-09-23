@@ -68,6 +68,7 @@ pub struct Policy {
     pub deny_resume: AtomicBool,
     pub deny_execute: AtomicBool,
     pub deny_cancel: AtomicBool,
+    pub deny_control_processing: AtomicBool,
     pub deny_receipt_read: AtomicBool,
     pub deny_details: AtomicBool,
     pub details_checks: AtomicUsize,
@@ -76,6 +77,7 @@ pub struct Policy {
     pub resume_checks: Mutex<Vec<(ResumeCommand, Id)>>,
     pub tool_checks: Mutex<Vec<(ToolPolicyInput, Id)>>,
     pub pause_next_resume: AtomicBool,
+    pub pause_resume_check: AtomicUsize,
     pub resume_entered: Notify,
     pub resume_release: Semaphore,
 }
@@ -99,7 +101,13 @@ impl PolicyPort for Policy {
                     .lock()
                     .unwrap()
                     .push(((**command).clone(), context.principal_ref.clone()));
-                if self.pause_next_resume.swap(false, Ordering::SeqCst) {
+                if self.pause_next_resume.swap(false, Ordering::SeqCst)
+                    || self.pause_resume_check.fetch_update(
+                        Ordering::SeqCst,
+                        Ordering::SeqCst,
+                        |value| value.checked_sub(1),
+                    ) == Ok(1)
+                {
                     self.resume_entered.notify_one();
                     self.resume_release.acquire().await.unwrap().forget();
                 }
@@ -113,6 +121,13 @@ impl PolicyPort for Policy {
                         reason: id("resume_review"),
                     });
                 }
+            }
+            if matches!(request.action, PolicyAction::ProcessControl { .. })
+                && self.deny_control_processing.load(Ordering::SeqCst)
+            {
+                return Ok(PolicyDecision::Deny {
+                    reason: id("processing_revoked"),
+                });
             }
             if matches!(request.action, PolicyAction::CancelRun {})
                 && self.deny_cancel.load(Ordering::SeqCst)
@@ -386,7 +401,7 @@ impl Fixture {
             mode: AtomicUsize::new(0),
             consumed_commits: AtomicUsize::new(0),
             wait_timeout_ms: AtomicUsize::new(0),
-            pause_record: Mutex::new(None),
+            pause_execution: AtomicBool::new(false),
             record_entered: Notify::new(),
             record_release: Semaphore::new(0),
             proof: ProtectedRecord::new(
@@ -425,6 +440,7 @@ impl Fixture {
                 deny_resume: AtomicBool::new(false),
                 deny_execute: AtomicBool::new(false),
                 deny_cancel: AtomicBool::new(false),
+                deny_control_processing: AtomicBool::new(false),
                 deny_receipt_read: AtomicBool::new(false),
                 deny_details: AtomicBool::new(false),
                 details_checks: AtomicUsize::new(0),
@@ -433,6 +449,7 @@ impl Fixture {
                 resume_checks: Mutex::new(vec![]),
                 tool_checks: Mutex::new(vec![]),
                 pause_next_resume: AtomicBool::new(false),
+                pause_resume_check: AtomicUsize::new(0),
                 resume_entered: Notify::new(),
                 resume_release: Semaphore::new(0),
             }),
@@ -603,7 +620,7 @@ pub struct CommandStore {
     pub mode: AtomicUsize,
     pub consumed_commits: AtomicUsize,
     pub wait_timeout_ms: AtomicUsize,
-    pub pause_record: Mutex<Option<RecordRef>>,
+    pub pause_execution: AtomicBool,
     pub record_entered: Notify,
     pub record_release: Semaphore,
     pub proof: ProtectedRecord,
@@ -746,19 +763,6 @@ impl StateStore for CommandStore {
                     "store.offline",
                 ));
             }
-            let pause = {
-                let mut reference = self.pause_record.lock().unwrap();
-                if reference.as_ref() == Some(r) {
-                    reference.take();
-                    true
-                } else {
-                    false
-                }
-            };
-            if pause {
-                self.record_entered.notify_one();
-                self.record_release.acquire().await.unwrap().forget();
-            }
             self.inner.read_record(s, r).await
         })
     }
@@ -823,6 +827,7 @@ impl StateStore for CommandStore {
                 let new_outcome =
                     serde_json::to_value(input.snapshot.outcome.as_ref().unwrap()).unwrap();
                 let mut wait_ref = None;
+                let mut outcome_ref = None;
                 for record in &mut input.records {
                     let value = if record.value() == &old_wait {
                         Some(new_wait.clone())
@@ -840,45 +845,23 @@ impl StateStore for CommandStore {
                         );
                         if is_wait {
                             wait_ref = Some(record.reference().clone());
+                        } else {
+                            outcome_ref = Some(record.reference().clone());
                         }
                     }
                 }
                 for event in &mut input.events {
                     if let RunEventPayload::RunWaiting {
                         wait_ref: reference,
+                        outcome_ref: outcome,
                     } = &mut event.payload
                     {
                         *reference = wait_ref.clone().expect("paired wait record must exist");
+                        *outcome = outcome_ref.clone();
                     }
                 }
             }
-            if !input
-                .events
-                .iter()
-                .any(|event| matches!(event.payload, RunEventPayload::RunResumed { .. }))
-            {
-                return self.inner.commit(s, r, input).await;
-            }
-            self.consumed_commits.fetch_add(1, Ordering::SeqCst);
-            match self.mode.swap(0, Ordering::SeqCst) {
-                1 => Err(ContractError::new(
-                    ErrorCode::PersistenceUnavailable,
-                    "resume.commit",
-                )),
-                2 => {
-                    self.inner.commit(s, r, input).await?;
-                    Err(ContractError::new(
-                        ErrorCode::PersistenceUnavailable,
-                        "resume.ack",
-                    ))
-                }
-                3 => {
-                    self.entered.notify_one();
-                    self.release.acquire().await.unwrap().forget();
-                    self.inner.commit(s, r, input).await
-                }
-                _ => self.inner.commit(s, r, input).await,
-            }
+            self.inner.commit(s, r, input).await
         })
     }
 }
@@ -889,7 +872,14 @@ impl wickle::ExecutionTransactions for CommandStore {
         scope: &'a wickle::Scope,
         run_id: &'a wickle::Id,
     ) -> wickle::PortFuture<'a, wickle::ExecutionHistory> {
-        self.inner.read_execution(scope, run_id)
+        Box::pin(async move {
+            let history = self.inner.read_execution(scope, run_id).await?;
+            if self.pause_execution.swap(false, Ordering::SeqCst) {
+                self.record_entered.notify_one();
+                self.record_release.acquire().await.unwrap().forget();
+            }
+            Ok(history)
+        })
     }
     fn submit_control_command<'a>(
         &'a self,
@@ -904,6 +894,30 @@ impl wickle::ExecutionTransactions for CommandStore {
         scope: &'a wickle::Scope,
         request: wickle::BeginSegmentRequest,
     ) -> wickle::PortFuture<'a, wickle::BeginSegmentResult> {
-        self.inner.begin_segment(scope, request)
+        Box::pin(async move {
+            if !matches!(request.start, SegmentStart::Resume(_)) {
+                return self.inner.begin_segment(scope, request).await;
+            }
+            self.consumed_commits.fetch_add(1, Ordering::SeqCst);
+            match self.mode.swap(0, Ordering::SeqCst) {
+                1 => Err(ContractError::new(
+                    ErrorCode::PersistenceUnavailable,
+                    "resume.begin",
+                )),
+                2 => {
+                    self.inner.begin_segment(scope, request).await?;
+                    Err(ContractError::new(
+                        ErrorCode::PersistenceUnavailable,
+                        "resume.ack",
+                    ))
+                }
+                3 => {
+                    self.entered.notify_one();
+                    self.release.acquire().await.unwrap().forget();
+                    self.inner.begin_segment(scope, request).await
+                }
+                _ => self.inner.begin_segment(scope, request).await,
+            }
+        })
     }
 }

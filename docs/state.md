@@ -94,9 +94,10 @@ The result's Run state may be newer than that historical segment.
 `submit_control_command` durably records an authenticated command without changing
 Run status. Reusing its ID with a different payload is a conflict. Cancel/expire
 processing requires a matching terminal transition, and expiry requires the Run
-deadline to have elapsed. Terminal control submissions are no-ops. Stop intent can
-be stored, but consuming it remains unsupported until interrupted checkpoint and
-driver integration is enabled; it is never reported as a completed stop.
+deadline to have elapsed. Terminal submissions record no-op receipts without
+changing the saved outcome. Active drivers consume Stop/Cancel/Expire through
+`CommitInput.control_commands` in the same fenced transaction as settlement.
+Idle Cancel/Expire use a new control segment; an already settled Stop is a no-op.
 
 `read_execution` returns protected segment and command history. Apply current Host
 authorization before exposing it. Past segment outcomes are immutable; a later

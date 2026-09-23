@@ -194,6 +194,7 @@ impl ContextRuntime {
                 &self.scope,
                 &snapshot.run_id.clone(),
                 CommitInput {
+                    control_commands: vec![],
                     expected_revision,
                     lease: services.budget.lease().clone(),
                     now_ms: now,
@@ -250,6 +251,7 @@ impl ContextRuntime {
                 &self.scope,
                 services.budget.run_id(),
                 CommitInput {
+                    control_commands: vec![],
                     expected_revision,
                     lease: services.budget.lease().clone(),
                     now_ms: now,

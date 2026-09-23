@@ -636,30 +636,6 @@ impl StateStore for FinalCommitStore {
                 });
                 input.snapshot.last_event_seq -= 1;
             }
-            if matches!(self.mode, FinalCommitMode::RejectRecoveryAcceptance)
-                && input
-                    .events
-                    .iter()
-                    .any(|event| matches!(event.payload, RunEventPayload::RunRecovered { .. }))
-            {
-                return Err(ContractError::new(
-                    ErrorCode::PersistenceUnavailable,
-                    "recovery.offline",
-                ));
-            }
-
-            if matches!(self.mode, FinalCommitMode::LoseRecoveryAcknowledgement)
-                && input
-                    .events
-                    .iter()
-                    .any(|event| matches!(event.payload, RunEventPayload::RunRecovered { .. }))
-            {
-                self.inner.commit(s, r, input).await?;
-                return Err(ContractError::new(
-                    ErrorCode::PersistenceUnavailable,
-                    "recovery.ack",
-                ));
-            }
             if matches!(self.mode, FinalCommitMode::RejectModelResult)
                 && input
                     .snapshot
@@ -853,6 +829,28 @@ impl wickle::ExecutionTransactions for FinalCommitStore {
         scope: &'a wickle::Scope,
         request: wickle::BeginSegmentRequest,
     ) -> wickle::PortFuture<'a, wickle::BeginSegmentResult> {
-        self.inner.begin_segment(scope, request)
+        Box::pin(async move {
+            let recovery = matches!(&request.start, SegmentStart::Resume(command) if matches!(command.action, ResumeAction::Recover { .. }));
+            if recovery
+                && matches!(
+                    self.mode,
+                    FinalCommitMode::RejectRecoveryLease
+                        | FinalCommitMode::RejectRecoveryAcceptance
+                )
+            {
+                return Err(ContractError::new(
+                    ErrorCode::PersistenceUnavailable,
+                    "segment.offline",
+                ));
+            }
+            let result = self.inner.begin_segment(scope, request).await?;
+            if recovery && matches!(self.mode, FinalCommitMode::LoseRecoveryAcknowledgement) {
+                return Err(ContractError::new(
+                    ErrorCode::PersistenceUnavailable,
+                    "segment.ack",
+                ));
+            }
+            Ok(result)
+        })
     }
 }

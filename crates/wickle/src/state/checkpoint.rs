@@ -415,6 +415,35 @@ fn restore_graph(data: CheckpointData) -> Result<StateStoreCheckpoint, ContractE
             }
         }
     }
+    for execution in execution_records {
+        let run = state
+            .runs
+            .get(&execution.run_id)
+            .ok_or_else(|| invalid("checkpoint.execution_run"))?;
+        super::execution::validate_history(&execution, &run.snapshot)?;
+        let events: Vec<_> = run.events.iter().collect();
+        super::execution::validate_settlements(&state, &empty, &run.snapshot, &execution, &events)?;
+        for segment in &execution.segments {
+            let effects = match &segment.outcome {
+                Some(crate::SegmentOutcome::Interrupted { interruption }) => {
+                    &interruption.unresolved_effects
+                }
+                Some(crate::SegmentOutcome::Settled { outcome }) => &outcome.unresolved_effects,
+                None => continue,
+            };
+            for reference in effects {
+                record_value(&state, &BTreeMap::new(), reference)?;
+            }
+        }
+
+        if state
+            .executions
+            .insert(execution.run_id.clone(), execution)
+            .is_some()
+        {
+            return Err(invalid("checkpoint.duplicate_execution"));
+        }
+    }
     let mut event_ids = BTreeSet::new();
     for run in state.runs.values() {
         validate_snapshot_refs(&state, &empty, &run.snapshot)?;
@@ -437,33 +466,6 @@ fn restore_graph(data: CheckpointData) -> Result<StateStoreCheckpoint, ContractE
     }
     state.message_ids = message_ids;
     state.event_ids = event_ids;
-    for execution in execution_records {
-        let run = state
-            .runs
-            .get(&execution.run_id)
-            .ok_or_else(|| invalid("checkpoint.execution_run"))?;
-        super::execution::validate_history(&execution, &run.snapshot)?;
-        for segment in &execution.segments {
-            let effects = match &segment.outcome {
-                Some(crate::SegmentOutcome::Interrupted { interruption }) => {
-                    &interruption.unresolved_effects
-                }
-                Some(crate::SegmentOutcome::Settled { outcome }) => &outcome.unresolved_effects,
-                None => continue,
-            };
-            for reference in effects {
-                record_value(&state, &BTreeMap::new(), reference)?;
-            }
-        }
-
-        if state
-            .executions
-            .insert(execution.run_id.clone(), execution)
-            .is_some()
-        {
-            return Err(invalid("checkpoint.duplicate_execution"));
-        }
-    }
     if data.schema_version == LEGACY_CHECKPOINT_VERSION {
         state.legacy_runs = state.runs.keys().cloned().collect();
     } else {
@@ -651,7 +653,7 @@ fn validate_history(
                     record_value(state, &empty, reference)?;
                 }
             }
-            RunEventPayload::RunWaiting { wait_ref } => {
+            RunEventPayload::RunWaiting { wait_ref, .. } => {
                 let wait: WaitState = event_record(state, &empty, wait_ref)?;
                 if let WaitTarget::Approval {
                     target: ApprovalTarget::Candidate { candidate_ref, .. },

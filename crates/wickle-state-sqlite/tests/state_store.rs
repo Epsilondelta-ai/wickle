@@ -381,6 +381,7 @@ async fn historical_wait_and_resume_events_remain_valid_after_terminal_reopen() 
         &scope(),
         2,
         RunEventPayload::RunWaiting {
+            outcome_ref: Some(prior_outcome_ref.clone()),
             wait_ref: record.reference().clone(),
         },
     ));

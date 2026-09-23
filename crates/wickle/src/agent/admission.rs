@@ -37,9 +37,8 @@ impl Agent {
                 self.validate_replay(&request, &context, &saved),
             )
             .await?;
-            let segment = segment_revision(&saved.snapshot);
             return Ok(Guarded::Completed(
-                self.handle(saved.snapshot.run_id, segment)?,
+                self.latest_handle(saved.snapshot.run_id).await?,
             ));
         }
         if serde_json::to_vec(&request)
@@ -108,10 +107,10 @@ impl Agent {
         if !result.created {
             self.validate_replay(&request, &context, &result.state)
                 .await?;
-            return Ok(Guarded::Completed(self.handle(
-                result.state.snapshot.run_id.clone(),
-                segment_revision(&result.state.snapshot),
-            )?));
+            return Ok(Guarded::Completed(
+                self.latest_handle(result.state.snapshot.run_id.clone())
+                    .await?,
+            ));
         }
         let run_id = result.state.snapshot.run_id;
         let local = Arc::new(LocalRun::new(0));
@@ -156,7 +155,9 @@ impl Agent {
                 }
             }
         });
+        let segment_id = crate::state::initial_segment_id(&run_id)?;
         Ok(Guarded::Completed(RunHandle {
+            segment_id,
             agent: self.clone(),
             run_id,
             segment_start_revision: 0,
@@ -601,6 +602,7 @@ impl Agent {
         Ok((
             AdmissionInput {
                 execution_principal_ref: context.data.principal_ref.clone(),
+                execution_grant_ref: context.data.capability_grant_ref.clone(),
                 submitted: Some(submitted),
                 snapshot,
                 prompt_snapshot: prompt_record.reference().clone(),

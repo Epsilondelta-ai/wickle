@@ -1104,6 +1104,9 @@ pub enum RunEventPayload {
     /// Wait committed.
     #[serde(rename = "run.waiting")]
     RunWaiting {
+        /// Exact interval outcome. Absent only in legacy or outcome-less checkpoints.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        outcome_ref: Option<RecordRef>,
         /// Recorded wait.
         wait_ref: RecordRef,
     },

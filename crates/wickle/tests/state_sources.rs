@@ -156,6 +156,7 @@ async fn a_live_commit_cannot_roll_the_current_source_slot_back_to_an_earlier_st
             &scope(),
             handle.run_id(),
             CommitInput {
+                control_commands: vec![],
                 expected_revision: saved.snapshot.revision,
                 lease,
                 now_ms: snapshot.timing.last_observed_at_ms,
@@ -225,6 +226,7 @@ async fn a_delayed_query_result_cannot_be_committed_after_another_generation_is_
     collected.context_batches.push(slot.batch_ref.clone());
     collected.source_states.push(slot);
     let candidate = CommitInput {
+        control_commands: vec![],
         expected_revision: before.snapshot.revision,
         lease: lease.clone(),
         now_ms: collected.timing.last_observed_at_ms,
@@ -248,6 +250,7 @@ async fn a_delayed_query_result_cannot_be_committed_after_another_generation_is_
             &scope(),
             handle.run_id(),
             CommitInput {
+                control_commands: vec![],
                 expected_revision: before.snapshot.revision,
                 lease,
                 now_ms: advanced.timing.last_observed_at_ms,

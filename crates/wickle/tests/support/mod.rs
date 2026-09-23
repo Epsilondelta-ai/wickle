@@ -169,6 +169,7 @@ pub async fn admission(
     };
     AdmissionInput {
         execution_principal_ref: id("execution-principal"),
+        execution_grant_ref: id("execution-grant"),
         submitted: None,
         snapshot,
         prompt_snapshot: prompt_record.reference().clone(),
@@ -184,6 +185,7 @@ pub fn prepared(snapshot: &RunSnapshot, lease: RunLease, now: i64) -> CommitInpu
     next.revision += 1;
     next.phase = RunPhase::Prepare;
     CommitInput {
+        control_commands: vec![],
         expected_revision: snapshot.revision,
         lease,
         now_ms: now,
@@ -230,6 +232,7 @@ pub fn finished(snapshot: &RunSnapshot, lease: RunLease, now: i64) -> CommitInpu
         },
     );
     CommitInput {
+        control_commands: vec![],
         expected_revision: snapshot.revision,
         lease,
         now_ms: now,

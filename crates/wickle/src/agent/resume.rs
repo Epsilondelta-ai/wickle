@@ -40,51 +40,66 @@ impl Agent {
         self.resume_inputs(&saved.snapshot, &context).await?;
         if let Some(receipt) = accepted(&saved.snapshot, &command)? {
             return Ok(Guarded::Completed(
-                self.handle(command.run_id, receipt.accepted_revision)?,
+                self.handle(command.run_id, receipt.accepted_revision)
+                    .await?,
             ));
         }
         validate_wait(&saved.snapshot, &command)?;
-        let lease = match self.waiting_lease(&command.run_id, &context).await {
-            Ok(lease) => lease,
-            Err(error) => {
-                let latest = self
-                    .resume_read(
-                        &context,
-                        self.inner
-                            .bindings
-                            .state
-                            .load(&self.inner.bindings.scope, &command.run_id),
-                    )
-                    .await?;
-                if let Some(receipt) = accepted(&latest.snapshot, &command)? {
+        let execution_context = self.execution_context(&command.run_id, &context).await?;
+        let deadline = tokio::time::Instant::now()
+            + Duration::from_millis(self.inner.bindings.settings.start_timeout_ms);
+        loop {
+            match self.resume_owned(&command, &context).await {
+                Ok((receipt, prompt, Some(lease), observations, segment_id)) => {
+                    return Ok(Guarded::Completed(self.launch_segment(
+                        command.run_id,
+                        (segment_id, receipt.accepted_revision, receipt.expired),
+                        prompt,
+                        execution_context,
+                        lease,
+                        observations,
+                    )?));
+                }
+                Ok((receipt, _, None, _, _)) => {
                     return Ok(Guarded::Completed(
-                        self.handle(command.run_id, receipt.accepted_revision)?,
+                        self.handle(command.run_id, receipt.accepted_revision)
+                            .await?,
                     ));
                 }
-                return Err(error);
-            }
-        };
-        let result = self.resume_owned(&command, &context, &lease).await;
-        match result {
-            Ok((receipt, prompt, true, observer_error)) => {
-                Ok(Guarded::Completed(self.launch_resumed(
-                    command.run_id,
-                    &receipt,
-                    prompt,
-                    context,
-                    lease,
-                    observer_error,
-                )?))
-            }
-            Ok((receipt, _, false, _)) => {
-                self.release_owned(&command.run_id, &lease).await;
-                Ok(Guarded::Completed(
-                    self.handle(command.run_id, receipt.accepted_revision)?,
-                ))
-            }
-            Err(error) => {
-                self.release_owned(&command.run_id, &lease).await;
-                Err(error)
+                Err(error) => {
+                    if !matches!(
+                        error.code,
+                        ErrorCode::LeaseBusy
+                            | ErrorCode::RevisionConflict
+                            | ErrorCode::InvalidTransition
+                    ) {
+                        return Err(error);
+                    }
+                    let latest = self
+                        .resume_read(
+                            &context,
+                            self.inner
+                                .bindings
+                                .state
+                                .load(&self.inner.bindings.scope, &command.run_id),
+                        )
+                        .await?;
+                    if let Some(receipt) = accepted(&latest.snapshot, &command)? {
+                        // A replay has no lease and must not launch another driver.
+                        return Ok(Guarded::Completed(
+                            self.handle(command.run_id, receipt.accepted_revision)
+                                .await?,
+                        ));
+                    }
+                    if error.code != ErrorCode::LeaseBusy {
+                        return Err(error);
+                    }
+                    tokio::select! { biased;
+                        _ = context.cancellation.cancelled() => return Err(fail(ErrorCode::Cancelled, "agent.resume")),
+                        _ = tokio::time::sleep_until(deadline) => return Err(error),
+                        _ = tokio::time::sleep(Duration::from_millis(self.inner.bindings.settings.observer_poll_ms.min(20))) => {},
+                    }
+                }
             }
         }
     }
@@ -93,13 +108,13 @@ impl Agent {
         &self,
         command: &ResumeCommand,
         context: &ExecutionContext,
-        lease: &RunLease,
     ) -> Result<
         (
             ResumeReceipt,
             PromptSnapshot,
-            bool,
+            Option<RunLease>,
             Vec<(HookTarget, HookInput)>,
+            Id,
         ),
         ContractError,
     > {
@@ -112,7 +127,10 @@ impl Agent {
             .await?;
         let prompt = self.restore_resume_runtime(&saved, context).await?;
         if let Some(receipt) = accepted(&saved.snapshot, command)? {
-            return Ok((receipt.clone(), prompt, false, vec![]));
+            let handle = self
+                .handle(command.run_id.clone(), receipt.accepted_revision)
+                .await?;
+            return Ok((receipt.clone(), prompt, None, vec![], handle.segment_id));
         }
         validate_wait(&saved.snapshot, command)?;
         self.resume_inputs(&saved.snapshot, context).await?;
@@ -121,17 +139,9 @@ impl Agent {
             .wait
             .as_ref()
             .expect("validated waiting snapshot");
-        let budget = RunBudget::attach(
-            bindings.state.clone(),
-            bindings.clock.clone(),
-            bindings.ids.clone(),
-            bindings.scope.clone(),
-            command.run_id.clone(),
-            lease.clone(),
-            CancellationToken::new(),
-        )
-        .await?;
-        let (_, now) = budget.settlement_time(saved.snapshot.usage.elapsed_ms)?;
+        let mut clock =
+            super::segment::PreparationClock::new(bindings.clock.clone(), &saved.snapshot)?;
+        let (_, now) = clock.now()?;
         let expires_at_ms = saved
             .snapshot
             .timing
@@ -157,7 +167,7 @@ impl Agent {
                 return Err(fail(ErrorCode::AccessDenied, "agent.resume_approval"));
             }
             let segment = self.metadata_segment(&saved, context.clone()).await?;
-            let round = self.tool_round(&budget, &segment).await?;
+            let round = self.tool_round_for_snapshot(&saved, &segment).await?;
             match &command.action {
                 ResumeAction::Approve { .. } => None,
                 ResumeAction::Deny { .. } => Some(round.prepare_denial(
@@ -217,21 +227,12 @@ impl Agent {
                         receipt: record.value().clone(),
                     };
                     self.authorize_receipt(receipt_ref, context).await?;
-                    let (_, now) = budget.settlement_time(saved.snapshot.usage.elapsed_ms)?;
-                    let current_lease = bindings
-                        .state
-                        .check_lease(&bindings.scope, &command.run_id, lease, now)
-                        .await?;
-                    let (_, now) = budget.settlement_time(saved.snapshot.usage.elapsed_ms)?;
-                    if now >= current_lease.expires_at_ms {
-                        return Err(fail(ErrorCode::LeaseLost, "agent.external_verifier"));
-                    }
+                    let (_, now) = clock.now()?;
                     let remaining = saved
                         .snapshot
                         .timing
                         .deadline_at_ms
                         .min(wait.expires_at_ms.unwrap_or(i64::MAX))
-                        .min(current_lease.expires_at_ms)
                         .saturating_sub(now)
                         .max(0) as u64;
                     let timeout = Duration::from_millis(
@@ -377,15 +378,7 @@ impl Agent {
                 prepared,
             )?;
         }
-        let (elapsed, now) = budget.settlement_time(snapshot.usage.elapsed_ms)?;
-        let current_lease = bindings
-            .state
-            .check_lease(&bindings.scope, &command.run_id, lease, now)
-            .await?;
-        let (elapsed, now) = budget.settlement_time(elapsed)?;
-        if now >= current_lease.expires_at_ms {
-            return Err(fail(ErrorCode::LeaseLost, "agent.resume"));
-        }
+        let (elapsed, now) = clock.now()?;
         receipt.expired = now >= expires_at_ms;
         snapshot.revision = receipt.accepted_revision;
         snapshot.status = RunStatus::Running;
@@ -418,33 +411,40 @@ impl Agent {
                 command_ref: receipt.command_ref.clone(),
             },
         });
-        let commit = bindings
-            .state
-            .commit(
-                &bindings.scope,
-                &command.run_id,
-                CommitInput {
-                    expected_revision: command.expected_revision,
-                    lease: lease.clone(),
-                    now_ms: now,
-                    snapshot,
-                    messages,
-                    events,
-                    records,
-                },
-            )
-            .await;
-        if let Err(error) = commit {
-            let latest = bindings
+        let started =
+            bindings
                 .state
-                .load(&bindings.scope, &command.run_id)
+                .begin_segment(
+                    &bindings.scope,
+                    BeginSegmentRequest {
+                        run_id: command.run_id.clone(),
+                        expected_revision: command.expected_revision,
+                        segment_id: bindings.ids.next_id()?,
+                        owner: bindings.ids.next_id()?,
+                        now_ms: now,
+                        lease_ttl_ms: bindings.settings.lease_ttl_ms.try_into().map_err(|_| {
+                            fail(ErrorCode::InvalidConfiguration, "agent.lease_ttl")
+                        })?,
+                        start: SegmentStart::Resume(command.clone()),
+                        transition: Some(SegmentTransition {
+                            snapshot,
+                            messages,
+                            events,
+                            records,
+                        }),
+                    },
+                )
                 .await?;
-            if accepted(&latest.snapshot, command)?.is_some_and(|saved| saved == &receipt) {
-                return Ok((receipt, prompt, true, observation.into_iter().collect()));
-            }
-            return Err(error);
-        }
-        Ok((receipt, prompt, true, observation.into_iter().collect()))
+        let receipt = accepted(&started.state.snapshot, command)?
+            .ok_or_else(|| fail(ErrorCode::InvalidSnapshot, "agent.resume_accepted"))?
+            .clone();
+        Ok((
+            receipt,
+            prompt,
+            started.lease,
+            observation.into_iter().collect(),
+            started.segment.segment_id,
+        ))
     }
 
     pub(super) async fn authorize_resume(
@@ -724,47 +724,6 @@ impl Agent {
         Ok((call, bound))
     }
 
-    async fn waiting_lease(
-        &self,
-        run_id: &Id,
-        context: &ExecutionContext,
-    ) -> Result<RunLease, ContractError> {
-        let bindings = &self.inner.bindings;
-        let owner = bindings.ids.next_id()?;
-        let deadline =
-            tokio::time::Instant::now() + Duration::from_millis(bindings.settings.start_timeout_ms);
-        loop {
-            if context.cancellation.is_cancelled() {
-                return Err(fail(ErrorCode::Cancelled, "agent.resume"));
-            }
-            let saved = self
-                .resume_read(context, bindings.state.load(&bindings.scope, run_id))
-                .await?;
-            if saved.snapshot.status != RunStatus::Waiting {
-                return Err(fail(ErrorCode::InvalidTransition, "agent.wait"));
-            }
-            match bindings
-                .state
-                .acquire_lease(
-                    &bindings.scope,
-                    run_id,
-                    &owner,
-                    bindings.clock.now()?.utc_ms,
-                    bindings.settings.lease_ttl_ms,
-                )
-                .await
-            {
-                Ok(lease) => return Ok(lease),
-                Err(error) if error.code == ErrorCode::LeaseBusy => {}
-                Err(error) => return Err(error),
-            }
-            tokio::select! { biased;
-                _ = context.cancellation.cancelled() => return Err(fail(ErrorCode::Cancelled, "agent.resume")),
-                _ = tokio::time::sleep_until(deadline) => return Err(fail(ErrorCode::LeaseBusy, "agent.wait_handoff")),
-                _ = tokio::time::sleep(Duration::from_millis(bindings.settings.observer_poll_ms.min(20))) => {},
-            }
-        }
-    }
     pub(super) async fn release_owned(&self, run_id: &Id, lease: &RunLease) {
         if let Ok(now) = self.inner.bindings.clock.now() {
             let _ = self
@@ -789,34 +748,16 @@ impl Agent {
         )
         .await
     }
-    fn launch_resumed(
-        &self,
-        run_id: Id,
-        receipt: &ResumeReceipt,
-        prompt: PromptSnapshot,
-        context: ExecutionContext,
-        lease: RunLease,
-        observer_error: Vec<(HookTarget, HookInput)>,
-    ) -> Result<RunHandle, ContractError> {
-        self.launch_segment(
-            run_id,
-            (receipt.accepted_revision, receipt.expired),
-            prompt,
-            context,
-            lease,
-            observer_error,
-        )
-    }
     pub(super) fn launch_segment(
         &self,
         run_id: Id,
-        segment: (u64, bool),
+        segment: (Id, u64, bool),
         prompt: PromptSnapshot,
         context: ExecutionContext,
         lease: RunLease,
         observer_error: Vec<(HookTarget, HookInput)>,
     ) -> Result<RunHandle, ContractError> {
-        let (segment_start_revision, expired) = segment;
+        let (segment_id, segment_start_revision, expired) = segment;
         let local = Arc::new(LocalRun::new(segment_start_revision));
         *local
             .pending_observations
@@ -863,230 +804,12 @@ impl Agent {
             }
         });
         Ok(RunHandle {
+            segment_id,
             agent: self.clone(),
             run_id,
             segment_start_revision,
             local: Some(local),
         })
-    }
-
-    pub(super) async fn cancel_waiting(
-        &self,
-        run_id: Id,
-        reason: Id,
-        context: ExecutionContext,
-    ) -> Result<CancelReceipt, ContractError> {
-        let runtime = tokio::runtime::Handle::try_current()
-            .map_err(|_| fail(ErrorCode::RuntimeUnavailable, "agent.runtime"))?;
-        let agent = self.clone();
-        runtime
-            .spawn(async move { agent.cancel_waiting_owned(run_id, reason, context).await })
-            .await
-            .map_err(|_| fail(ErrorCode::InvalidContract, "agent.cancel"))?
-    }
-    async fn cancel_waiting_owned(
-        &self,
-        run_id: Id,
-        reason: Id,
-        context: ExecutionContext,
-    ) -> Result<CancelReceipt, ContractError> {
-        let bindings = &self.inner.bindings;
-        let lease = match self.waiting_lease(&run_id, &context).await {
-            Ok(lease) => lease,
-            Err(error) => {
-                if bindings
-                    .state
-                    .load(&bindings.scope, &run_id)
-                    .await?
-                    .snapshot
-                    .status
-                    .is_terminal()
-                {
-                    return Ok(CancelReceipt::AlreadyTerminal);
-                }
-                return Err(error);
-            }
-        };
-        let result = async {
-            let mut saved = self
-                .resume_read(&context, bindings.state.load(&bindings.scope, &run_id))
-                .await?;
-            if saved.snapshot.status.is_terminal() {
-                return Ok(CancelReceipt::AlreadyTerminal);
-            }
-            if saved.snapshot.status != RunStatus::Waiting {
-                return Err(fail(ErrorCode::InvalidTransition, "agent.cancel_wait"));
-            }
-            let policy = PolicyRequest {
-                owner_scope: bindings.scope.clone(),
-                resource_id: run_id.clone(),
-                action: PolicyAction::CancelRun {},
-            };
-            if let Guarded::ApprovalRequired(_) = bindings
-                .policy
-                .guard(&policy, &context, None, None, || async { Ok(()) })
-                .await?
-            {
-                return Err(fail(ErrorCode::AccessDenied, "agent.cancel_wait"));
-            }
-            let budget = RunBudget::attach(
-                bindings.state.clone(),
-                bindings.clock.clone(),
-                bindings.ids.clone(),
-                bindings.scope.clone(),
-                run_id.clone(),
-                lease.clone(),
-                CancellationToken::new(),
-            )
-            .await?;
-            let segment = self.metadata_segment(&saved, context.clone()).await?;
-            let round = self.tool_round(&budget, &segment).await?;
-            let expected_revision = saved.snapshot.revision;
-            let mut messages = vec![];
-            let mut events = vec![];
-            let mut records = vec![];
-            let mut observations = vec![];
-            let calls: Vec<_> = saved
-                .snapshot
-                .tool_ledger
-                .iter()
-                .filter(|entry| {
-                    matches!(
-                        entry.state,
-                        ToolCallState::Planned {}
-                            | ToolCallState::ApprovalPending { .. }
-                            | ToolCallState::InputPending { .. }
-                    )
-                })
-                .map(|entry| entry.call.call_id.clone())
-                .collect();
-            for call in calls {
-                let (_, now) = budget.settlement_time(saved.snapshot.usage.elapsed_ms)?;
-                let prepared = round.prepare_unstarted(
-                    &saved,
-                    &call,
-                    ToolResultStatus::Cancelled,
-                    Id::new("cancelled")?,
-                    now,
-                )?;
-                if let RunEventPayload::ToolSettled { result_ref } = &prepared.event.payload {
-                    observations.push((
-                        HookTarget::AfterTool {
-                            call_id: prepared.result.call_id.clone(),
-                            result_ref: result_ref.clone(),
-                        },
-                        HookInput::tool_observed(&prepared.result.call_id, &prepared.result),
-                    ));
-                }
-                saved.session.transcript_revision += 1;
-                saved.messages.push(prepared.message.clone());
-                apply_resolution(
-                    &mut saved.snapshot,
-                    &mut messages,
-                    &mut events,
-                    &mut records,
-                    prepared,
-                )?;
-            }
-            let (elapsed, now) = budget.settlement_time(saved.snapshot.usage.elapsed_ms)?;
-            let mut snapshot = saved.snapshot;
-            snapshot.revision = snapshot
-                .revision
-                .checked_add(1)
-                .ok_or_else(|| fail(ErrorCode::RevisionConflict, "agent.cancel_wait"))?;
-            snapshot.status = RunStatus::Cancelled;
-            snapshot.phase = RunPhase::Finish;
-            snapshot.wait = None;
-            snapshot.usage.elapsed_ms = elapsed;
-            snapshot.timing.last_observed_at_ms = now;
-            let previous = snapshot
-                .outcome
-                .take()
-                .ok_or_else(|| fail(ErrorCode::InvalidSnapshot, "agent.wait_outcome"))?;
-            let outcome = RunOutcome {
-                app_state: snapshot.app_state.clone(),
-                result: OutcomeResult::Cancelled {
-                    reason: reason.to_string(),
-                },
-                output: previous.output,
-                artifacts: previous.artifacts,
-                usage: snapshot.usage.clone(),
-                checkpoint_revision: snapshot.revision,
-                verification: None,
-                unresolved_effects: previous.unresolved_effects,
-            };
-            let record = ProtectedRecord::new(
-                bindings.ids.next_id()?,
-                1,
-                serde_json::to_value(&outcome)
-                    .map_err(|_| fail(ErrorCode::InvalidJson, "agent.cancel_wait"))?,
-            );
-            snapshot.last_event_seq = snapshot
-                .last_event_seq
-                .checked_add(1)
-                .ok_or_else(|| fail(ErrorCode::InvalidEvent, "agent.cancel_wait"))?;
-            events.push(RunEvent {
-                schema_version: RunEventSchemaVersion::V1,
-                event_id: bindings.ids.next_id()?,
-                scope: bindings.scope.clone(),
-                run_id: run_id.clone(),
-                session_id: snapshot.request.session_id.clone(),
-                seq: snapshot
-                    .last_event_seq
-                    .try_into()
-                    .map_err(|_| fail(ErrorCode::InvalidEvent, "agent.cancel_wait"))?,
-                timestamp_ms: now,
-                payload: RunEventPayload::RunFinished {
-                    outcome_ref: record.reference().clone(),
-                },
-            });
-            records.push(record);
-            snapshot.outcome = Some(outcome);
-            let commit = bindings
-                .state
-                .commit(
-                    &bindings.scope,
-                    &run_id,
-                    CommitInput {
-                        expected_revision,
-                        lease: lease.clone(),
-                        now_ms: now,
-                        snapshot,
-                        messages,
-                        events,
-                        records,
-                    },
-                )
-                .await;
-            if let Err(error) = commit {
-                if bindings
-                    .state
-                    .load(&bindings.scope, &run_id)
-                    .await?
-                    .snapshot
-                    .status
-                    != RunStatus::Cancelled
-                {
-                    return Err(error);
-                }
-            }
-            let saved = bindings.state.load(&bindings.scope, &run_id).await?;
-            let local = Arc::new(LocalRun::new(segment_revision(&saved.snapshot)));
-            self.cleanup_observers(&saved, &context, &local, observations)
-                .await;
-            local.done.store(true, Ordering::Release);
-            if self.keep_local(&local) {
-                self.inner
-                    .runs
-                    .lock()
-                    .map_err(|_| fail(ErrorCode::InvalidContract, "agent.observer_state"))?
-                    .insert(run_id.clone(), local);
-            }
-            Ok(CancelReceipt::Requested)
-        }
-        .await;
-        self.release_owned(&run_id, &lease).await;
-        result
     }
 }
 
@@ -1170,7 +893,7 @@ fn validate_wait(snapshot: &RunSnapshot, command: &ResumeCommand) -> Result<(), 
     }
     Ok(())
 }
-fn apply_resolution(
+pub(super) fn apply_resolution(
     snapshot: &mut RunSnapshot,
     messages: &mut Vec<Message>,
     events: &mut Vec<RunEvent>,

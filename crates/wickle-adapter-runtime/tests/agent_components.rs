@@ -299,7 +299,7 @@ async fn approval_wait_releases_all_instances_and_resume_uses_new_bindings_with_
         next.binding.binding_state.unwrap().value,
         json!({"thread_id":"host-prepared-thread"})
     );
-    assert_eq!(next.execution.principal_ref, id("reviewer"));
+    assert_eq!(next.execution.principal_ref, id("caller"));
     let final_saved = fixture
         .adapters
         .store

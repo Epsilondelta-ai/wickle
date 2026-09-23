@@ -138,6 +138,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             &scope,
             AdmissionInput {
                 execution_principal_ref: id("execution-principal"),
+                execution_grant_ref: id("execution-grant"),
                 submitted: None,
                 snapshot,
                 prompt_snapshot: prompt.reference().clone(),

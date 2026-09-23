@@ -13,6 +13,7 @@ fn invalid(path: &str) -> ContractError {
 pub(super) fn initial_history(
     snapshot: &RunSnapshot,
     actor: &Id,
+    grant: &Id,
     submitted: Option<&RequestSnapshot>,
 ) -> Result<ExecutionHistory, ContractError> {
     if let Some(value) = submitted {
@@ -21,6 +22,7 @@ pub(super) fn initial_history(
     Ok(ExecutionHistory {
         run_id: snapshot.run_id.clone(),
         execution_principal_ref: actor.clone(),
+        execution_grant_ref: Some(grant.clone()),
         submitted: submitted.cloned(),
         initial_claimed: false,
         segments: vec![ExecutionSegment {
@@ -30,13 +32,15 @@ pub(super) fn initial_history(
             segment_id: segment_id(&snapshot.run_id, 0)?,
             accepted_revision: 0,
             outcome: None,
+            last_event_seq: None,
+            source_snapshot_ref: None,
             app_state: None,
         }],
         accepted_commands: vec![],
         controls: vec![],
     })
 }
-fn segment_id(run: &Id, revision: u64) -> Result<Id, ContractError> {
+pub(super) fn segment_id(run: &Id, revision: u64) -> Result<Id, ContractError> {
     Id::new(format!("segment:{}", data_digest(&(run, revision))))
 }
 fn interrupted(previous: &RunSnapshot, segment: &ExecutionSegment) -> SegmentOutcome {
@@ -59,6 +63,19 @@ fn interrupted(previous: &RunSnapshot, segment: &ExecutionSegment) -> SegmentOut
                 .collect(),
         },
     }
+}
+pub(super) fn archived_source(
+    snapshot: &RunSnapshot,
+    segment: &ExecutionSegment,
+) -> Result<ProtectedRecord, ContractError> {
+    Ok(ProtectedRecord::new(
+        Id::new(format!(
+            "segment-source:{}",
+            data_digest(&(&snapshot.run_id, &segment.segment_id, snapshot.revision))
+        ))?,
+        1,
+        serde_json::to_value(snapshot).map_err(|_| invalid("execution.source"))?,
+    ))
 }
 pub(super) fn advance_history(
     history: &ExecutionHistory,
@@ -88,6 +105,8 @@ pub(super) fn advance_history(
     if new_segment {
         if last.outcome.is_none() {
             last.outcome = Some(interrupted(previous, last));
+            last.last_event_seq = Some(previous.last_event_seq);
+            last.source_snapshot_ref = Some(archived_source(previous, last)?.reference().clone());
         }
         let id = override_id
             .cloned()
@@ -102,6 +121,8 @@ pub(super) fn advance_history(
             segment_id: id,
             accepted_revision: next.revision,
             outcome: None,
+            last_event_seq: None,
+            source_snapshot_ref: None,
             app_state: result.segments.last().and_then(|s| s.app_state.clone()),
         });
     }
@@ -111,6 +132,7 @@ pub(super) fn advance_history(
         .ok_or_else(|| invalid("execution.segment"))?;
     current.app_state = next.app_state.clone();
     if let Some(outcome) = &next.outcome {
+        current.last_event_seq = Some(next.last_event_seq);
         current.outcome = Some(SegmentOutcome::Settled {
             outcome: Box::new(outcome.clone()),
         });
@@ -161,7 +183,18 @@ pub(super) fn validate_history(
         {
             return Err(invalid("execution.history"));
         }
+        if segment
+            .last_event_seq
+            .is_some_and(|seq| seq > snapshot.last_event_seq)
+        {
+            return Err(invalid("execution.event_boundary"));
+        }
         if let Some(next) = history.segments.get(i + 1) {
+            if let (Some(previous), Some(next)) = (segment.last_event_seq, next.last_event_seq) {
+                if previous >= next {
+                    return Err(invalid("execution.event_boundary"));
+                }
+            }
             let settled_at = match &segment.outcome {
                 Some(SegmentOutcome::Settled { outcome }) => outcome.checkpoint_revision,
                 Some(SegmentOutcome::Interrupted { interruption }) => {
@@ -179,6 +212,33 @@ pub(super) fn validate_history(
         .segments
         .last()
         .ok_or_else(|| invalid("execution.segment"))?;
+    if current.outcome.is_some()
+        && current
+            .last_event_seq
+            .is_some_and(|seq| seq != snapshot.last_event_seq)
+    {
+        return Err(invalid("execution.event_boundary"));
+    }
+    for (revision, sequence) in snapshot
+        .resume_receipts
+        .iter()
+        .map(|r| (r.previous_segment_start_revision, r.previous_last_event_seq))
+        .chain(
+            snapshot
+                .recovery_receipts
+                .iter()
+                .map(|r| (r.previous_segment_start_revision, r.previous_last_event_seq)),
+        )
+    {
+        if history
+            .segments
+            .iter()
+            .find(|segment| segment.accepted_revision == revision)
+            .is_some_and(|segment| segment.last_event_seq.is_some_and(|seq| seq != sequence))
+        {
+            return Err(invalid("execution.event_boundary"));
+        }
+    }
     if current.app_state != snapshot.app_state {
         return Err(invalid("execution.app_state"));
     }
@@ -277,6 +337,70 @@ pub(super) fn validate_history(
     }
     Ok(())
 }
+pub(super) fn complete_controls(
+    history: &mut ExecutionHistory,
+    snapshot: &RunSnapshot,
+    commands: &[Id],
+    now_ms: i64,
+) -> Result<(), ContractError> {
+    let segment = history
+        .segments
+        .last()
+        .ok_or_else(|| invalid("execution.segment"))?
+        .segment_id
+        .clone();
+    let mut seen = BTreeSet::new();
+    for id in commands {
+        if !seen.insert(id) {
+            return Err(invalid("control.duplicate"));
+        }
+        let control = history
+            .controls
+            .iter_mut()
+            .find(|control| control.command.command_id == *id)
+            .ok_or_else(|| invalid("control.missing"))?;
+        if control.processed_segment_id.is_some() {
+            return Err(error(ErrorCode::RequestConflict, "control.processed"));
+        }
+        let result = snapshot.outcome.as_ref().map(|outcome| &outcome.result);
+        let allowed = match &control.command.action {
+            ControlAction::Cancel { reason } => {
+                matches!(result, Some(OutcomeResult::Cancelled { reason: actual }) if actual == reason.as_str())
+            }
+            ControlAction::Expire => {
+                now_ms >= snapshot.timing.deadline_at_ms
+                    && matches!(
+                        result,
+                        Some(OutcomeResult::Exhausted {
+                            budget: crate::BudgetKind::Elapsed
+                        })
+                    )
+            }
+            ControlAction::Stop { cause } => {
+                matches!(result, Some(OutcomeResult::Interrupted { interruption }) if interruption.cause == *cause)
+                    || matches!(
+                        result,
+                        Some(
+                            OutcomeResult::Cancelled { .. }
+                                | OutcomeResult::Failed { .. }
+                                | OutcomeResult::Exhausted { .. }
+                        )
+                    )
+            }
+        };
+        if !allowed {
+            return Err(error(ErrorCode::InvalidTransition, "control.outcome"));
+        }
+        control.processed_segment_id = Some(segment.clone());
+        history.accepted_commands.push(AcceptedSegmentCommand {
+            command_id: id.clone(),
+            payload_digest: data_digest(&control.command),
+            segment_id: segment.clone(),
+        });
+    }
+    validate_history(history, snapshot)
+}
+
 fn validate_control(command: &ControlCommand) -> Result<(), ContractError> {
     if matches!(command.action,ControlAction::Stop{cause} if !matches!(cause,InterruptionCause::HostShutdown|InterruptionCause::SegmentStopped))
     {
@@ -322,18 +446,36 @@ impl ExecutionTransactions for MemoryStateStore {
                     "execution.legacy_checkpoint",
                 )
             })?;
-            if let Some(existing) = history
+            let no_op = run.snapshot.status.is_terminal()
+                || (matches!(command.action, ControlAction::Stop { .. })
+                    && run.snapshot.outcome.is_some());
+            if let Some(index) = history
                 .controls
                 .iter()
-                .find(|c| c.command.command_id == command.command_id)
+                .position(|item| item.command.command_id == command.command_id)
             {
-                if existing.command != command {
+                if history.controls[index].command != command {
                     return Err(error(ErrorCode::RequestConflict, "control.command_id"));
+                }
+                if history.controls[index].processed_segment_id.is_none() && no_op {
+                    let segment_id = history
+                        .segments
+                        .last()
+                        .ok_or_else(|| invalid("execution.segment"))?
+                        .segment_id
+                        .clone();
+                    history.controls[index].processed_segment_id = Some(segment_id.clone());
+                    history.accepted_commands.push(AcceptedSegmentCommand {
+                        command_id: command.command_id.clone(),
+                        payload_digest: data_digest(&command),
+                        segment_id,
+                    });
+                    validate_history(history, &run.snapshot)?;
                 }
                 return Ok(ControlReceipt {
                     run_id: run_id.clone(),
                     command_id: command.command_id,
-                    processed_segment_id: existing.processed_segment_id.clone(),
+                    processed_segment_id: history.controls[index].processed_segment_id.clone(),
                 });
             }
             if history
@@ -343,17 +485,35 @@ impl ExecutionTransactions for MemoryStateStore {
             {
                 return Err(error(ErrorCode::RequestConflict, "control.command_id"));
             }
+            let processed_segment_id = if no_op {
+                Some(
+                    history
+                        .segments
+                        .last()
+                        .ok_or_else(|| invalid("execution.segment"))?
+                        .segment_id
+                        .clone(),
+                )
+            } else {
+                None
+            };
             let receipt = ControlReceipt {
                 run_id: run_id.clone(),
                 command_id: command.command_id.clone(),
-                processed_segment_id: None,
+                processed_segment_id: processed_segment_id.clone(),
             };
-            if !run.snapshot.status.is_terminal() {
-                history.controls.push(StoredControlCommand {
-                    command,
-                    processed_segment_id: None,
+            if let Some(segment_id) = &processed_segment_id {
+                history.accepted_commands.push(AcceptedSegmentCommand {
+                    command_id: command.command_id.clone(),
+                    payload_digest: data_digest(&command),
+                    segment_id: segment_id.clone(),
                 });
             }
+            history.controls.push(StoredControlCommand {
+                command,
+                processed_segment_id,
+            });
+            validate_history(history, &run.snapshot)?;
             Ok(receipt)
         })
     }
@@ -576,6 +736,7 @@ impl MemoryStateStore {
             scope,
             &request.run_id,
             CommitInput {
+                control_commands: vec![],
                 expected_revision: request.expected_revision,
                 lease: lease.clone(),
                 now_ms: request.now_ms,
@@ -638,6 +799,93 @@ fn validate_submission(
         || crate::canonical_digest_json(submitted.system_inputs_json())? != expected_system
     {
         return Err(invalid("execution.submitted_snapshot"));
+    }
+    Ok(())
+}
+
+/// Historical interval data must agree with the immutable settlement event,
+/// not merely with another copy inside the execution history.
+pub(super) fn validate_settlements(
+    state: &ScopeState,
+    additions: &BTreeMap<RecordKey, ProtectedRecord>,
+    snapshot: &RunSnapshot,
+    history: &ExecutionHistory,
+    events: &[&RunEvent],
+) -> Result<(), ContractError> {
+    for segment in &history.segments {
+        let Some(settlement) = &segment.outcome else {
+            continue;
+        };
+        let sequence = match segment.last_event_seq {
+            Some(sequence) => sequence,
+            None if history.execution_grant_ref.is_none() => continue, // Legacy intervals are read-only.
+            None => return Err(invalid("execution.event_boundary_missing")),
+        };
+        let event = events
+            .iter()
+            .find(|event| event.seq.get() == sequence)
+            .ok_or_else(|| invalid("execution.settlement_event"))?;
+        match settlement {
+            SegmentOutcome::Settled { outcome } => {
+                let reference = match &event.payload {
+                    RunEventPayload::RunFinished { outcome_ref }
+                    | RunEventPayload::RunInterrupted { outcome_ref, .. } => outcome_ref,
+                    RunEventPayload::RunWaiting {
+                        wait_ref,
+                        outcome_ref,
+                    } => {
+                        let wait: crate::WaitState = event_record(state, additions, wait_ref)?;
+                        if !matches!(&outcome.result, OutcomeResult::Waiting { wait: actual } if *actual == wait)
+                        {
+                            return Err(invalid("execution.wait_outcome"));
+                        }
+                        match outcome_ref {
+                            Some(reference) => reference,
+                            None if history.execution_grant_ref.is_none() => continue,
+                            None => return Err(invalid("execution.wait_outcome_missing")),
+                        }
+                    }
+                    _ => return Err(invalid("execution.settlement_event")),
+                };
+                let stored: crate::RunOutcome = event_record(state, additions, reference)?;
+                if &stored != outcome.as_ref() {
+                    return Err(invalid("execution.settlement_outcome"));
+                }
+            }
+            SegmentOutcome::Interrupted { interruption } => {
+                let reference = segment
+                    .source_snapshot_ref
+                    .as_ref()
+                    .ok_or_else(|| invalid("execution.interrupted_source"))?;
+                let source: RunSnapshot = event_record(state, additions, reference)?;
+                source.validate()?;
+                if source.request != snapshot.request
+                    || source.profile != snapshot.profile
+                    || source.limits != snapshot.limits
+                    || source.system_inputs != snapshot.system_inputs
+                {
+                    return Err(invalid("execution.interrupted_identity"));
+                }
+                if let Some(receipt) = snapshot.recovery_receipts.iter().find(|receipt| {
+                    receipt.previous_segment_start_revision == segment.accepted_revision
+                }) {
+                    let accepted: RunSnapshot =
+                        event_record(state, additions, &receipt.source_snapshot_ref)?;
+                    if accepted != source {
+                        return Err(invalid("execution.interrupted_source"));
+                    }
+                }
+                if source.run_id != snapshot.run_id
+                    || source.scope != snapshot.scope
+                    || source.revision != interruption.checkpoint_revision
+                    || source.last_event_seq != sequence
+                    || source.app_state != segment.app_state
+                    || interrupted(&source, segment) != *settlement
+                {
+                    return Err(invalid("execution.interrupted_source"));
+                }
+            }
+        }
     }
     Ok(())
 }

@@ -171,7 +171,13 @@ pub async fn atomic_execution_contract(store: Arc<dyn StateStore>) {
         )
         .await
         .unwrap();
-    assert_eq!(store.read_execution(&s, &run).await.unwrap(), history);
+    let after = store.read_execution(&s, &run).await.unwrap();
+    assert_eq!(after.segments, history.segments);
+    assert_eq!(after.controls.len(), history.controls.len() + 1);
+    assert_eq!(
+        after.controls.last().unwrap().processed_segment_id,
+        Some(id("cancel-segment"))
+    );
     assert_eq!(store.read_events(&s, &run, 0, 100).await.unwrap(), before);
     let foreign = Scope {
         workspace_id: id("foreign"),

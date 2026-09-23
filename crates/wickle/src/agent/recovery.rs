@@ -21,48 +21,33 @@ impl Agent {
         self.resume_inputs(&saved.snapshot, &context).await?;
         if let Some(receipt) = replayed(&saved.snapshot, &command)? {
             return Ok(Guarded::Completed(
-                self.handle(command.run_id, receipt.accepted_revision)?,
+                self.handle(command.run_id, receipt.accepted_revision)
+                    .await?,
             ));
         }
         validate_source(&saved.snapshot, &command)?;
-        let lease = bindings
-            .state
-            .acquire_lease(
-                &bindings.scope,
-                &command.run_id,
-                &bindings.ids.next_id()?,
-                bindings.clock.now()?.utc_ms,
-                bindings.settings.lease_ttl_ms,
-            )
-            .await?;
-        let result = self.accept_recovery(&command, &context, &lease).await;
-        match result {
-            Ok((receipt, prompt, true)) => Ok(Guarded::Completed(self.launch_segment(
+        let execution_context = self.execution_context(&command.run_id, &context).await?;
+        let (receipt, prompt, lease, segment_id) = self.accept_recovery(&command, &context).await?;
+        match lease {
+            Some(lease) => Ok(Guarded::Completed(self.launch_segment(
                 command.run_id,
-                (receipt.accepted_revision, receipt.expired),
+                (segment_id, receipt.accepted_revision, receipt.expired),
                 prompt,
-                context,
+                execution_context,
                 lease,
                 vec![],
             )?)),
-            Ok((receipt, _, false)) => {
-                self.release_owned(&command.run_id, &lease).await;
-                Ok(Guarded::Completed(
-                    self.handle(command.run_id, receipt.accepted_revision)?,
-                ))
-            }
-            Err(error) => {
-                self.release_owned(&command.run_id, &lease).await;
-                Err(error)
-            }
+            None => Ok(Guarded::Completed(
+                self.handle(command.run_id, receipt.accepted_revision)
+                    .await?,
+            )),
         }
     }
     async fn accept_recovery(
         &self,
         command: &ResumeCommand,
         context: &ExecutionContext,
-        lease: &RunLease,
-    ) -> Result<(RecoveryReceipt, PromptSnapshot, bool), ContractError> {
+    ) -> Result<(RecoveryReceipt, PromptSnapshot, Option<RunLease>, Id), ContractError> {
         let bindings = &self.inner.bindings;
         let saved = self
             .resume_read(
@@ -72,27 +57,22 @@ impl Agent {
             .await?;
         let prompt = self.restore_resume_runtime(&saved, context).await?;
         if let Some(receipt) = replayed(&saved.snapshot, command)? {
-            return Ok((receipt.clone(), prompt, false));
+            let handle = self
+                .handle(command.run_id.clone(), receipt.accepted_revision)
+                .await?;
+            return Ok((receipt.clone(), prompt, None, handle.segment_id));
         }
         let source = validate_source(&saved.snapshot, command)?;
         self.resume_inputs(&saved.snapshot, context).await?;
-        let budget = RunBudget::attach(
-            bindings.state.clone(),
-            bindings.clock.clone(),
-            bindings.ids.clone(),
-            bindings.scope.clone(),
-            command.run_id.clone(),
-            lease.clone(),
-            context.cancellation.clone(),
-        )
-        .await?;
+        let mut clock =
+            super::segment::PreparationClock::new(bindings.clock.clone(), &saved.snapshot)?;
         if let Guarded::ApprovalRequired(_) = self.authorize_resume(command, context, None).await? {
             return Err(fail(ErrorCode::AccessDenied, "recovery.policy"));
         }
         if context.cancellation.is_cancelled() {
             return Err(fail(ErrorCode::Cancelled, "recovery.accept"));
         }
-        let (elapsed, now) = budget.settlement_time(saved.snapshot.usage.elapsed_ms)?;
+        let (elapsed, now) = clock.now()?;
         let expired = now >= saved.snapshot.timing.deadline_at_ms;
         let mut usage = saved.snapshot.usage.clone();
         let reservation = if expired {
@@ -271,32 +251,34 @@ impl Agent {
             });
             records.push(record);
         }
-        let result = bindings
-            .state
-            .commit(
-                &bindings.scope,
-                &command.run_id,
-                CommitInput {
-                    expected_revision: command.expected_revision,
-                    lease: lease.clone(),
-                    now_ms: now,
-                    snapshot,
-                    messages,
-                    events,
-                    records,
-                },
-            )
-            .await;
-        if let Err(error) = result {
-            let latest = bindings
+        let started =
+            bindings
                 .state
-                .load(&bindings.scope, &command.run_id)
+                .begin_segment(
+                    &bindings.scope,
+                    BeginSegmentRequest {
+                        run_id: command.run_id.clone(),
+                        expected_revision: command.expected_revision,
+                        segment_id: bindings.ids.next_id()?,
+                        owner: bindings.ids.next_id()?,
+                        now_ms: now,
+                        lease_ttl_ms: bindings.settings.lease_ttl_ms.try_into().map_err(|_| {
+                            fail(ErrorCode::InvalidConfiguration, "agent.lease_ttl")
+                        })?,
+                        start: SegmentStart::Resume(command.clone()),
+                        transition: Some(SegmentTransition {
+                            snapshot,
+                            messages,
+                            events,
+                            records,
+                        }),
+                    },
+                )
                 .await?;
-            if !replayed(&latest.snapshot, command)?.is_some_and(|actual| actual == &receipt) {
-                return Err(error);
-            }
-        }
-        Ok((receipt, prompt, true))
+        let accepted = replayed(&started.state.snapshot, command)?
+            .ok_or_else(|| fail(ErrorCode::InvalidSnapshot, "recovery.accepted"))?
+            .clone();
+        Ok((accepted, prompt, started.lease, started.segment.segment_id))
     }
 }
 fn replayed<'a>(

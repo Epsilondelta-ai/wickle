@@ -2,8 +2,8 @@
 
 The execution-record types separate submitted input, resolved model preparation,
 execution ownership, and application business state. The driver stores submitted
-request snapshots and immutable routed model preparations. Interruption-policy
-records do not yet enable an interrupted driver transition.
+request snapshots and immutable routed model preparations. Interruption policies can save a recoverable interrupted outcome with validated
+application state; see [interruption policies](interruption-policy.md).
 
 `RequestSnapshot::capture` stores JSON text without rounding its number tokens.
 The profile reference and protected system inputs participate in its digest.
@@ -40,8 +40,10 @@ a transaction with separate reads and writes. Storage integration must implement
 these operations in the same transaction boundary as StateStore checkpoints and
 events before the new segment driver can use them.
 
-The legacy Run checkpoint validator rejects `Interrupted`, because that format
-cannot carry the required execution record. `RunRequest.max_output_tokens` is a
+Legacy checkpoints without execution ownership evidence cannot resume new work.
+New histories pin the execution principal and grant, immutable interval outcomes,
+and exact event boundaries. Waiting events reference their protected outcome;
+recovery archives an unsettled interval with its original protected checkpoint. `RunRequest.max_output_tokens` is a
 positive optional contract field. The effective limit is bounded by Host,
 Profile, Run and selected-model caps; verification and compaction keep their own
 purpose-specific options. Omitted values retain existing request encoding.

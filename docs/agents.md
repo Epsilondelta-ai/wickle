@@ -256,8 +256,8 @@ any answer or effect correction, and `run.resumed` are committed atomically.
 Current permissions are checked on new commands and replays.
 
 On resume, omitted `system_inputs` reuses the original Run snapshot. An explicit
-map, including an empty map, must match it. Changing the reviewer updates the
-current principal and grant, not the saved workspace or target. Existing bound
+map, including an empty map, must match it. The reviewer is recorded as the
+command submitter; subsequent execution keeps the original principal and grant. Existing bound
 inputs retain their resolver values and source revisions. Profile, prompt,
 compiled tools, and routing must match the pinned runtime configuration; current
 metadata is not silently substituted.
@@ -340,17 +340,17 @@ block the driver. Reconnecting replays the remaining committed sequence.
 `handle.cancel(reason, &context)` checks `CancelRun` permission and returns a
 `Guarded<CancelReceipt>`:
 
-| Receipt | Meaning |
-| --- | --- |
-| `Requested` | Cancellation was accepted for a local execution or saved wait; observe the saved outcome for completion |
-| `AlreadyTerminal` | The stored result is already terminal and stays unchanged |
-| `NotLocal` | This instance owns no live driver for a running Run; no remote running-worker cancellation was accepted |
+The receipt contains `run_id`, `command_id` and an optional
+`processed_segment_id`. Absence of a segment ID means the durable command is
+pending, not completed. Read it with `get_control_receipt`; use
+`submit_control_command` to provide a stable command ID for retries.
 
-A saved Waiting Run can be cancelled under a fresh lease even when no local
-driver exists. Unstarted calls become `NotApplied`; existing `Applied` and
-`Unknown` effects are retained. Cancelling the current waiting segment finalizes
-it as `Cancelled`, which its handle can observe. New resume commands are then
-rejected.
+A saved Waiting or Interrupted Run can be cancelled even when no local driver
+exists. A control-only interval atomically acquires ownership and saves the
+cancellation. Unstarted calls become `NotApplied`; existing `Applied` and
+`Unknown` effects are retained. The old handle keeps its original interval's
+outcome. Read the latest Run or command receipt to observe cancellation.
+Remote Worker notification remains Host-owned. See [durable controls](run-controls.md).
 
 Success records `completion_basis=turn_ended` or `verified`, according to the
 profile. A valid format alone completes `turn_end`; `verified` also requires an

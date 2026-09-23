@@ -67,7 +67,7 @@ impl PolicyPort for Policy {
                 let approved = input.approval().is_some_and(|approval| {
                     approval.actor_ref() == &id("reviewer")
                         && approval.capability_grant_ref() == &id("reviewer-grant")
-                        && context.principal_ref == &id("reviewer")
+                        && context.principal_ref == &id("requester")
                 });
                 if !approved {
                     return Ok(PolicyDecision::RequireApproval {
@@ -476,8 +476,8 @@ impl ToolExecutor for Writer {
             assert_eq!(context.scope, self.scope);
             assert_eq!(context.run_id, self.run_id);
             assert_eq!(context.binding_set_id.as_ref(), Some(&self.binding_set));
-            assert_eq!(context.principal_ref, id("reviewer"));
-            assert_eq!(context.capability_grant_ref, id("reviewer-grant"));
+            assert_eq!(context.principal_ref, id("requester"));
+            assert_eq!(context.capability_grant_ref, id("requester-grant"));
             assert_eq!(
                 args,
                 &object(json!({"query":"report","workspace_id":WORKSPACE,"record_id":RECORD}))
@@ -823,7 +823,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let instances = counters.initialized.lock().unwrap();
         assert_ne!(instances[0].0, instances[1].0);
         assert_eq!(instances[0].1, id("requester"));
-        assert_eq!(instances[1].1, id("reviewer"));
+        assert_eq!(instances[1].1, id("requester"));
         assert_eq!(instances[0].2, instances[1].2);
     }
     let finished = reopened.load(&scope, &run_id).await?;

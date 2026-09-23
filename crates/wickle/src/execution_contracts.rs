@@ -260,6 +260,12 @@ pub struct ExecutionSegment {
     pub accepted_revision: u64,
     /// Present after waiting, interruption or terminal settlement.
     pub outcome: Option<SegmentOutcome>,
+    /// Last event belonging to this settled interval, immutable after a new interval starts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_event_seq: Option<u64>,
+    /// Original checkpoint when recovery/control archives an unsettled interval.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_snapshot_ref: Option<RecordRef>,
     /// App state snapshot at settlement; never defines core status.
     pub app_state: Option<AppState>,
 }
@@ -456,6 +462,16 @@ impl ExecutionSegment {
     /// Host app-state schema and atomic ledger transitions remain store/driver checks.
     pub fn validate(&self) -> Result<(), ContractError> {
         let invalid = || ContractError::new(ErrorCode::InvalidSnapshot, "execution_segment");
+        if self.source_snapshot_ref.is_some()
+            && !matches!(self.outcome, Some(SegmentOutcome::Interrupted { .. }))
+        {
+            return Err(invalid());
+        }
+        if self.last_event_seq.is_some_and(|seq| seq == 0)
+            || (self.outcome.is_none() && self.last_event_seq.is_some())
+        {
+            return Err(invalid());
+        }
         match &self.outcome {
             Some(SegmentOutcome::Settled { outcome }) => {
                 outcome.validate()?;
@@ -523,6 +539,9 @@ pub struct ExecutionHistory {
     pub run_id: Id,
     /// Authenticated original execution actor.
     pub execution_principal_ref: Id,
+    /// Admission-pinned grant. Legacy histories without this field require draining.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_grant_ref: Option<Id>,
     /// Submitted request evidence, separate from effective configuration.
     pub submitted: Option<RequestSnapshot>,
     /// Initial segment has been claimed at least once. Retrying a claim is not recovery.

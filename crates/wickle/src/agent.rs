@@ -16,6 +16,7 @@ use tokio_util::sync::CancellationToken;
 mod admission;
 mod artifacts;
 mod components;
+mod control;
 mod driver;
 mod hooks;
 mod interruption;
@@ -23,6 +24,7 @@ mod persistence;
 pub use persistence::{PersistenceFailure, UnconfirmedToolEffect};
 mod recovery;
 mod resume;
+mod segment;
 mod sources;
 mod tools;
 mod verification;
@@ -307,6 +309,7 @@ pub fn create_agent(
 /// A durable observer. Dropping this value or its streams does not cancel the driver.
 #[derive(Clone)]
 pub struct RunHandle {
+    segment_id: Id,
     agent: Agent,
     run_id: Id,
     segment_start_revision: u64,
@@ -316,20 +319,13 @@ impl fmt::Debug for RunHandle {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("RunHandle")
             .field("run_id", &self.run_id)
+            .field("segment_id", &self.segment_id)
             .finish_non_exhaustive()
     }
 }
 
 /// Result of an authorized cancellation request, separate from stored RunOutcome.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CancelReceipt {
-    /// Signalled this process's live driver. Cancellation is not yet committed.
-    Requested,
-    /// The saved run is already terminal; its outcome was not changed.
-    AlreadyTerminal,
-    /// No local driver is owned here. No remote cancellation was accepted or sent.
-    NotLocal,
-}
+pub type CancelReceipt = ControlReceipt;
 
 /// Protected observer reports and a local report-persistence failure, independent
 /// of the saved execution outcome. An observer does not change business success.
@@ -472,7 +468,62 @@ impl Agent {
         }
         Ok(())
     }
-    fn handle(&self, run_id: Id, segment_start_revision: u64) -> Result<RunHandle, ContractError> {
+    async fn handle(
+        &self,
+        run_id: Id,
+        segment_start_revision: u64,
+    ) -> Result<RunHandle, ContractError> {
+        let history = self
+            .inner
+            .bindings
+            .state
+            .read_execution(&self.inner.bindings.scope, &run_id)
+            .await?;
+        let segment = history
+            .segments
+            .iter()
+            .find(|segment| segment.accepted_revision == segment_start_revision)
+            .ok_or_else(|| fail(ErrorCode::InvalidSnapshot, "agent.segment"))?;
+        self.segment_handle(run_id, segment_start_revision, segment.segment_id.clone())
+    }
+    async fn latest_handle(&self, run_id: Id) -> Result<RunHandle, ContractError> {
+        let bindings = &self.inner.bindings;
+        let history = match bindings
+            .state
+            .read_execution(&bindings.scope, &run_id)
+            .await
+        {
+            Ok(history) => history,
+            Err(error) if error.code == ErrorCode::CapabilityUnsupported => {
+                let saved = bindings.state.load(&bindings.scope, &run_id).await?;
+                if !saved.snapshot.status.is_terminal() {
+                    return Err(error);
+                }
+                // A deterministic read-only view ID does not invent execution ownership.
+                let segment_id = Id::new(format!(
+                    "legacy-view:{}",
+                    crate::serialization::data_digest(&(&run_id, saved.snapshot.revision))
+                ))?;
+                return self.segment_handle(run_id, segment_revision(&saved.snapshot), segment_id);
+            }
+            Err(error) => return Err(error),
+        };
+        let segment = history
+            .segments
+            .last()
+            .ok_or_else(|| fail(ErrorCode::InvalidSnapshot, "agent.segment"))?;
+        self.segment_handle(
+            run_id,
+            segment.accepted_revision,
+            segment.segment_id.clone(),
+        )
+    }
+    fn segment_handle(
+        &self,
+        run_id: Id,
+        segment_start_revision: u64,
+        segment_id: Id,
+    ) -> Result<RunHandle, ContractError> {
         let local = self
             .inner
             .runs
@@ -482,6 +533,7 @@ impl Agent {
             .filter(|local| local.segment_start_revision == segment_start_revision)
             .cloned();
         Ok(RunHandle {
+            segment_id,
             agent: self.clone(),
             run_id,
             segment_start_revision,
@@ -594,6 +646,10 @@ impl RunHandle {
             })
             .await
     }
+    /// Immutable execution interval identity. Resuming creates a different handle.
+    pub fn segment_id(&self) -> &Id {
+        &self.segment_id
+    }
     /// Stable saved run identity.
     pub fn run_id(&self) -> &Id {
         &self.run_id
@@ -610,24 +666,81 @@ impl RunHandle {
                     return Ok(Guarded::ApprovalRequired(challenge));
                 }
             };
-            if let Some(receipt) = snapshot.resume_receipts.iter().find(|receipt| {
-                receipt.previous_segment_start_revision == self.segment_start_revision
-            }) {
-                let record = caller_read(
-                    context,
-                    None,
-                    self.agent
-                        .inner
-                        .bindings
-                        .state
-                        .read_record(&snapshot.scope, &receipt.previous_outcome_ref),
-                )
-                .await?;
-                if record.reference() != &receipt.previous_outcome_ref {
-                    return Err(fail(ErrorCode::InvalidSnapshot, "agent.segment_reference"));
+            let history = caller_read(
+                context,
+                None,
+                self.agent
+                    .inner
+                    .bindings
+                    .state
+                    .read_execution(&snapshot.scope, &self.run_id),
+            )
+            .await;
+            let outcome = match history {
+                Ok(history) => {
+                    let segment = history
+                        .segments
+                        .iter()
+                        .find(|segment| {
+                            segment.segment_id == self.segment_id
+                                && segment.accepted_revision == self.segment_start_revision
+                        })
+                        .ok_or_else(|| fail(ErrorCode::InvalidSnapshot, "agent.segment"))?;
+                    match &segment.outcome {
+                        Some(SegmentOutcome::Settled { outcome }) => Some(outcome.as_ref().clone()),
+                        Some(SegmentOutcome::Interrupted { interruption }) => {
+                            let reference =
+                                segment.source_snapshot_ref.as_ref().ok_or_else(|| {
+                                    fail(
+                                        ErrorCode::ComponentUnavailable,
+                                        "agent.legacy_segment_source",
+                                    )
+                                })?;
+                            let record = caller_read(
+                                context,
+                                None,
+                                self.agent
+                                    .inner
+                                    .bindings
+                                    .state
+                                    .read_record(&snapshot.scope, reference),
+                            )
+                            .await?;
+                            if record.reference() != reference {
+                                return Err(fail(
+                                    ErrorCode::InvalidSnapshot,
+                                    "agent.segment_source",
+                                ));
+                            }
+                            let source: RunSnapshot =
+                                serde_json::from_value(record.value().clone()).map_err(|_| {
+                                    fail(ErrorCode::InvalidSnapshot, "agent.segment_source")
+                                })?;
+                            Some(RunOutcome {
+                                result: OutcomeResult::Interrupted {
+                                    interruption: interruption.clone(),
+                                },
+                                output: vec![],
+                                artifacts: vec![],
+                                usage: source.usage,
+                                checkpoint_revision: source.revision,
+                                verification: None,
+                                unresolved_effects: interruption.unresolved_effects.clone(),
+                                app_state: source.app_state,
+                            })
+                        }
+                        None => None,
+                    }
                 }
-                let outcome = serde_json::from_value(record.value().clone())
-                    .map_err(|_| fail(ErrorCode::InvalidSnapshot, "agent.segment_outcome"))?;
+                Err(error)
+                    if error.code == ErrorCode::CapabilityUnsupported
+                        && snapshot.status.is_terminal() =>
+                {
+                    snapshot.outcome.clone()
+                }
+                Err(error) => return Err(error),
+            };
+            if let Some(outcome) = outcome {
                 let request = PolicyRequest {
                     owner_scope: snapshot.scope.clone(),
                     resource_id: self.run_id.clone(),
@@ -640,46 +753,6 @@ impl RunHandle {
                     .policy
                     .guard(&request, context, None, None, || async { Ok(outcome) })
                     .await;
-            }
-            if let Some(receipt) = snapshot.recovery_receipts.iter().find(|receipt| {
-                receipt.previous_segment_start_revision == self.segment_start_revision
-            }) {
-                let record = caller_read(
-                    context,
-                    None,
-                    self.agent
-                        .inner
-                        .bindings
-                        .state
-                        .read_record(&snapshot.scope, &receipt.source_snapshot_ref),
-                )
-                .await?;
-                let source: RunSnapshot = serde_json::from_value(record.value().clone())
-                    .map_err(|_| fail(ErrorCode::InvalidSnapshot, "agent.recovered_source"))?;
-                if let Some(outcome) = source
-                    .outcome
-                    .filter(|outcome| matches!(outcome.result, OutcomeResult::Interrupted { .. }))
-                {
-                    let request = PolicyRequest {
-                        owner_scope: snapshot.scope.clone(),
-                        resource_id: self.run_id.clone(),
-                        action: PolicyAction::ReadRunDetails {},
-                    };
-                    return self
-                        .agent
-                        .inner
-                        .bindings
-                        .policy
-                        .guard(&request, context, None, None, || async { Ok(outcome) })
-                        .await;
-                }
-                return Err(fail(ErrorCode::RevisionConflict, "agent.segment_recovered"));
-            }
-            if segment_revision(&snapshot) != self.segment_start_revision {
-                return Err(fail(ErrorCode::InvalidSnapshot, "agent.segment"));
-            }
-            if let Some(outcome) = snapshot.outcome {
-                return Ok(Guarded::Completed(outcome));
             }
             self.local_error()
                 .map_err(|error| self.agent.inner.observed.attach(&self.run_id, error))?;
@@ -712,7 +785,8 @@ impl RunHandle {
                         )
                         .await?;
                         if handle
-                            .segment_end(&saved.snapshot)?
+                            .segment_end(&saved.snapshot, &context)
+                            .await?
                             .is_some_and(|end| event.seq.get() > end)
                         {
                             return Ok(None);
@@ -772,7 +846,7 @@ impl RunHandle {
                         bindings.state.load(&bindings.scope, &handle.run_id),
                     )
                     .await?;
-                    if let Some(end) = handle.segment_end(&saved.snapshot)? {
+                    if let Some(end) = handle.segment_end(&saved.snapshot, &context).await? {
                         if cursor >= end {
                             return Ok(None);
                         }
@@ -842,58 +916,23 @@ impl RunHandle {
             })
             .await
     }
-    /// Signal only a locally owned driver after current CancelRun authorization.
+    /// Submit a durable cancellation under current authority. Use
+    /// Agent::submit_control_command when the caller supplies an idempotency key.
     pub async fn cancel(
         &self,
         reason: Id,
         context: &ExecutionContext,
     ) -> Result<Guarded<CancelReceipt>, ContractError> {
-        self.agent.check_scope(context)?;
-        let bindings = &self.agent.inner.bindings;
-        let saved = caller_read(
-            context,
-            None,
-            bindings.state.load(&bindings.scope, &self.run_id),
-        )
-        .await?;
-        let policy = PolicyRequest {
-            owner_scope: saved.snapshot.scope,
-            resource_id: self.run_id.clone(),
-            action: PolicyAction::CancelRun {},
-        };
-        bindings
-            .policy
-            .guard(&policy, context, None, None, || async {
-                if saved.snapshot.status.is_terminal() {
-                    return Ok(CancelReceipt::AlreadyTerminal);
-                }
-                if saved.snapshot.status == RunStatus::Waiting {
-                    return self
-                        .agent
-                        .cancel_waiting(self.run_id.clone(), reason, context.clone())
-                        .await;
-                }
-                let current = self
-                    .agent
-                    .inner
-                    .runs
-                    .lock()
-                    .map_err(|_| fail(ErrorCode::InvalidContract, "agent.local_state"))?
-                    .get(&self.run_id)
-                    .cloned();
-                if let Some(local) = current {
-                    if !local.done.load(Ordering::Acquire) {
-                        *local
-                            .reason
-                            .lock()
-                            .map_err(|_| fail(ErrorCode::InvalidContract, "agent.cancel"))? =
-                            Some(reason);
-                        local.cancel.cancel();
-                        return Ok(CancelReceipt::Requested);
-                    }
-                }
-                Ok(CancelReceipt::NotLocal)
-            })
+        self.agent
+            .submit_control_command(
+                self.run_id.clone(),
+                ControlCommand {
+                    command_id: self.agent.inner.bindings.ids.next_id()?,
+                    principal_ref: context.data.principal_ref.clone(),
+                    action: ControlAction::Cancel { reason },
+                },
+                context.clone(),
+            )
             .await
     }
     fn local_error(&self) -> Result<(), ContractError> {
@@ -923,7 +962,35 @@ impl RunHandle {
             .cloned()
             .or_else(|| self.local.clone()))
     }
-    fn segment_end(&self, snapshot: &RunSnapshot) -> Result<Option<u64>, ContractError> {
+    async fn segment_end(
+        &self,
+        snapshot: &RunSnapshot,
+        context: &ExecutionContext,
+    ) -> Result<Option<u64>, ContractError> {
+        let history = caller_read(
+            context,
+            None,
+            self.agent
+                .inner
+                .bindings
+                .state
+                .read_execution(&snapshot.scope, &self.run_id),
+        )
+        .await;
+        match history {
+            Ok(history) => {
+                let segment = history
+                    .segments
+                    .iter()
+                    .find(|segment| segment.accepted_revision == self.segment_start_revision)
+                    .ok_or_else(|| fail(ErrorCode::InvalidSnapshot, "agent.segment"))?;
+                if let Some(last) = segment.last_event_seq {
+                    return Ok(Some(last));
+                }
+            }
+            Err(error) if error.code == ErrorCode::CapabilityUnsupported => {}
+            Err(error) => return Err(error),
+        }
         if let Some(receipt) = snapshot
             .resume_receipts
             .iter()
@@ -941,10 +1008,9 @@ impl RunHandle {
         if segment_revision(snapshot) != self.segment_start_revision {
             return Err(fail(ErrorCode::InvalidSnapshot, "agent.segment"));
         }
-        Ok(
-            (snapshot.status.is_terminal() || snapshot.status == RunStatus::Waiting)
-                .then_some(snapshot.last_event_seq),
-        )
+        Ok((snapshot.status.is_terminal()
+            || matches!(snapshot.status, RunStatus::Waiting | RunStatus::Interrupted))
+        .then_some(snapshot.last_event_seq))
     }
     async fn wait(&self, context: &ExecutionContext) -> Result<(), ContractError> {
         tokio::select! { biased;

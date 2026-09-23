@@ -32,15 +32,29 @@ impl Agent {
         budget: &RunBudget,
         segment: &SegmentBindings,
     ) -> Result<SerialToolRound, ContractError> {
+        let saved = self
+            .inner
+            .bindings
+            .state
+            .load(budget.scope(), budget.run_id())
+            .await?;
+        self.tool_round_for_snapshot(&saved, segment).await
+    }
+
+    pub(super) async fn tool_round_for_snapshot(
+        &self,
+        saved: &StoredRun,
+        segment: &SegmentBindings,
+    ) -> Result<SerialToolRound, ContractError> {
         let bindings = &self.inner.bindings;
         let registry = segment.tools.clone();
-        let saved = bindings.state.load(budget.scope(), budget.run_id()).await?;
         let definitions = if let Some(reference) = &saved.snapshot.system_inputs {
             let record = bindings
                 .state
-                .read_record(budget.scope(), &reference.snapshot_ref)
+                .read_record(&saved.snapshot.scope, &reference.snapshot_ref)
                 .await?;
-            let inputs = RunSystemInputs::from_value(record.value(), reference, budget.scope())?;
+            let inputs =
+                RunSystemInputs::from_value(record.value(), reference, &saved.snapshot.scope)?;
             SystemInputRegistry::new(inputs.definitions().values().cloned().collect())?
         } else {
             bindings.system_inputs.clone()
@@ -304,6 +318,7 @@ impl Agent {
                 budget.scope(),
                 budget.run_id(),
                 CommitInput {
+                    control_commands: vec![],
                     expected_revision,
                     lease: budget.lease().clone(),
                     now_ms: now,

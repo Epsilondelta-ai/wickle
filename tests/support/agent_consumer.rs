@@ -428,8 +428,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let saved = reopened.load(&scope, stopped.run_id()).await?;
     assert_eq!(saved.snapshot.outcome, Some(stopped_outcome.clone()));
     assert_eq!(saved.session.active_run_id.as_ref(), Some(stopped.run_id()));
-    let replay = completed(agent.start(stopped_request, context.clone()).await?)?;
+    let replay = completed(agent.start(stopped_request.clone(), context.clone()).await?)?;
     assert_eq!(completed(replay.outcome(&context).await?)?, stopped_outcome);
+    assert_eq!(first.calls.load(Ordering::SeqCst), 2);
+    let cancellation = ControlCommand { command_id: id("cancel-maintenance"), principal_ref: context.data.principal_ref.clone(), action: ControlAction::Cancel { reason: id("withdrawn") } };
+    let receipt = completed(agent.submit_control_command(stopped.run_id().clone(), cancellation.clone(), context.clone()).await?)?;
+    assert!(receipt.processed_segment_id.is_some());
+    assert_eq!(completed(stopped.outcome(&context).await?)?, stopped_outcome);
+    let latest = completed(agent.start(stopped_request, context.clone()).await?)?;
+    assert_eq!(Some(latest.segment_id()), receipt.processed_segment_id.as_ref());
+    assert_eq!(completed(latest.outcome(&context).await?)?.result.status(), RunStatus::Cancelled);
+    let before_read = SqliteStateStore::open(&database)?.load(&scope, stopped.run_id()).await?;
+    assert_eq!(completed(agent.get_control_receipt(stopped.run_id(), &cancellation.command_id, &context).await?)?, receipt);
+    assert_eq!(SqliteStateStore::open(&database)?.load(&scope, stopped.run_id()).await?, before_read);
+    assert_eq!(completed(agent.submit_control_command(stopped.run_id().clone(), cancellation, context.clone()).await?)?, receipt);
     assert_eq!(first.calls.load(Ordering::SeqCst), 2);
     println!(
         "agent consumer: pure construction, detached execution after observer drop, fallback under shared budgets, stored outcome and event replay, duplicate request without new model calls, SQLite reopen, recoverable host stop and durable replay"

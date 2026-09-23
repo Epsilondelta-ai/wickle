@@ -307,6 +307,7 @@ async fn waiting_keeps_the_session_busy_even_after_the_worker_releases_its_lease
         &scope(),
         2,
         RunEventPayload::RunWaiting {
+            outcome_ref: None,
             wait_ref: record.reference().clone(),
         },
     ));
@@ -499,6 +500,7 @@ async fn an_event_cannot_announce_a_wait_absent_from_the_committed_snapshot() {
         &scope(),
         2,
         RunEventPayload::RunWaiting {
+            outcome_ref: None,
             wait_ref: wrong_payload,
         },
     ));
@@ -714,6 +716,7 @@ async fn invalid_multi_event_commit_does_not_partially_publish_records_state_or_
             &scope(),
             2,
             RunEventPayload::RunWaiting {
+                outcome_ref: None,
                 wait_ref: reference.clone(),
             },
         ),
@@ -723,6 +726,7 @@ async fn invalid_multi_event_commit_does_not_partially_publish_records_state_or_
             &scope(),
             2,
             RunEventPayload::RunWaiting {
+                outcome_ref: None,
                 wait_ref: reference.clone(),
             },
         ),
