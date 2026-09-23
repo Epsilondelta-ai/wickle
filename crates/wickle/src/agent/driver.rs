@@ -78,142 +78,207 @@ impl Agent {
             result
         });
         let mut segment = None;
-        let result = AssertUnwindSafe(async {
-            let saved = bindings.state.load(&bindings.scope, run_id).await?;
-            let metadata = self.metadata_segment(&saved, context.clone()).await?;
-            if expired {
-                segment = Some(metadata);
-                self.finish(
-                    run_id,
-                    PreparedOutcome {
-                        result: OutcomeResult::Exhausted {
-                            budget: BudgetKind::Elapsed,
+        let result = {
+            let work = AssertUnwindSafe(async {
+                let saved = bindings.state.load(&bindings.scope, run_id).await?;
+                let metadata = self.metadata_segment(&saved, context.clone()).await?;
+                if expired {
+                    segment = Some(metadata);
+                    self.finish(
+                        run_id,
+                        PreparedOutcome {
+                            result: OutcomeResult::Exhausted {
+                                budget: BudgetKind::Elapsed,
+                            },
+                            output: vec![],
+                            continuation: vec![],
+                            unresolved_effects: vec![],
+                            verification: None,
                         },
-                        output: vec![],
-                        continuation: vec![],
-                        unresolved_effects: vec![],
-                        verification: None,
-                    },
-                    &budget,
-                    segment.as_ref().expect("metadata segment"),
-                    local,
-                )
-                .await
-            } else {
-                match self
-                    .bind_segment(
-                        &saved,
-                        context.clone(),
-                        Some(&lease),
-                        ComponentBindPurpose::Execution,
-                        Some(&budget),
+                        &budget,
+                        segment.as_ref().expect("metadata segment"),
                         local,
                     )
                     .await
-                {
-                    Ok(bound) => {
-                        segment = Some(bound);
-                        self.observe_pending(
-                            run_id,
-                            segment.as_ref().expect("bound segment"),
+                } else {
+                    match self
+                        .bind_segment(
+                            &saved,
+                            context.clone(),
+                            Some(&lease),
+                            ComponentBindPurpose::Execution,
+                            Some(&budget),
                             local,
                         )
-                        .await;
-                        crate::future::boxed(|| {
-                            self.run_segment(
+                        .await
+                    {
+                        Ok(bound) => {
+                            segment = Some(bound);
+                            self.observe_pending(
                                 run_id,
-                                prompt,
                                 segment.as_ref().expect("bound segment"),
-                                &budget,
-                                &lease,
                                 local,
                             )
-                        })
-                        .await
-                    }
-                    Err(error) => {
-                        segment = Some(metadata);
-                        if matches!(
-                            error.code,
-                            ErrorCode::LeaseLost
-                                | ErrorCode::PersistenceUnavailable
-                                | ErrorCode::RevisionConflict
-                        ) {
-                            return Err(error);
+                            .await;
+                            crate::future::boxed(|| {
+                                self.run_segment(
+                                    run_id,
+                                    prompt,
+                                    segment.as_ref().expect("bound segment"),
+                                    &budget,
+                                    &lease,
+                                    local,
+                                )
+                            })
+                            .await
                         }
-                        self.finish(
-                            run_id,
-                            PreparedOutcome {
-                                result: match error.code {
-                                    ErrorCode::Cancelled => OutcomeResult::Cancelled {
-                                        reason: local
-                                            .reason
-                                            .lock()
-                                            .map_err(|_| {
-                                                fail(ErrorCode::InvalidContract, "agent.cancel")
-                                            })?
-                                            .as_ref()
-                                            .map(ToString::to_string)
-                                            .unwrap_or_else(|| "cancelled".into()),
-                                    },
-                                    ErrorCode::DeadlineExceeded | ErrorCode::BudgetExceeded => {
-                                        OutcomeResult::Exhausted {
-                                            budget: BudgetKind::Elapsed,
+                        Err(error) => {
+                            segment = Some(metadata);
+                            if matches!(
+                                error.code,
+                                ErrorCode::LeaseLost
+                                    | ErrorCode::PersistenceUnavailable
+                                    | ErrorCode::RevisionConflict
+                            ) {
+                                return Err(error);
+                            }
+                            self.finish(
+                                run_id,
+                                PreparedOutcome {
+                                    result: match error.code {
+                                        ErrorCode::Cancelled => OutcomeResult::Cancelled {
+                                            reason: local
+                                                .reason
+                                                .lock()
+                                                .map_err(|_| {
+                                                    fail(ErrorCode::InvalidContract, "agent.cancel")
+                                                })?
+                                                .as_ref()
+                                                .map(ToString::to_string)
+                                                .unwrap_or_else(|| "cancelled".into()),
+                                        },
+                                        ErrorCode::DeadlineExceeded | ErrorCode::BudgetExceeded => {
+                                            OutcomeResult::Exhausted {
+                                                budget: BudgetKind::Elapsed,
+                                            }
                                         }
-                                    }
-                                    _ => failed(&enum_name(&error.code)),
+                                        _ => failed(&enum_name(&error.code)),
+                                    },
+                                    output: vec![],
+                                    continuation: vec![],
+                                    unresolved_effects: vec![],
+                                    verification: None,
                                 },
-                                output: vec![],
-                                continuation: vec![],
-                                unresolved_effects: vec![],
-                                verification: None,
-                            },
-                            &budget,
-                            segment.as_ref().expect("metadata segment"),
-                            local,
-                        )
-                        .await
+                                &budget,
+                                segment.as_ref().expect("metadata segment"),
+                                local,
+                            )
+                            .await
+                        }
+                    }
+                }
+            })
+            .catch_unwind();
+            tokio::pin!(work);
+            tokio::select! { biased;
+                result = &mut work => result.unwrap_or_else(|_| Err(fail(ErrorCode::InvalidContract, "agent.driver"))),
+                _ = budget.wait_for_cancellation_or_deadline() => {
+                    let deadline = self.cleanup_deadline(local)?;
+                    match tokio::time::timeout_at(deadline, &mut work).await {
+                        Ok(result) => result.unwrap_or_else(|_| Err(fail(ErrorCode::InvalidContract, "agent.driver"))),
+                        Err(_) => Err(fail(ErrorCode::PersistenceUnavailable, "agent.stop_cleanup_timeout")),
                     }
                 }
             }
-        })
-        .catch_unwind()
-        .await
-        .unwrap_or_else(|_| Err(fail(ErrorCode::InvalidContract, "agent.driver")));
+        };
         stop.cancel();
         let heartbeat_result = heartbeat
             .await
             .map_err(|_| fail(ErrorCode::LeaseLost, "agent.heartbeat"))?;
-        let latest = bindings.state.load(&bindings.scope, run_id).await;
-        if let Some(segment) = segment.as_ref() {
-            if let Ok(saved) = &latest {
-                if saved.snapshot.status.is_terminal() {
-                    if bindings.components.is_some() && segment.owned.is_none() {
-                        if expired {
-                            self.cleanup_observers(saved, &context, local, vec![]).await;
-                        } else if let Ok(mut slot) = local.release_error.lock() {
-                            if slot.is_none() {
-                                *slot = Some(fail(
-                                    ErrorCode::ComponentUnavailable,
-                                    "components.observers_not_bound",
-                                ));
-                            }
-                        }
-                    } else {
-                        self.after_run(saved, segment, local).await;
+        let cleanup_deadline = self.cleanup_deadline(local)?;
+        let ownership_lost = matches!(&result, Err(error) if error.code == ErrorCode::LeaseLost)
+            || matches!(&heartbeat_result, Err(error) if error.code == ErrorCode::LeaseLost);
+        let latest = match tokio::time::timeout_at(
+            cleanup_deadline,
+            bindings.state.load(&bindings.scope, run_id),
+        )
+        .await
+        {
+            Ok(value) => value,
+            Err(_) => Err(fail(
+                ErrorCode::PersistenceUnavailable,
+                "agent.cleanup_read",
+            )),
+        };
+        // Release the fenced lease before adapter cleanup. Known ownership loss
+        // never authorizes a release or an after-run callback from the old owner.
+        // Terminal commits already release the lease atomically in the store.
+        let terminal_committed = latest
+            .as_ref()
+            .is_ok_and(|saved| saved.snapshot.status.is_terminal());
+        if !ownership_lost && !terminal_committed {
+            if let Ok((_, now)) = budget.settlement_time(0) {
+                let released = tokio::time::timeout_at(
+                    cleanup_deadline,
+                    bindings
+                        .state
+                        .release_lease(&bindings.scope, run_id, &lease, now),
+                )
+                .await;
+                let failure = match released {
+                    Ok(Ok(())) => None,
+                    Ok(Err(error)) => Some(error),
+                    Err(_) => Some(fail(ErrorCode::DeadlineExceeded, "agent.lease_release")),
+                };
+                if let Some(error) = failure {
+                    if let Ok(mut slot) = local.release_error.lock() {
+                        *slot = Some(error);
                     }
                 }
             }
-            self.release_segment(segment, local).await;
         }
-        if let Ok((_, now)) = budget.settlement_time(0) {
-            let _ = bindings
-                .state
-                .release_lease(&bindings.scope, run_id, &lease, now)
-                .await;
+        if let Some(segment) = segment.as_ref() {
+            let cleanup = async {
+                if !ownership_lost {
+                    if let Ok(saved) = &latest {
+                        if saved.snapshot.status.is_terminal() {
+                            if bindings.components.is_some() && segment.owned.is_none() {
+                                if expired {
+                                    self.cleanup_observers(saved, &context, local, vec![]).await;
+                                } else if let Ok(mut slot) = local.release_error.lock() {
+                                    if slot.is_none() {
+                                        *slot = Some(fail(
+                                            ErrorCode::ComponentUnavailable,
+                                            "components.observers_not_bound",
+                                        ));
+                                    }
+                                }
+                            } else {
+                                self.after_run(saved, segment, local).await;
+                            }
+                        }
+                    }
+                }
+                self.release_segment(segment, local).await;
+            };
+            if tokio::time::timeout_at(cleanup_deadline, cleanup)
+                .await
+                .is_err()
+            {
+                if let Ok(mut slot) = local.release_error.lock() {
+                    *slot = Some(fail(ErrorCode::DeadlineExceeded, "components.cleanup"));
+                }
+            }
+        }
+        if ownership_lost {
+            return Err(fail(ErrorCode::LeaseLost, "agent.ownership_lost"));
         }
         if latest.as_ref().is_ok_and(|saved| {
-            saved.snapshot.status.is_terminal() || saved.snapshot.status == RunStatus::Waiting
+            saved.snapshot.status.is_terminal()
+                || matches!(
+                    saved.snapshot.status,
+                    RunStatus::Waiting | RunStatus::Interrupted
+                )
         }) {
             return Ok(());
         }
@@ -708,6 +773,27 @@ impl Agent {
         segment: &SegmentBindings,
         local: &Arc<LocalRun>,
     ) -> Result<(), ContractError> {
+        let deadline = self.cleanup_deadline(local)?;
+        tokio::time::timeout_at(
+            deadline,
+            crate::future::boxed(|| self.finish_inner(run_id, candidate, budget, segment, local)),
+        )
+        .await
+        .map_err(|_| {
+            fail(
+                ErrorCode::PersistenceUnavailable,
+                "agent.finalization_timeout",
+            )
+        })?
+    }
+    async fn finish_inner(
+        &self,
+        run_id: &Id,
+        candidate: PreparedOutcome,
+        budget: &RunBudget,
+        segment: &SegmentBindings,
+        local: &Arc<LocalRun>,
+    ) -> Result<(), ContractError> {
         let PreparedOutcome {
             mut result,
             mut output,
@@ -767,7 +853,9 @@ impl Agent {
         // under the stored lease. A stop during these reads also closes untouched
         // plans; it never invents a result for an uncertain dispatched operation.
         let mut cleaned = false;
+        let mut interruption_decision: Option<InterruptionDecisionRecord> = None;
         let (elapsed, now) = loop {
+            tokio::task::yield_now().await;
             let (_, check_at) = budget.settlement_time(saved.snapshot.usage.elapsed_ms)?;
             let current_lease = bindings
                 .state
@@ -777,29 +865,79 @@ impl Agent {
             if now >= current_lease.expires_at_ms {
                 return Err(fail(ErrorCode::LeaseLost, "agent.finish"));
             }
-            if matches!(
-                result,
-                OutcomeResult::Succeeded { .. } | OutcomeResult::Waiting { .. }
-            ) {
-                if local.cancel.is_cancelled() {
-                    result = OutcomeResult::Cancelled {
-                        reason: local
-                            .reason
-                            .lock()
-                            .map_err(|_| fail(ErrorCode::InvalidContract, "agent.cancel"))?
-                            .as_ref()
-                            .map(ToString::to_string)
-                            .unwrap_or_else(|| "cancelled".into()),
-                    };
-                } else if elapsed >= saved.snapshot.limits.max_elapsed_ms.get() {
-                    result = OutcomeResult::Exhausted {
-                        budget: BudgetKind::Elapsed,
-                    };
+            let cancel_reason = local
+                .reason
+                .lock()
+                .map_err(|_| fail(ErrorCode::InvalidContract, "agent.cancel"))?
+                .clone();
+            if let Some(reason) = &cancel_reason {
+                result = OutcomeResult::Cancelled {
+                    reason: reason.to_string(),
+                };
+            } else if elapsed >= saved.snapshot.limits.max_elapsed_ms.get() {
+                result = OutcomeResult::Exhausted {
+                    budget: BudgetKind::Elapsed,
+                };
+            } else if interruption_decision.is_none()
+                && local.cancel.is_cancelled()
+                && !matches!(
+                    result,
+                    OutcomeResult::Exhausted { .. } | OutcomeResult::Interrupted { .. }
+                )
+            {
+                result = OutcomeResult::Cancelled {
+                    reason: "execution_stopped".into(),
+                };
+            }
+            let cause = match &result {
+                // An individual wait expiry is not exhaustion of the Run's
+                // original deadline and does not invoke interruption policy.
+                OutcomeResult::Exhausted {
+                    budget: BudgetKind::Elapsed,
+                } if elapsed < saved.snapshot.limits.max_elapsed_ms.get() => None,
+                OutcomeResult::Exhausted { .. } => Some(InterruptionCause::BudgetExhausted),
+                OutcomeResult::Cancelled { .. } if cancel_reason.is_some() => {
+                    Some(InterruptionCause::UserCancel)
                 }
+                OutcomeResult::Cancelled { .. } => Some(
+                    local
+                        .stop_cause
+                        .lock()
+                        .map_err(|_| fail(ErrorCode::InvalidContract, "interruption.stop_state"))?
+                        .unwrap_or(InterruptionCause::SegmentStopped),
+                ),
+                _ => None,
+            };
+            if let Some(decision) = &mut interruption_decision {
+                if let Some(cause) = cause.filter(|cause| {
+                    matches!(
+                        cause,
+                        InterruptionCause::UserCancel | InterruptionCause::BudgetExhausted
+                    )
+                }) {
+                    if decision.interruption.cause != cause {
+                        decision.interruption.cause = cause;
+                        decision.interruption.recoverable = false;
+                        decision.action = InterruptionAction::UseDefault;
+                        decision.callback_error = Some(Id::new("protected_cause_changed")?);
+                    }
+                }
+            } else if let Some(cause) =
+                cause.filter(|_| saved.snapshot.interruption_plan_ref.is_some())
+            {
+                let decision = crate::future::boxed(|| {
+                    self.interruption_decision(&saved, cause, &unresolved_effects)
+                })
+                .await?;
+                result = super::interruption::interruption_result(&decision, &result);
+                interruption_decision = Some(decision);
+                continue; // Recheck time, ownership and protected causes after the callback.
             }
             if !matches!(
                 result,
-                OutcomeResult::Succeeded { .. } | OutcomeResult::Waiting { .. }
+                OutcomeResult::Succeeded { .. }
+                    | OutcomeResult::Waiting { .. }
+                    | OutcomeResult::Interrupted { .. }
             ) && saved.snapshot.tool_ledger.iter().any(|entry| {
                 matches!(
                     entry.state,
@@ -838,10 +976,10 @@ impl Agent {
         snapshot.usage.elapsed_ms = elapsed;
         snapshot.timing.last_observed_at_ms = now;
         snapshot.status = result.status();
-        snapshot.phase = if snapshot.status == RunStatus::Waiting {
-            RunPhase::Waiting
-        } else {
-            RunPhase::Finish
+        snapshot.phase = match snapshot.status {
+            RunStatus::Waiting => RunPhase::Waiting,
+            RunStatus::Interrupted => snapshot.phase,
+            _ => RunPhase::Finish,
         };
         snapshot.wait = if let OutcomeResult::Waiting { wait } = &result {
             Some(wait.clone())
@@ -865,7 +1003,28 @@ impl Agent {
                     .and_then(|entry| entry.response_ref.clone())
             });
         }
+        let interruption_record = if let Some(mut decision) = interruption_decision {
+            decision.interruption.checkpoint_revision = expected_revision;
+            decision.interruption.recoverable = matches!(result, OutcomeResult::Interrupted { .. });
+            if let OutcomeResult::Interrupted { interruption } = &mut result {
+                *interruption = decision.interruption.clone();
+            }
+            snapshot.app_state = decision.app_state.clone();
+            let record = ProtectedRecord::new(
+                bindings.ids.next_id()?,
+                1,
+                serde_json::to_value(decision)
+                    .map_err(|_| fail(ErrorCode::InvalidJson, "interruption.decision"))?,
+            );
+            snapshot
+                .interruption_records
+                .push(record.reference().clone());
+            Some(record)
+        } else {
+            None
+        };
         let outcome = RunOutcome {
+            app_state: snapshot.app_state.clone(),
             result,
             output: output.clone(),
             artifacts: artifacts::produced(&snapshot),
@@ -903,7 +1062,18 @@ impl Agent {
                 .try_into()
                 .map_err(|_| fail(ErrorCode::InvalidSnapshot, "agent.event"))?,
             timestamp_ms: now,
-            payload: if let Some(wait_record) = &wait_record {
+            payload: if snapshot.status == RunStatus::Interrupted {
+                RunEventPayload::RunInterrupted {
+                    outcome_ref: record.reference().clone(),
+                    decision_ref: interruption_record
+                        .as_ref()
+                        .ok_or_else(|| {
+                            fail(ErrorCode::InvalidSnapshot, "interruption.decision_missing")
+                        })?
+                        .reference()
+                        .clone(),
+                }
+            } else if let Some(wait_record) = &wait_record {
                 RunEventPayload::RunWaiting {
                     wait_ref: wait_record.reference().clone(),
                 }
@@ -914,6 +1084,7 @@ impl Agent {
             },
         };
         let mut records = vec![record];
+        records.extend(interruption_record);
         records.extend(wait_record);
         let mut content: Vec<_> = output
             .into_iter()
@@ -1353,7 +1524,7 @@ pub(super) fn enum_name(value: &impl serde::Serialize) -> String {
         .and_then(|value| value.as_str().map(str::to_owned))
         .unwrap_or_else(|| "invalid_contract".into())
 }
-fn failed(code: &str) -> OutcomeResult {
+pub(super) fn failed(code: &str) -> OutcomeResult {
     OutcomeResult::Failed {
         failure: Failure {
             code: Id::new(code).expect("nonempty static classification"),

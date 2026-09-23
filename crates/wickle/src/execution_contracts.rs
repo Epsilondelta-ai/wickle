@@ -233,7 +233,7 @@ pub struct InterruptionRecord {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum SegmentOutcome {
-    /// Existing waiting or terminal outcome.
+    /// Confirmed interval outcome: waiting, interrupted, or terminal.
     Settled {
         /// Saved authoritative outcome.
         outcome: Box<RunOutcome>,
@@ -420,6 +420,12 @@ pub enum InterruptionAction {
 /// Limited immutable data exposed to the application interruption policy.
 #[derive(Debug, Clone)]
 pub struct InterruptionInfo {
+    /// Last confirmed core cursor, not an app-defined phase.
+    pub phase: crate::RunPhase,
+    /// Actual persistence/recovery capabilities of the bound store.
+    pub store_capabilities: crate::StateStoreCapabilities,
+    /// Fixed nonsecret callback configuration.
+    pub configuration: JsonObject,
     /// Resource scope; this does not grant authorization.
     pub scope: Scope,
     /// Stopped Run identity.
@@ -453,7 +459,9 @@ impl ExecutionSegment {
         match &self.outcome {
             Some(SegmentOutcome::Settled { outcome }) => {
                 outcome.validate()?;
-                if outcome.checkpoint_revision < self.accepted_revision {
+                if outcome.checkpoint_revision < self.accepted_revision
+                    || outcome.app_state != self.app_state
+                {
                     return Err(invalid());
                 }
             }

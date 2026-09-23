@@ -599,6 +599,7 @@ fn agent(
         create_agent(
             profile,
             AgentBindings {
+                interruption_policy: None,
                 scope: scope.clone(),
                 state: store,
                 policy: policy.clone(),

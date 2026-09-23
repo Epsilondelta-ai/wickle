@@ -226,3 +226,9 @@ mod prepared_step;
 pub use prepared_step::{
     PreparedModelProjection, ProjectionProvenance, ResolvedToolSet, ResolvedToolSetEntry,
 };
+
+mod interruption;
+pub use interruption::{
+    AppStateSchema, ExecutionStopReceipt, InterruptionDecisionRecord, InterruptionPlan,
+    InterruptionPolicyBinding,
+};

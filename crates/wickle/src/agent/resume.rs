@@ -526,6 +526,9 @@ impl Agent {
         context: &ExecutionContext,
     ) -> Result<PromptSnapshot, ContractError> {
         let bindings = &self.inner.bindings;
+        if saved.snapshot.interruption_plan_ref.is_some() {
+            self.validate_interruption_binding(&saved.snapshot).await?;
+        }
         let record = self
             .resume_read(
                 context,
@@ -1001,6 +1004,7 @@ impl Agent {
                 .take()
                 .ok_or_else(|| fail(ErrorCode::InvalidSnapshot, "agent.wait_outcome"))?;
             let outcome = RunOutcome {
+                app_state: snapshot.app_state.clone(),
                 result: OutcomeResult::Cancelled {
                     reason: reason.to_string(),
                 },

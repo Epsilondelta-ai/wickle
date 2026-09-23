@@ -177,6 +177,8 @@ impl Agent {
             .collect::<Result<Vec<_>, ContractError>>()?;
         let mut snapshot = saved.snapshot;
         snapshot.revision = receipt.accepted_revision;
+        snapshot.status = RunStatus::Running;
+        snapshot.outcome = None;
         snapshot.last_event_seq += 1;
         snapshot.usage = usage;
         snapshot.usage.elapsed_ms = elapsed;
@@ -324,7 +326,7 @@ fn validate_source(
     snapshot: &RunSnapshot,
     command: &ResumeCommand,
 ) -> Result<ProtectedRecord, ContractError> {
-    if snapshot.status != RunStatus::Running {
+    if !matches!(snapshot.status, RunStatus::Running | RunStatus::Interrupted) {
         return Err(fail(ErrorCode::InvalidTransition, "recovery.status"));
     }
     if snapshot.revision != command.expected_revision {

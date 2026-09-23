@@ -207,6 +207,7 @@ async fn historical_wait_and_resume_survive_a_finished_run_and_a_new_session_run
     waiting.snapshot.phase = RunPhase::Waiting;
     waiting.snapshot.wait = Some(wait);
     waiting.snapshot.outcome = Some(RunOutcome {
+        app_state: None,
         result: OutcomeResult::Waiting {
             wait: waiting.snapshot.wait.clone().unwrap(),
         },

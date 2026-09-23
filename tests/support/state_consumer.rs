@@ -66,6 +66,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ProtectedRecord::new(id("request-record"), 1, serde_json::to_value(&request)?);
     let prompt = ProtectedRecord::new(id("prompt"), 1, json!({"text":"Use evidence"}));
     let snapshot = RunSnapshot {
+        interruption_plan_ref: None,
+        interruption_records: vec![],
+        app_state: None,
         model_step_inputs: vec![],
         prepared_steps: vec![],
         active_prepared_step: None,
@@ -148,6 +151,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     next.status = RunStatus::Succeeded;
     next.phase = RunPhase::Finish;
     let outcome = RunOutcome {
+        app_state: None,
         result: OutcomeResult::Succeeded {
             completion_basis: CompletionBasis::TurnEnded,
         },

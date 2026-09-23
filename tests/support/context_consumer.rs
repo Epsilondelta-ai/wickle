@@ -99,6 +99,9 @@ fn admission(
     );
     let scope = profile.scope().clone();
     let snapshot = RunSnapshot {
+        interruption_plan_ref: None,
+        interruption_records: vec![],
+        app_state: None,
         model_step_inputs: vec![],
         prepared_steps: vec![],
         active_prepared_step: None,
@@ -308,6 +311,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     snapshot.usage.elapsed_ms = 1;
     snapshot.timing.last_observed_at_ms = 1001;
     let outcome = RunOutcome {
+        app_state: None,
         result: OutcomeResult::Cancelled {
             reason: "Demonstration complete".into(),
         },

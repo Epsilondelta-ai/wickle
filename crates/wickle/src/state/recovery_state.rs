@@ -36,7 +36,7 @@ fn validate_recovered(
             event_record(state, additions, &receipt.source_snapshot_ref)?;
         source.validate()?;
         if command != receipt.command
-            || source.status != RunStatus::Running
+            || !matches!(source.status, RunStatus::Running | RunStatus::Interrupted)
             || source.scope != snapshot.scope
             || source.run_id != snapshot.run_id
             || source.request != snapshot.request
@@ -157,7 +157,7 @@ pub(super) fn transition(
     {
         return Err(invalid());
     }
-    if previous.status != RunStatus::Running
+    if !matches!(previous.status, RunStatus::Running | RunStatus::Interrupted)
         || next.status != RunStatus::Running
         || next.resume_receipts != previous.resume_receipts
         || receipt.accepted_revision != next.revision

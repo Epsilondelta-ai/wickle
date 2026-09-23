@@ -134,6 +134,9 @@ pub async fn bound_arguments(
     let now = clock.now()?.utc_ms;
     let run = id("run");
     let snapshot = RunSnapshot {
+        interruption_plan_ref: None,
+        interruption_records: vec![],
+        app_state: None,
         model_step_inputs: vec![],
         prepared_steps: vec![],
         active_prepared_step: None,

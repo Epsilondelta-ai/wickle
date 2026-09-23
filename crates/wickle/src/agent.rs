@@ -18,6 +18,7 @@ mod artifacts;
 mod components;
 mod driver;
 mod hooks;
+mod interruption;
 mod persistence;
 pub use persistence::{PersistenceFailure, UnconfirmedToolEffect};
 mod recovery;
@@ -37,6 +38,10 @@ pub trait ModelTokenEstimator: Send + Sync {
 /// Finite runtime bounds, independent of the profile's total execution budgets.
 #[derive(Debug, Clone)]
 pub struct AgentSettings {
+    /// Upper bound for cooperative interruption callbacks; default one second.
+    pub interruption_timeout_ms: u64,
+    /// Separate bounded cleanup window; default five seconds, not new work time.
+    pub cleanup_timeout_ms: u64,
     /// Lease duration renewed by the detached driver.
     pub lease_ttl_ms: u64,
     /// Renewal interval; at most one third of the lease duration.
@@ -63,6 +68,8 @@ pub struct AgentSettings {
 impl Default for AgentSettings {
     fn default() -> Self {
         Self {
+            interruption_timeout_ms: 1000,
+            cleanup_timeout_ms: 5000,
             lease_ttl_ms: 30_000,
             heartbeat_interval_ms: 5_000,
             observer_poll_ms: 100,
@@ -89,7 +96,11 @@ impl Default for AgentSettings {
 impl AgentSettings {
     /// Validate finite bounds without calling a runtime component.
     pub fn validate(&self) -> Result<(), ContractError> {
-        if self.lease_ttl_ms == 0
+        if self.interruption_timeout_ms == 0
+            || self.cleanup_timeout_ms == 0
+            || self.interruption_timeout_ms > 86_400_000
+            || self.cleanup_timeout_ms > 86_400_000
+            || self.lease_ttl_ms == 0
             || self.lease_ttl_ms > 86_400_000
             || self.heartbeat_interval_ms == 0
             || self.heartbeat_interval_ms > self.lease_ttl_ms / 3
@@ -119,6 +130,8 @@ impl AgentSettings {
 /// Already-created Host components for one exact scope. Creating an Agent does
 /// not invoke these ports, open connections, start tasks or read environment data.
 pub struct AgentBindings {
+    /// Optional versioned stop policy and business-state schema; omission uses the core default.
+    pub interruption_policy: Option<InterruptionPolicyBinding>,
     /// Fixed tenant/workspace/user namespace; validated against routing at start.
     pub scope: Scope,
     /// Durable or explicitly process-local state implementation.
@@ -185,6 +198,8 @@ struct LocalRun {
     segment_start_revision: u64,
     cancel: CancellationToken,
     reason: Mutex<Option<Id>>,
+    stop_cause: Mutex<Option<InterruptionCause>>,
+    cleanup_deadline: Mutex<Option<tokio::time::Instant>>,
     error: Mutex<Option<ContractError>>,
     observer_error: Mutex<Option<ContractError>>,
     release_report: Mutex<Option<ComponentReleaseReport>>,
@@ -199,6 +214,8 @@ impl LocalRun {
             segment_start_revision,
             cancel: CancellationToken::new(),
             reason: Mutex::new(None),
+            stop_cause: Mutex::new(None),
+            cleanup_deadline: Mutex::new(None),
             error: Mutex::new(None),
             observer_error: Mutex::new(None),
             release_report: Mutex::new(None),
@@ -624,9 +641,38 @@ impl RunHandle {
                     .guard(&request, context, None, None, || async { Ok(outcome) })
                     .await;
             }
-            if snapshot.recovery_receipts.iter().any(|receipt| {
+            if let Some(receipt) = snapshot.recovery_receipts.iter().find(|receipt| {
                 receipt.previous_segment_start_revision == self.segment_start_revision
             }) {
+                let record = caller_read(
+                    context,
+                    None,
+                    self.agent
+                        .inner
+                        .bindings
+                        .state
+                        .read_record(&snapshot.scope, &receipt.source_snapshot_ref),
+                )
+                .await?;
+                let source: RunSnapshot = serde_json::from_value(record.value().clone())
+                    .map_err(|_| fail(ErrorCode::InvalidSnapshot, "agent.recovered_source"))?;
+                if let Some(outcome) = source
+                    .outcome
+                    .filter(|outcome| matches!(outcome.result, OutcomeResult::Interrupted { .. }))
+                {
+                    let request = PolicyRequest {
+                        owner_scope: snapshot.scope.clone(),
+                        resource_id: self.run_id.clone(),
+                        action: PolicyAction::ReadRunDetails {},
+                    };
+                    return self
+                        .agent
+                        .inner
+                        .bindings
+                        .policy
+                        .guard(&request, context, None, None, || async { Ok(outcome) })
+                        .await;
+                }
                 return Err(fail(ErrorCode::RevisionConflict, "agent.segment_recovered"));
             }
             if segment_revision(&snapshot) != self.segment_start_revision {
@@ -737,6 +783,64 @@ impl RunHandle {
                 }
             },
         ))
+    }
+    /// Cooperatively stop this execution interval without cancelling the Run.
+    /// NotLocal does not submit a remote command; the Host must deliver it to its Worker.
+    pub async fn stop_execution(
+        &self,
+        cause: InterruptionCause,
+        context: &ExecutionContext,
+    ) -> Result<Guarded<ExecutionStopReceipt>, ContractError> {
+        if !matches!(
+            cause,
+            InterruptionCause::HostShutdown | InterruptionCause::SegmentStopped
+        ) {
+            return Err(fail(ErrorCode::InvalidContract, "interruption.stop_cause"));
+        }
+        self.agent.check_scope(context)?;
+        let bindings = &self.agent.inner.bindings;
+        let request = PolicyRequest {
+            owner_scope: bindings.scope.clone(),
+            resource_id: self.run_id.clone(),
+            action: PolicyAction::StopExecution { cause },
+        };
+        bindings
+            .policy
+            .guard(&request, context, None, None, || async {
+                let saved = caller_read(
+                    context,
+                    None,
+                    bindings.state.load(&bindings.scope, &self.run_id),
+                )
+                .await?;
+                if saved.snapshot.status != RunStatus::Running
+                    || segment_revision(&saved.snapshot) != self.segment_start_revision
+                {
+                    return Ok(ExecutionStopReceipt::AlreadySettled);
+                }
+                if saved.snapshot.interruption_plan_ref.is_none() {
+                    return Err(fail(
+                        ErrorCode::ComponentUnavailable,
+                        "interruption.legacy_plan",
+                    ));
+                }
+                let Some(local) = self.current_local()? else {
+                    return Ok(ExecutionStopReceipt::NotLocal);
+                };
+                if local.done.load(Ordering::Acquire) {
+                    return Ok(ExecutionStopReceipt::NotLocal);
+                }
+                let mut stop = local
+                    .stop_cause
+                    .lock()
+                    .map_err(|_| fail(ErrorCode::InvalidContract, "interruption.stop_state"))?;
+                if stop.is_none() {
+                    *stop = Some(cause);
+                }
+                local.cancel.cancel();
+                Ok(ExecutionStopReceipt::Requested)
+            })
+            .await
     }
     /// Signal only a locally owned driver after current CancelRun authorization.
     pub async fn cancel(

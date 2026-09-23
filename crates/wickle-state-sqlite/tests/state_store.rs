@@ -356,6 +356,7 @@ async fn historical_wait_and_resume_events_remain_valid_after_terminal_reopen() 
     update.snapshot.phase = RunPhase::Waiting;
     update.snapshot.wait = Some(wait);
     update.snapshot.outcome = Some(RunOutcome {
+        app_state: None,
         result: OutcomeResult::Waiting {
             wait: update.snapshot.wait.clone().unwrap(),
         },

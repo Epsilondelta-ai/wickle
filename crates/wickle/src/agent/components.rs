@@ -257,6 +257,20 @@ impl Agent {
             owned: Some(owned),
         })
     }
+    pub(super) fn cleanup_deadline(
+        &self,
+        local: &LocalRun,
+    ) -> Result<tokio::time::Instant, ContractError> {
+        let mut deadline = local
+            .cleanup_deadline
+            .lock()
+            .map_err(|_| fail(ErrorCode::InvalidContract, "components.cleanup_deadline"))?;
+        Ok(*deadline.get_or_insert_with(|| {
+            tokio::time::Instant::now()
+                + Duration::from_millis(self.inner.bindings.settings.cleanup_timeout_ms)
+        }))
+    }
+
     async fn release_capabilities(
         &self,
         owned: &BoundCapabilities,
@@ -266,7 +280,8 @@ impl Agent {
             run_id: owned.run_id().clone(),
             binding_set_id: owned.binding_set_id().clone(),
             cancellation: CancellationToken::new(),
-            deadline: tokio::time::Instant::now() + Duration::from_secs(30),
+            deadline: tokio::time::Instant::now()
+                + Duration::from_millis(self.inner.bindings.settings.cleanup_timeout_ms),
         };
         let _cancel = context.cancellation.clone().drop_guard();
         tokio::time::timeout_at(

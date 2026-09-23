@@ -633,6 +633,7 @@ impl AdapterFactory for Factory {
                 exports,
                 executor,
                 close_calls: AtomicUsize::new(0),
+                close_entered: Notify::new(),
                 close_behavior: self.close_behavior.load(Ordering::SeqCst),
                 events: self.events.clone(),
             });
@@ -714,6 +715,7 @@ pub struct Instance {
     pub exports: Vec<AdapterExportInstance>,
     pub executor: Arc<Executor>,
     pub close_calls: AtomicUsize,
+    pub close_entered: Notify,
     pub close_behavior: usize,
     pub events: Arc<Mutex<Vec<String>>>,
 }
@@ -728,6 +730,7 @@ impl AdapterInstance for Instance {
             assert_eq!(context.binding_set_id, self.binding_set_id);
             assert_eq!(context.adapter_binding, self.binding);
             self.close_calls.fetch_add(1, Ordering::SeqCst);
+            self.close_entered.notify_one();
             self.events
                 .lock()
                 .unwrap()
