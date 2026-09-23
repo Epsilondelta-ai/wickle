@@ -42,9 +42,11 @@ conversation state, or authentication fields.
 
 Each invocation sends one POST. Redirects and SDK retries are disabled. The request
 uses `stream: true`, `store: false`, and `truncation: disabled`; Wickle owns the
-conversation and context limits. Function definitions use the original projected
-schema with `strict: false`, preserving optional model parameters. Structured
-output uses `strict: true` and rejects unsupported structural forms rather than
+conversation and context limits. The adapter provides a versioned Tool schema
+compiler; normal Agent calls use its frozen projection with `strict: true`.
+The wire encoder checks compatibility without rewriting that projection. Direct
+`ModelPort` callers that supply uncompiled schemas get explicit `strict: false`
+when their schema does not meet the strict subset. Structured output uses `strict: true` and rejects unsupported structural forms rather than
 rewriting the output contract. [Function calling](https://developers.openai.com/api/docs/guides/function-calling),
 [structured-output schemas](https://developers.openai.com/api/docs/guides/structured-outputs#supported-schemas).
 
@@ -60,6 +62,33 @@ Reasoning and assistant output items are preserved in an opaque continuation tie
 to the exact route. Replaying it checks the normalized text/calls, then sends the
 original items once and in order. This retains encrypted reasoning and message
 phase metadata without duplicating the visible assistant content.
+
+## Tool inputs and repair
+
+Define Tools with their ordinary canonical JSON Schema and model-visible
+parameters. The core compiles that projection for the selected provider, model
+release, and capability revision. System-bound fields and values stay outside it.
+
+The OpenAI compiler preserves supported native constraints. For optional values,
+a `{ "present": false, "value": null }` envelope means omission; `present: true`
+with a null value means explicit null. Nested optional objects, open objects, and
+forms that cannot retain their shape under strict mode use a JSON string. A
+required JSON-text field contains the value; an optional one contains `[]` for
+omission or `[value]` for presence. Application Tool executors always receive the
+restored ordinary values, with defaults and system inputs bound by the core.
+
+Unsupported validation keywords remain in the original contract and in the
+model's constraint context. They are never discarded as execution requirements.
+The compiler uses the documented smaller native subset for fine-tuned models;
+large enums and deeply nested shapes can use JSON text to fit provider limits.
+Malformed arguments, precision-losing numbers, and original-contract violations
+reach the bounded core repair loop without executing the Tool. Complete malformed
+arguments remain distinct from truncated or conflicting SSE envelopes, which are
+protocol failures. Opaque replay preserves the original argument bytes, including
+invalid proposals, so the model can receive their repair feedback.
+
+[Strict Tool rules](https://developers.openai.com/api/docs/guides/function-calling),
+[Supported schema subset and limits](https://developers.openai.com/api/docs/guides/structured-outputs).
 
 ## Model versions and inspection
 

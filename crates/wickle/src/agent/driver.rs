@@ -1411,11 +1411,7 @@ impl ModelRequestProjector for Projector<'_> {
                         && message.role == MessageRole::User
                 })
                 .ok_or_else(|| fail(ErrorCode::InvalidSnapshot, "agent.request_message"))?;
-            let target = ProviderToolTarget {
-                provider: selection.route.provider.clone(),
-                api_contract: selection.route.api_contract.clone(),
-                capability_revision: selection.route.capability_revision.clone(),
-            };
+            let target = ProviderToolTarget::for_route(&selection.route);
             let mut tool_set = vec![];
             let mut compiled_tools = vec![];
             for manifest in self.prompt.tools() {

@@ -19,6 +19,9 @@ impl OpenAiModel {
     }
 }
 impl ModelPort for OpenAiModel {
+    fn tool_schema_compiler(&self) -> std::sync::Arc<dyn ProviderToolSchemaCompiler> {
+        std::sync::Arc::new(wickle_model_responses::ResponsesToolSchemaCompiler)
+    }
     fn binding(&self) -> ModelPortBinding {
         self.connection.binding()
     }

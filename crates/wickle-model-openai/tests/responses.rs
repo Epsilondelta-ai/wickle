@@ -613,3 +613,210 @@ async fn two_documented_release_ids_coexist_without_replacing_connection_state()
         assert_eq!(request.body["model"], release);
     }
 }
+
+fn compiled_input(schema: Value) -> CompiledTool {
+    let properties = schema["properties"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .cloned()
+        .collect();
+    SchemaCompiler::new()
+        .compile(
+            ToolDescriptor {
+                tool: reference("lookup"),
+                name: id("lookup"),
+                description: "Read data".into(),
+                input_schema: schema,
+                agent_parameters: properties,
+                system_bindings: None,
+                output_schema: json!({"type":"string"}),
+                side_effect: ToolSideEffect::ReadOnly,
+                concurrency: ToolConcurrency::Serial,
+                retry: ToolRetryPolicy::Never,
+                reconcile: false,
+                max_output_bytes: 4096.try_into().unwrap(),
+            },
+            &SystemInputRegistry::new(vec![]).unwrap(),
+        )
+        .unwrap()
+}
+#[tokio::test]
+async fn compiled_optional_and_nested_inputs_use_strict_wire_and_restore_the_original_contract() {
+    let server = Server::new(vec![Reply::sse(&events("model", "done"))]).await;
+    let connection = connection(&server);
+    let model = OpenAiModel::new(connection.clone());
+    let mut request = request(&connection, "model");
+    let original = compiled_input(json!({"type":"object","properties":{
+        "query":{"type":"string","minLength":2,"pattern":"^[a-z]+$"},
+        "note":{"type":["string","null"]},
+        "filter":{"type":"object","properties":{"category":{"type":"string"},"term":{"type":"string"}},"required":["category"],"additionalProperties":false}
+    },"required":["query"],"additionalProperties":false,"if":{"properties":{"query":{"const":"latest"}}},"then":{"required":["note"]}}));
+    let contract = CompiledToolContract::compile(
+        &original,
+        ProviderToolTarget::for_route(&request.route),
+        model.tool_schema_compiler().as_ref(),
+        ProviderToolSchemaLimits::default(),
+    )
+    .unwrap();
+    request.tools = vec![contract.wire_tool().clone()];
+    for fragment in contract.constraint_fragments() {
+        request.messages[0].content.push(ModelContent::Text {
+            text: fragment.text.clone(),
+        });
+    }
+    let canonical = JsonObject::from([
+        ("query".into(), json!("latest")),
+        ("note".into(), Value::Null),
+        ("filter".into(), json!({"category":"finance"})),
+    ]);
+    let wire = contract.encode_arguments(&canonical).unwrap();
+    assert_eq!(wire["note"], json!({"present":true,"value":null}));
+    assert_eq!(
+        parse_json(wire["filter"].as_str().unwrap()).unwrap(),
+        json!([{"category":"finance"}])
+    );
+    assert_eq!(
+        contract
+            .decode_arguments(
+                &serde_json::to_string(&wire).unwrap(),
+                ProviderToolSchemaLimits::default()
+            )
+            .unwrap(),
+        canonical
+    );
+    let omitted = JsonObject::from([("query".into(), json!("other"))]);
+    let encoded = contract.encode_arguments(&omitted).unwrap();
+    assert_eq!(
+        contract
+            .decode_arguments(
+                &serde_json::to_string(&encoded).unwrap(),
+                ProviderToolSchemaLimits::default()
+            )
+            .unwrap(),
+        omitted
+    );
+    assert!(
+        contract
+            .enforcement()
+            .iter()
+            .any(|constraint| constraint.canonical_pointer == "/if"
+                && constraint.context_text
+                && !constraint.provider_native)
+    );
+    collect_model_response(&request, model.generate(&request, &context(&request)))
+        .await
+        .unwrap();
+    let body = &server.requests.lock().unwrap()[0].body;
+    assert_eq!(body["tools"][0]["strict"], true);
+    assert_eq!(
+        body["tools"][0]["parameters"],
+        contract.wire_tool().model_input_schema
+    );
+    assert_eq!(
+        body["tools"][0]["parameters"]["required"]
+            .as_array()
+            .unwrap()
+            .len(),
+        3
+    );
+    assert_eq!(
+        body["tools"][0]["parameters"]["properties"]["query"]["pattern"],
+        "^[a-z]+$"
+    );
+    assert!(
+        body["tools"][0]["parameters"]["properties"]["query"]
+            .get("minLength")
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn model_qualified_compilation_respects_fine_tuned_native_constraint_limits() {
+    let server = Server::new(vec![]).await;
+    let connection = connection(&server);
+    let model = OpenAiModel::new(connection.clone());
+    let original = compiled_input(
+        json!({"type":"object","properties":{"query":{"type":"string","pattern":"^[a-z]+$"}},"required":["query"],"additionalProperties":false}),
+    );
+    let mut route = request(&connection, "gpt-6-astra").route;
+    let normal = CompiledToolContract::compile(
+        &original,
+        ProviderToolTarget::for_route(&route),
+        model.tool_schema_compiler().as_ref(),
+        Default::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        normal.wire_tool().model_input_schema,
+        *original.model_input_schema()
+    );
+    route.model_id = id("ft:base:fixture:release");
+    let tuned = CompiledToolContract::compile(
+        &original,
+        ProviderToolTarget::for_route(&route),
+        model.tool_schema_compiler().as_ref(),
+        Default::default(),
+    )
+    .unwrap();
+    assert!(
+        tuned.wire_tool().model_input_schema["properties"]["query"]
+            .get("pattern")
+            .is_none()
+    );
+    assert!(
+        tuned
+            .enforcement()
+            .iter()
+            .any(
+                |constraint| constraint.canonical_pointer == "/properties/query/pattern"
+                    && constraint.core
+                    && constraint.context_text
+            )
+    );
+    assert_ne!(normal.digest(), tuned.digest());
+    assert!(server.requests.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn oversized_native_enum_uses_reversible_text_without_losing_original_validation() {
+    let server = Server::new(vec![Reply::sse(&events("model", "done"))]).await;
+    let connection = connection(&server);
+    let model = OpenAiModel::new(connection.clone());
+    let mut request = request(&connection, "model");
+    let values: Vec<_> = (0..1001).map(|index| format!("choice-{index}")).collect();
+    let original = compiled_input(
+        json!({"type":"object","properties":{"query":{"type":"string","enum":values}},"required":["query"],"additionalProperties":false}),
+    );
+    let contract = CompiledToolContract::compile(
+        &original,
+        ProviderToolTarget::for_route(&request.route),
+        model.tool_schema_compiler().as_ref(),
+        Default::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        contract.wire_tool().model_input_schema["properties"]["query"],
+        json!({"type":"string"})
+    );
+    for (value, valid) in [("choice-1000", true), ("invented-choice", false)] {
+        let canonical = JsonObject::from([("query".into(), json!(value))]);
+        let encoded = contract.encode_arguments(&canonical).unwrap();
+        let restored = contract
+            .decode_arguments(
+                &serde_json::to_string(&encoded).unwrap(),
+                Default::default(),
+            )
+            .unwrap();
+        assert_eq!(restored, canonical);
+        assert_eq!(original.validate_model_inputs(&restored).is_ok(), valid);
+    }
+    request.tools = vec![contract.wire_tool().clone()];
+    collect_model_response(&request, model.generate(&request, &context(&request)))
+        .await
+        .unwrap();
+    assert_eq!(
+        server.requests.lock().unwrap()[0].body["tools"][0]["strict"],
+        true
+    );
+}

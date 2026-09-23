@@ -983,17 +983,38 @@ fn project_transcript(
                             } else {
                                 None
                             };
+                            // Opaque provider replay is immutable: retain its original wire
+                            // names and argument strings/values, including rejected proposals.
+                            let original = call.provider_arguments.as_ref().filter(|_| {
+                                message
+                                    .content
+                                    .iter()
+                                    .any(|item| matches!(item, ContentBlock::ProviderOpaque { .. }))
+                            });
                             content.push(ModelContent::ToolCall {
                                 provider_call_id: call.provider_call_id.clone(),
-                                name: contract.map_or_else(
-                                    || call.tool_name.clone(),
-                                    |contract| contract.wire_tool().name.clone(),
+                                name: original.map_or_else(
+                                    || {
+                                        contract.map_or_else(
+                                            || call.tool_name.clone(),
+                                            |contract| contract.wire_tool().name.clone(),
+                                        )
+                                    },
+                                    |original| original.name.clone(),
                                 ),
-                                arguments: match contract {
-                                    Some(contract) => {
-                                        contract.encode_arguments(&call.model_inputs)?
+                                arguments: if let Some(original) = original {
+                                    crate::parse_provider_arguments(
+                                        &original.raw,
+                                        input.response_limits.max_input_bytes,
+                                    )
+                                    .unwrap_or_default()
+                                } else {
+                                    match contract {
+                                        Some(contract) => {
+                                            contract.encode_arguments(&call.model_inputs)?
+                                        }
+                                        None => call.model_inputs.clone(),
                                     }
-                                    None => call.model_inputs.clone(),
                                 },
                             });
                         }

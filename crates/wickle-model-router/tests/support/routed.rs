@@ -463,11 +463,7 @@ impl ModelRequestProjector for Projector {
                 )?);
                 compiled_tools.push(CompiledToolContract::compile(
                     &binding.compiled,
-                    ProviderToolTarget {
-                        provider: selection.route.provider.clone(),
-                        api_contract: selection.route.api_contract.clone(),
-                        capability_revision: selection.route.capability_revision.clone(),
-                    },
+                    ProviderToolTarget::for_route(&selection.route),
                     context
                         .tool_schema_compiler
                         .as_deref()

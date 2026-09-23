@@ -865,11 +865,7 @@ async fn saved_provider_codec_restores_canonical_arguments_before_required_defau
         "agent_parameters":["query","limit"],"output_schema":{"type":"string"},"max_output_bytes":100
     }"#).unwrap(),&registry).unwrap();
     let mut request = request("first");
-    let target = ProviderToolTarget {
-        provider: request.route.provider.clone(),
-        api_contract: request.route.api_contract.clone(),
-        capability_revision: request.route.capability_revision.clone(),
-    };
+    let target = ProviderToolTarget::for_route(&request.route);
     let contract = CompiledToolContract::compile(
         &canonical,
         target,

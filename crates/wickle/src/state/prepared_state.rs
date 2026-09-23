@@ -214,11 +214,7 @@ pub(super) fn validate(
             return Err(invalid("prepared.artifacts_missing"));
         }
         let mut manifests = manifests.iter();
-        let target = ProviderToolTarget {
-            provider: route.provider.clone(),
-            api_contract: route.api_contract.clone(),
-            capability_revision: route.capability_revision.clone(),
-        };
+        let target = ProviderToolTarget::for_route(&route);
         let mut contracts = vec![];
         for ((entry, reference), wire) in tools
             .entries

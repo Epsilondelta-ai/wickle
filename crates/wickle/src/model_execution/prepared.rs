@@ -139,11 +139,7 @@ impl ModelExchange {
                 "prepared.tool_count",
             ));
         }
-        let target = ProviderToolTarget {
-            provider: selection.route.provider.clone(),
-            api_contract: selection.route.api_contract.clone(),
-            capability_revision: selection.route.capability_revision.clone(),
-        };
+        let target = ProviderToolTarget::for_route(&selection.route);
         let mut records = Vec::new();
         let mut contracts = Vec::new();
         for (index, ((entry, contract), wire)) in tool_set

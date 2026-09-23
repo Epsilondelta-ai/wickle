@@ -691,11 +691,7 @@ impl InputBinder {
                     .iter()
                     .find(|invocation| invocation.attempt_id == call.model_request_id)
                     .ok_or_else(|| error(ErrorCode::InvalidSnapshot, "tool.provider_invocation"))?;
-                let target = crate::ProviderToolTarget {
-                    provider: invocation.route.provider.clone(),
-                    api_contract: invocation.route.api_contract.clone(),
-                    capability_revision: invocation.route.capability_revision.clone(),
-                };
+                let target = crate::ProviderToolTarget::for_route(&invocation.route);
                 let record = bounded(
                     context,
                     budget,

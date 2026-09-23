@@ -274,7 +274,9 @@ async fn abandoning_execute_terminates_in_flight_write_and_prevents_reuse() {
             result = &mut execution => panic!("hanging write completed: {result:?}"),
             _ = async {
                 let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
-                while !dir.0.join("calls.jsonl.effect").exists() {
+                // File creation precedes the write; wait for the effect acknowledgement
+                // before dropping the future and terminating the child.
+                while std::fs::read_to_string(dir.0.join("calls.jsonl.effect")).ok().as_deref() != Some("applied\n") {
                     assert!(tokio::time::Instant::now() < deadline);
                     tokio::time::sleep(Duration::from_millis(10)).await;
                 }
