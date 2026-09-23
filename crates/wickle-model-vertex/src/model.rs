@@ -124,9 +124,7 @@ impl State<'_> {
             return Err(error(ErrorCode::RequestConflict, "attempt"));
         }
         self.request.validate()?;
-        let value = encode_vertex_request(self.request)?;
-        let body =
-            serde_json::to_vec(&value).map_err(|_| error(ErrorCode::InvalidJson, "request"))?;
+        let body = encode_vertex_request(self.request)?;
         if body.len() > self.request.limits.max_input_bytes {
             return Err(error(ErrorCode::ModelCapabilityUnsupported, "request_size"));
         }

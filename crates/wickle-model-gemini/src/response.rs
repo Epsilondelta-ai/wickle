@@ -1,5 +1,5 @@
 use crate::{
-    codec::{KIND, inspect_part, invalid},
+    codec::{KIND, RAW_KIND, inspect_part, invalid},
     error,
 };
 use serde_json::{Value, json};
@@ -14,6 +14,7 @@ pub struct Decoder<'a> {
     pub metadata: ModelResponseMetadata,
     parts: Vec<Value>,
     ids: Vec<String>,
+    raw_parts: std::collections::BTreeMap<String, String>,
     seen_ids: BTreeSet<String>,
     finish: Option<ModelFinish>,
     bytes: usize,
@@ -28,6 +29,7 @@ impl<'a> Decoder<'a> {
             metadata: Default::default(),
             parts: vec![],
             ids: vec![],
+            raw_parts: Default::default(),
             seen_ids: BTreeSet::new(),
             finish: None,
             bytes: 0,
@@ -47,7 +49,8 @@ impl<'a> Decoder<'a> {
         if event.name.as_deref().is_some_and(|s| s != "message") {
             return Err(invalid());
         }
-        let value = parse_json(&event.data)?;
+        let (value, raw_parts) =
+            crate::raw::event(&event.data, self.request.limits.max_response_bytes)?;
         if !value.is_object() {
             return Err(invalid());
         }
@@ -142,10 +145,16 @@ impl<'a> Decoder<'a> {
                 .get("parts")
                 .and_then(Value::as_array)
                 .ok_or_else(invalid)?;
-            for part in parts {
+            if parts.len() != raw_parts.len() {
+                return Err(invalid());
+            }
+            for (part, raw) in parts.iter().zip(&raw_parts) {
+                if part != &raw.value {
+                    return Err(invalid());
+                }
                 self.bytes = self
                     .bytes
-                    .checked_add(part.to_string().len())
+                    .checked_add(raw.original.len())
                     .filter(|n| *n <= self.request.limits.max_response_bytes)
                     .ok_or_else(invalid)?;
                 let decoded = inspect_part(part, self.vertex)?;
@@ -167,7 +176,10 @@ impl<'a> Decoder<'a> {
                     if !self.seen_ids.insert(id.clone()) {
                         return Err(invalid());
                     }
-                    let args = call.args.to_string();
+                    let args = raw
+                        .arguments
+                        .map(str::to_owned)
+                        .unwrap_or_else(|| call.args.to_string());
                     for (n, delta) in chunks(&args, self.request.limits.max_delta_bytes)?
                         .into_iter()
                         .enumerate()
@@ -180,6 +192,10 @@ impl<'a> Decoder<'a> {
                         });
                     }
                     self.ids.push(id);
+                }
+                if raw.invalid_arguments {
+                    self.raw_parts
+                        .insert(self.parts.len().to_string(), raw.original.into());
                 }
                 self.parts.push(part.clone());
             }
@@ -218,7 +234,11 @@ impl<'a> Decoder<'a> {
             } else {
                 vec![OpaqueContinuation::new(
                     &self.request.route,
-                    json!({"kind":KIND,"parts":self.parts,"call_ids":self.ids}),
+                    if self.raw_parts.is_empty() {
+                        json!({"kind":KIND,"parts":self.parts,"call_ids":self.ids})
+                    } else {
+                        json!({"kind":RAW_KIND,"parts":self.parts,"call_ids":self.ids,"raw_parts":self.raw_parts})
+                    },
                 )]
             },
         })

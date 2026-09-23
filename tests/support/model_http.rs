@@ -59,6 +59,9 @@ pub struct Request {
     pub path: String,
     pub headers: String,
     pub body: Value,
+    /// Exact body bytes decoded as UTF-8 for lossless numeric/signature assertions.
+    #[allow(dead_code)]
+    pub raw_body: String,
 }
 pub struct Server {
     pub base: String,
@@ -117,6 +120,9 @@ impl Server {
                     method: first.next().unwrap().into(),
                     path: first.next().unwrap().into(),
                     headers: headers.clone(),
+                    raw_body: std::str::from_utf8(&bytes[header_end..header_end + length])
+                        .unwrap()
+                        .into(),
                     body: if length == 0 {
                         Value::Null
                     } else {

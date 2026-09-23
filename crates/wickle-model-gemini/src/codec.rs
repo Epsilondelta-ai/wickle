@@ -3,6 +3,7 @@ use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use wickle::*;
 
+pub(crate) const RAW_KIND: &str = "wickle.gemini.generate_content.v2";
 pub(crate) const KIND: &str = "wickle.gemini.generate_content.v1";
 pub(crate) fn invalid() -> ContractError {
     error(ErrorCode::ModelContextIncompatible, "content")
@@ -19,12 +20,13 @@ pub enum FunctionSchemaFormat {
 pub fn encode_request(
     request: &ModelRequest,
     format: FunctionSchemaFormat,
-) -> Result<Value, ContractError> {
-    encode(request, format, false)
+) -> Result<Vec<u8>, ContractError> {
+    encode(request, format, false)?.into_bytes()
 }
 /// Encode Vertex v1 using JSON function schemas and its current text response format.
-pub fn encode_vertex_request(request: &ModelRequest) -> Result<Value, ContractError> {
-    let mut body = encode(request, FunctionSchemaFormat::JsonSchema, true)?;
+pub fn encode_vertex_request(request: &ModelRequest) -> Result<Vec<u8>, ContractError> {
+    let mut encoded = encode(request, FunctionSchemaFormat::JsonSchema, true)?;
+    let body = &mut encoded.body;
     if !request.tools.is_empty() {
         body["toolConfig"] = json!({"functionCallingConfig":{"streamFunctionCallArguments":false}});
     }
@@ -39,15 +41,16 @@ pub fn encode_vertex_request(request: &ModelRequest) -> Result<Value, ContractEr
             json!([{"text":{"mimeType":"APPLICATION_JSON","schema":schema}}]),
         );
     }
-    Ok(body)
+    encoded.into_bytes()
 }
 fn encode(
     request: &ModelRequest,
     format: FunctionSchemaFormat,
     vertex: bool,
-) -> Result<Value, ContractError> {
+) -> Result<Encoded, ContractError> {
     request.validate()?;
     let mut contents: Vec<Value> = vec![];
+    let mut raw_replay = vec![];
     let mut system = vec![];
     let mut calls: BTreeMap<String, (String, Option<String>)> = BTreeMap::new();
     let mut call_order: Vec<String> = vec![];
@@ -84,6 +87,7 @@ fn encode(
                 }
             })
             .collect();
+        let mut raw_message = BTreeMap::<usize, String>::new();
         let parts = if opaque.is_empty() {
             let mut parts = vec![];
             for part in ordered {
@@ -113,12 +117,36 @@ fn encode(
                 return Err(invalid());
             }
             let data = opaque[0].data();
-            if data["kind"] != KIND || data.as_object().is_none_or(|v| v.len() != 3) {
-                return Err(invalid());
-            }
+            let originals = match data.get("kind").and_then(Value::as_str) {
+                Some(KIND) if data.as_object().is_some_and(|v| v.len() == 3) => None,
+                Some(RAW_KIND) if data.as_object().is_some_and(|v| v.len() == 4) => Some(
+                    data.get("raw_parts")
+                        .and_then(Value::as_object)
+                        .filter(|parts| !parts.is_empty())
+                        .ok_or_else(invalid)?,
+                ),
+                _ => return Err(invalid()),
+            };
             let parts = data["parts"].as_array().ok_or_else(invalid)?;
             let ids: Vec<String> =
                 serde_json::from_value(data["call_ids"].clone()).map_err(|_| invalid())?;
+            if let Some(originals) = originals {
+                for (key, value) in originals {
+                    let index: usize = key.parse().map_err(|_| invalid())?;
+                    if index.to_string() != *key || index >= parts.len() {
+                        return Err(invalid());
+                    }
+                    let original = value.as_str().ok_or_else(invalid)?;
+                    let raw = crate::raw::part(original, request.limits.max_input_bytes)?;
+                    if !raw.invalid_arguments
+                        || raw.value != parts[index]
+                        || inspect_part(&raw.value, vertex)?.call.is_none()
+                    {
+                        return Err(invalid());
+                    }
+                    raw_message.insert(index, original.into());
+                }
+            }
             let mut text = String::new();
             let mut decoded = vec![];
             for part in parts {
@@ -193,6 +221,25 @@ fn encode(
             } else {
                 "user"
             };
+            let merging = contents.last().is_some_and(|v| v["role"] == role);
+            let index = if merging {
+                contents.len() - 1
+            } else {
+                contents.len()
+            };
+            let offset = if merging {
+                contents[index]["parts"]
+                    .as_array()
+                    .ok_or_else(invalid)?
+                    .len()
+            } else {
+                0
+            };
+            raw_replay.extend(
+                raw_message
+                    .into_iter()
+                    .map(|(part, raw)| (index, offset + part, raw)),
+            );
             if let Some(last) = contents.last_mut().filter(|v| v["role"] == role) {
                 last["parts"]
                     .as_array_mut()
@@ -262,7 +309,7 @@ fn encode(
         config["thinkingConfig"] = Value::Object(thinking);
     }
     if let ModelOutput::JsonSchema { schema } = &request.output {
-        schema_value(schema, FunctionSchemaFormat::JsonSchema)?;
+        schema_value(schema, FunctionSchemaFormat::JsonSchema, false)?;
         config["responseMimeType"] = json!("application/json");
         config["responseJsonSchema"] = schema.clone();
     }
@@ -285,20 +332,66 @@ fn encode(
                         "function_name",
                     ));
                 }
-                let schema = schema_value(&tool.model_input_schema, format)?;
+                let schema = schema_value(&tool.model_input_schema, format, true)?;
                 let mut value = json!({"name":tool.name,"description":tool.description});
-                value[match format {
-                    FunctionSchemaFormat::OpenApi => "parameters",
-                    FunctionSchemaFormat::JsonSchema => "parametersJsonSchema",
-                }] = schema;
+                if !tool
+                    .model_input_schema
+                    .get("properties")
+                    .and_then(Value::as_object)
+                    .is_some_and(|properties| properties.is_empty())
+                {
+                    value[match format {
+                        FunctionSchemaFormat::OpenApi => "parameters",
+                        FunctionSchemaFormat::JsonSchema => "parametersJsonSchema",
+                    }] = schema;
+                }
                 Ok(value)
             })
             .collect::<Result<Vec<_>, ContractError>>()?;
         body["tools"] = json!([{"functionDeclarations":declarations}]);
     }
-    Ok(body)
+    Ok(Encoded { body, raw_replay })
 }
-fn schema_value(schema: &Value, format: FunctionSchemaFormat) -> Result<Value, ContractError> {
+
+struct Encoded {
+    body: Value,
+    raw_replay: Vec<(usize, usize, String)>,
+}
+impl Encoded {
+    fn into_bytes(self) -> Result<Vec<u8>, ContractError> {
+        if self.raw_replay.is_empty() {
+            return serde_json::to_vec(&self.body).map_err(|_| invalid());
+        }
+        type Object = BTreeMap<String, Box<serde_json::value::RawValue>>;
+        let mut body: Object =
+            serde_json::from_str(&self.body.to_string()).map_err(|_| invalid())?;
+        let mut contents: Vec<Object> =
+            serde_json::from_str(body.get("contents").ok_or_else(invalid)?.get())
+                .map_err(|_| invalid())?;
+        for (content, part, original) in self.raw_replay {
+            let content = contents.get_mut(content).ok_or_else(invalid)?;
+            let mut parts: Vec<Box<serde_json::value::RawValue>> =
+                serde_json::from_str(content.get("parts").ok_or_else(invalid)?.get())
+                    .map_err(|_| invalid())?;
+            *parts.get_mut(part).ok_or_else(invalid)? =
+                serde_json::value::RawValue::from_string(original).map_err(|_| invalid())?;
+            content.insert(
+                "parts".into(),
+                serde_json::value::to_raw_value(&parts).map_err(|_| invalid())?,
+            );
+        }
+        body.insert(
+            "contents".into(),
+            serde_json::value::to_raw_value(&contents).map_err(|_| invalid())?,
+        );
+        serde_json::to_vec(&body).map_err(|_| invalid())
+    }
+}
+fn schema_value(
+    schema: &Value,
+    format: FunctionSchemaFormat,
+    input: bool,
+) -> Result<Value, ContractError> {
     let object = schema
         .as_object()
         .ok_or_else(|| error(ErrorCode::ModelCapabilityUnsupported, "schema"))?;
@@ -318,23 +411,30 @@ fn schema_value(schema: &Value, format: FunctionSchemaFormat) -> Result<Value, C
                     .as_object()
                     .ok_or_else(invalid)?
                     .iter()
-                    .map(|(name, sub)| Ok((name.clone(), schema_value(sub, format)?)))
+                    .map(|(name, sub)| Ok((name.clone(), schema_value(sub, format, input)?)))
                     .collect::<Result<_, ContractError>>()?,
             ),
-            "items" => schema_value(value, format)?,
+            "items" => schema_value(value, format, input)?,
             "anyOf" => Value::Array(
                 value
                     .as_array()
                     .ok_or_else(invalid)?
                     .iter()
-                    .map(|v| schema_value(v, format))
+                    .map(|v| schema_value(v, format, input))
                     .collect::<Result<_, _>>()?,
             ),
+            "additionalProperties"
+                if format == FunctionSchemaFormat::OpenApi
+                    && input
+                    && value == &Value::Bool(false) =>
+            {
+                continue;
+            }
             "additionalProperties" if format == FunctionSchemaFormat::JsonSchema => {
                 if value.is_boolean() {
                     value.clone()
                 } else {
-                    schema_value(value, format)?
+                    schema_value(value, format, input)?
                 }
             }
             "type" if format == FunctionSchemaFormat::OpenApi => {
@@ -343,11 +443,29 @@ fn schema_value(schema: &Value, format: FunctionSchemaFormat) -> Result<Value, C
                     .filter(|s| {
                         matches!(
                             *s,
-                            "object" | "array" | "string" | "integer" | "number" | "boolean"
+                            "object"
+                                | "array"
+                                | "string"
+                                | "integer"
+                                | "number"
+                                | "boolean"
+                                | "null"
                         )
                     })
                     .ok_or_else(|| error(ErrorCode::ModelCapabilityUnsupported, "schema_type"))?;
                 json!(t.to_ascii_uppercase())
+            }
+            "minItems" | "maxItems" | "minLength" | "maxLength" | "minProperties"
+            | "maxProperties"
+                if input && format == FunctionSchemaFormat::OpenApi =>
+            {
+                json!(value.as_u64().ok_or_else(invalid)?.to_string())
+            }
+            "minLength" | "maxLength" | "minProperties" | "maxProperties" | "pattern"
+            | "default" | "example" | "propertyOrdering"
+                if input =>
+            {
+                value.clone()
             }
             "type" | "required" | "enum" | "description" | "title" | "minimum" | "maximum"
             | "minItems" | "maxItems" | "format" => value.clone(),
