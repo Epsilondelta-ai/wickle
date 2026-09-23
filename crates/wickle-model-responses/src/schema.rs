@@ -10,7 +10,7 @@ impl ProviderToolSchemaCompiler for ResponsesToolSchemaCompiler {
     fn reference(&self) -> VersionedRef {
         VersionedRef {
             id: Id::new("wickle-responses-tool-schema").expect("constant"),
-            version: Id::new("1").expect("constant"),
+            version: Id::new("2").expect("constant"),
         }
     }
     fn compile(
@@ -33,7 +33,7 @@ impl ProviderToolSchemaCompiler for AzureResponsesToolSchemaCompiler {
     fn reference(&self) -> VersionedRef {
         VersionedRef {
             id: Id::new("wickle-azure-responses-tool-schema").expect("constant"),
-            version: Id::new("1").expect("constant"),
+            version: Id::new("2").expect("constant"),
         }
     }
     fn compile(
@@ -119,9 +119,20 @@ fn compile(
         .collect();
     let mut wire = Map::new();
     let mut fields = vec![];
+    let mut expansion = ExpansionBudget {
+        nodes: 1024,
+        bytes: 32 * 1024,
+    };
     for (name, schema) in properties {
         let optional = !required.contains(name.as_str());
-        let native = lower(schema, root, fine_tuned, 1, &mut BTreeSet::new());
+        let native = lower(
+            schema,
+            root,
+            fine_tuned,
+            1,
+            &mut BTreeSet::new(),
+            &mut expansion,
+        );
         let (schema, encoding) = match native {
             Some(schema) if optional => (
                 json!({"type":"object","properties":{"present":{"type":"boolean"},"value":{"anyOf":[schema,{"type":"null"}]}},"required":["present","value"],"additionalProperties":false}),
@@ -186,16 +197,32 @@ fn json_text_schema(_optional: bool) -> Value {
     json!({"type":"string"})
 }
 
+// Bound work before expanding shared references. A final wire-size check alone
+// cannot stop a small DAG from allocating a large intermediate tree.
+struct ExpansionBudget {
+    nodes: usize,
+    bytes: usize,
+}
+impl ExpansionBudget {
+    fn charge(&mut self, schema: &Value) -> Option<()> {
+        let bytes = serde_json::to_vec(schema).ok()?.len();
+        self.nodes = self.nodes.checked_sub(1)?;
+        self.bytes = self.bytes.checked_sub(bytes)?;
+        Some(())
+    }
+}
 fn lower(
     schema: &Value,
     root: &Value,
     fine_tuned: bool,
     depth: usize,
     visiting: &mut BTreeSet<String>,
+    expansion: &mut ExpansionBudget,
 ) -> Option<Value> {
     if depth > 8 {
         return None;
     }
+    expansion.charge(schema)?;
     let node = schema.as_object()?;
     if let Some(reference) = node.get("$ref") {
         let reference = reference.as_str()?;
@@ -208,7 +235,7 @@ fn lower(
             return None;
         }
         let target = root.pointer(&reference[1..])?;
-        let result = lower(target, root, fine_tuned, depth + 1, visiting);
+        let result = lower(target, root, fine_tuned, depth + 1, visiting, expansion);
         visiting.remove(reference);
         return result;
     }
@@ -226,7 +253,7 @@ fn lower(
         let branches: Vec<_> = alternatives
             .as_array()?
             .iter()
-            .map(|branch| lower(branch, root, fine_tuned, depth + 1, visiting))
+            .map(|branch| lower(branch, root, fine_tuned, depth + 1, visiting, expansion))
             .collect::<Option<_>>()?;
         return Some(json!({"anyOf":branches}));
     }
@@ -248,7 +275,7 @@ fn lower(
         for (name, child) in properties {
             projected.insert(
                 name.clone(),
-                lower(child, root, fine_tuned, depth + 1, visiting)?,
+                lower(child, root, fine_tuned, depth + 1, visiting, expansion)?,
             );
         }
         result.insert("properties".into(), Value::Object(projected));
@@ -264,7 +291,14 @@ fn lower(
         }
         result.insert(
             "items".into(),
-            lower(node.get("items")?, root, fine_tuned, depth + 1, visiting)?,
+            lower(
+                node.get("items")?,
+                root,
+                fine_tuned,
+                depth + 1,
+                visiting,
+                expansion,
+            )?,
         );
     }
     if let Some(value) = node.get("enum") {
@@ -535,4 +569,24 @@ fn invalid(path: &str) -> ContractError {
         ErrorCode::UnsupportedInputProjection,
         format!("responses.schema.{path}"),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn reference_expansion_stops_before_exhausting_node_or_byte_work_limits() {
+        let root = json!({"$defs":{"leaf":{"type":"string"}},"type":"object","properties":{"a":{"$ref":"#/$defs/leaf"},"b":{"$ref":"#/$defs/leaf"}},"required":["a","b"],"additionalProperties":false});
+        for (nodes, bytes) in [(3, 32 * 1024), (1024, 16)] {
+            let mut budget = ExpansionBudget { nodes, bytes };
+            assert!(lower(&root, &root, false, 1, &mut BTreeSet::new(), &mut budget).is_none());
+        }
+        let mut budget = ExpansionBudget {
+            nodes: 1024,
+            bytes: 32 * 1024,
+        };
+        let expanded = lower(&root, &root, false, 1, &mut BTreeSet::new(), &mut budget).unwrap();
+        assert_eq!(expanded["properties"]["a"], json!({"type":"string"}));
+        assert_eq!(expanded["properties"]["b"], json!({"type":"string"}));
+    }
 }

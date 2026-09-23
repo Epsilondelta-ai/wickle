@@ -2629,3 +2629,162 @@ async fn execution_stop_preserves_an_uncertain_write_and_the_unstarted_remainder
             .is_err()
     );
 }
+
+struct DependentModel {
+    calls: AtomicUsize,
+}
+impl ModelPort for DependentModel {
+    fn binding(&self) -> ModelPortBinding {
+        ModelPortBinding {
+            provider: id("fixture"),
+            adapter: reference("adapter"),
+            connection_ref: reference("connection"),
+        }
+    }
+    fn generate<'a>(
+        &'a self,
+        request: &'a ModelRequest,
+        _: &'a ModelCallContext,
+    ) -> PortStream<'a, ModelEvent> {
+        let step = self.calls.fetch_add(1, Ordering::SeqCst);
+        let observed = observations(request);
+        assert_eq!(observed.len(), step);
+        let (event, finish) = match step {
+            0 => (
+                ModelEvent::ToolArgumentsDelta {
+                    index: 0,
+                    provider_call_id: Some("search-call".into()),
+                    name: Some("search".into()),
+                    delta: json!({"query":"annual report"}).to_string(),
+                },
+                ModelFinish::ToolCalls,
+            ),
+            1 => {
+                assert_eq!(observed[0].0, &id("search-call"));
+                let key = observed[0].1["content"][0]["value"].as_str().unwrap();
+                (
+                    ModelEvent::ToolArgumentsDelta {
+                        index: 0,
+                        provider_call_id: Some("read-call".into()),
+                        name: Some("read".into()),
+                        delta: json!({"query":key}).to_string(),
+                    },
+                    ModelFinish::ToolCalls,
+                )
+            }
+            2 => {
+                assert_eq!(observed[1].0, &id("read-call"));
+                let body = observed[1].1["content"][0]["value"].as_str().unwrap();
+                (
+                    ModelEvent::TextDelta { text: body.into() },
+                    ModelFinish::Stop,
+                )
+            }
+            _ => panic!("unexpected extra model call"),
+        };
+        Box::pin(stream::iter(vec![
+            Ok(event),
+            Ok(ModelEvent::ResponseCompleted {
+                finish,
+                metadata: Default::default(),
+                continuation: vec![],
+            }),
+        ]))
+    }
+}
+struct DependentTool {
+    expected_query: String,
+    result: String,
+    calls: AtomicUsize,
+}
+impl ToolExecutor for DependentTool {
+    fn execute<'a>(
+        &'a self,
+        args: &'a JsonObject,
+        _: &'a ToolExecutionContext,
+    ) -> PortFuture<'a, ToolExecutionResult> {
+        Box::pin(async move {
+            assert_eq!(args.get("query"), Some(&json!(self.expected_query)));
+            assert_eq!(args.get("workspace_id"), Some(&json!(WORKSPACE)));
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(ToolExecutionResult {
+                outcome: ToolExecutionOutcome::Succeeded {
+                    value: json!(self.result),
+                },
+                effect: ToolEffect::NotApplied,
+                receipt: None,
+            })
+        })
+    }
+}
+#[tokio::test]
+async fn search_observation_drives_a_later_read_call_before_the_final_answer() {
+    let fixture = Fixture::new(vec![], Behavior::Success);
+    let key = format!("report-{}", RandomIdSource.next_id().unwrap());
+    let body = format!("document-{}", RandomIdSource.next_id().unwrap());
+    let search = Arc::new(DependentTool {
+        expected_query: "annual report".into(),
+        result: key.clone(),
+        calls: AtomicUsize::new(0),
+    });
+    let read = Arc::new(DependentTool {
+        expected_query: key,
+        result: body.clone(),
+        calls: AtomicUsize::new(0),
+    });
+    let model = Arc::new(DependentModel {
+        calls: AtomicUsize::new(0),
+    });
+    let mut bindings = fixture.bindings();
+    bindings.model_exchange = Arc::new(
+        ModelExchange::new(model.clone(), bindings.policy.clone())
+            .with_route_inspector(fixture.base.inspector.clone(), Duration::from_secs(1))
+            .unwrap(),
+    );
+    let mut profile = fixture.profile.clone();
+    profile.tools.clear();
+    let mut tools = vec![];
+    for (name, executor) in [("search", search.clone()), ("read", read.clone())] {
+        let mut descriptor = fixture
+            .registry
+            .get(&id("read"))
+            .unwrap()
+            .compiled
+            .descriptor()
+            .clone();
+        descriptor.tool = reference(name);
+        descriptor.name = id(name);
+        tools.push(ToolRegistration {
+            compiled: SchemaCompiler::new()
+                .compile(descriptor, &fixture.inputs)
+                .unwrap(),
+            executor,
+        });
+        profile.tools.push(ToolBindingRef::Catalog(CatalogToolRef {
+            tool_id: id(name),
+            version: id("1"),
+            bindings: None,
+            config: None,
+        }));
+    }
+    bindings.tools = Some(Arc::new(ToolRegistry::new(scope(), tools).unwrap()));
+    let agent = create_agent(profile, bindings).unwrap();
+    let handle = fixture.start(&agent).await;
+    let outcome = fixture.outcome(&handle).await;
+    assert_eq!(outcome.result.status(), RunStatus::Succeeded);
+    assert_eq!(outcome.output, vec![InputContent::Text { text: body }]);
+    assert_eq!(model.calls.load(Ordering::SeqCst), 3);
+    assert_eq!(search.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(read.calls.load(Ordering::SeqCst), 1);
+    let saved = fixture
+        .base
+        .store
+        .load(&scope(), handle.run_id())
+        .await
+        .unwrap();
+    assert_eq!(saved.snapshot.tool_ledger.len(), 2);
+    assert_ne!(
+        saved.snapshot.tool_ledger[0].call.model_request_id,
+        saved.snapshot.tool_ledger[1].call.model_request_id
+    );
+}

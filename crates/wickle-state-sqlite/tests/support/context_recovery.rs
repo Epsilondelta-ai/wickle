@@ -94,6 +94,7 @@ pub fn run_worker(directory: &Path, mode: &str) {
             let mut bindings = fixture.bindings();
             bindings.state = if interrupt {
                 Arc::new(recovery_store::CrashStore {
+                    kill_marker: None,
                     inner: store.clone(),
                     boundary: if committed {
                         "context"

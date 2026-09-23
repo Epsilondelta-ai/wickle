@@ -382,7 +382,12 @@ impl Agent {
         self.inner
             .bindings
             .policy
-            .run_view(&saved.snapshot, context, None)
+            .run_view(
+                &saved.snapshot,
+                self.inner.bindings.clock.as_ref(),
+                context,
+                None,
+            )
             .await
     }
     /// Read protected saved state under the separate details permission.

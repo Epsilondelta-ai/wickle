@@ -1431,3 +1431,32 @@ async fn loaded_skill_context_uses_its_pinned_version_without_gaining_system_aut
             .is_err()
     );
 }
+
+#[tokio::test]
+async fn a_saved_prompt_from_another_assembler_is_rejected_even_with_its_authentic_digest() {
+    let fixture = Fixture::new().await;
+    let original = serde_json::to_value(&fixture.prompt).unwrap();
+    let mut changed = original.clone();
+    changed["assembler_version"] = json!("wickle.context-assembler.v999");
+    let changed_digest = canonical_digest(&changed);
+    assert_ne!(changed_digest, fixture.prompt_digest);
+    assert_eq!(
+        PromptSnapshot::restore(
+            &changed.to_string(),
+            &changed_digest,
+            &fixture.profile,
+            &fixture.scope
+        )
+        .unwrap_err()
+        .code,
+        ErrorCode::ContextMismatch
+    );
+    let restored = PromptSnapshot::restore(
+        &original.to_string(),
+        &fixture.prompt_digest,
+        &fixture.profile,
+        &fixture.scope,
+    )
+    .unwrap();
+    assert_eq!(serde_json::to_value(restored).unwrap(), original);
+}

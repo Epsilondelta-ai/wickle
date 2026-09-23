@@ -856,7 +856,7 @@ async fn top_level_property_limit_uses_one_json_object_without_exposing_system_f
 }
 
 #[tokio::test]
-async fn empty_object_depth_boundaries_keep_openai_compiler_revision_compatible() {
+async fn empty_object_depth_boundaries_preserve_native_schema_with_bounded_compiler() {
     let server = Server::new(vec![]).await;
     let connection = connection(&server);
     let target = ProviderToolTarget::for_route(&request(&connection, "base-model").route);
@@ -874,7 +874,7 @@ async fn empty_object_depth_boundaries_keep_openai_compiler_revision_compatible(
             Default::default(),
         )
         .unwrap();
-        assert_eq!(openai.compiler().version, id("1"));
+        assert_eq!(openai.compiler().version, id("2"));
         assert_eq!(
             openai.wire_tool().model_input_schema,
             *original.model_input_schema()
