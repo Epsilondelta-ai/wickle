@@ -236,7 +236,14 @@ impl CompiledToolContract {
         if compiler.reference() != reference {
             return Err(invalid("provider_tool.compiler_revision"));
         }
-        Self::build(tool, target, reference, projection, limits)
+        Self::build(
+            tool,
+            target,
+            reference,
+            projection,
+            limits,
+            "wickle.provider-tool-contract.v2",
+        )
     }
     fn build(
         tool: &CompiledTool,
@@ -244,8 +251,15 @@ impl CompiledToolContract {
         compiler: VersionedRef,
         projection: ProviderToolProjection,
         limits: ProviderToolSchemaLimits,
+        schema_version: &str,
     ) -> Result<Self, ContractError> {
         check_limits(limits)?;
+        if !matches!(
+            schema_version,
+            "wickle.provider-tool-contract.v1" | "wickle.provider-tool-contract.v2"
+        ) {
+            return Err(invalid("provider_tool.schema_version"));
+        }
         depth_bound(tool.model_input_schema(), limits.max_schema_depth)?;
         depth_bound(
             &projection.wire_tool.model_input_schema,
@@ -272,15 +286,44 @@ impl CompiledToolContract {
                 serde_json::to_string(&projection.decode_plan)
                     .map_err(|_| invalid("provider_tool.codec"))?
             );
-            if matches!(&projection.decode_plan, ArgumentDecodePlan::Fields { fields } if fields.iter().any(|field| matches!(field.encoding, ArgumentValueEncoding::JsonText { .. })))
-            {
-                text.push_str(" For json_text, the wire value is a JSON string parsed by the core. With optional=false it encodes the canonical value itself. With optional=true it must encode [] for omission or [value] for a supplied value, including [null] for explicit null. Nested optional properties remain absent inside that JSON document; do not replace absence with null.");
-            }
-            if matches!(
-                &projection.decode_plan,
-                ArgumentDecodePlan::JsonObjectText { .. }
-            ) {
-                text.push_str(" For json_object_text, send exactly the named wire property as a JSON string containing the entire canonical argument object. Preserve absent properties and explicit null values inside it; do not include system-owned fields.");
+            if schema_version == "wickle.provider-tool-contract.v1" {
+                if matches!(&projection.decode_plan, ArgumentDecodePlan::Fields { fields } if fields.iter().any(|field| matches!(field.encoding, ArgumentValueEncoding::JsonText { .. })))
+                {
+                    text.push_str(" For json_text, the wire value is a JSON string parsed by the core. With optional=false it encodes the canonical value itself. With optional=true it must encode [] for omission or [value] for a supplied value, including [null] for explicit null. Nested optional properties remain absent inside that JSON document; do not replace absence with null.");
+                }
+                if matches!(
+                    &projection.decode_plan,
+                    ArgumentDecodePlan::JsonObjectText { .. }
+                ) {
+                    text.push_str(" For json_object_text, send exactly the named wire property as a JSON string containing the entire canonical argument object. Preserve absent properties and explicit null values inside it; do not include system-owned fields.");
+                }
+            } else {
+                text = format!(
+                    "Tool {}: arguments must satisfy this canonical JSON Schema after decoding: {}\nDecode representation: {}. Follow the declared wire schema and each field's encoding. Preserve omission and explicit null as distinct values.",
+                    projection.wire_tool.name,
+                    serde_json::to_string(tool.model_input_schema())
+                        .map_err(|_| invalid("provider_tool.schema"))?,
+                    serde_json::to_string(&projection.decode_plan)
+                        .map_err(|_| invalid("provider_tool.codec"))?
+                );
+                match &projection.decode_plan {
+                    ArgumentDecodePlan::Identity {} => text.push_str(" Identity values are sent directly as canonical values; do not stringify them or add an envelope."),
+                    ArgumentDecodePlan::Fields { fields } => {
+                        if fields.iter().any(|field|matches!(field.encoding, ArgumentValueEncoding::Identity {})) {
+                            text.push_str(" Fields marked identity use the canonical value directly. Do not stringify it or add an envelope. Omit absent optional fields; send JSON null for an explicit null.");
+                        }
+                        if fields.iter().any(|field|matches!(field.encoding, ArgumentValueEncoding::Presence { .. })) {
+                            text.push_str(" Only fields marked presence use the specified present_key and value_key envelope. Both members are required: true marks a supplied value (including null); false with a null placeholder means omission.");
+                        }
+                        if fields.iter().any(|field|matches!(field.encoding, ArgumentValueEncoding::JsonText { optional: false })) {
+                            text.push_str(" Only fields marked json_text with optional=false use a JSON string encoding the canonical value itself. Nested absent properties stay absent.");
+                        }
+                        if fields.iter().any(|field|matches!(field.encoding, ArgumentValueEncoding::JsonText { optional: true })) {
+                            text.push_str(" Only fields marked json_text with optional=true use a JSON string encoding [] for omission or [value] for a supplied value, including [null] for explicit null. Nested absent properties stay absent.");
+                        }
+                    }
+                    ArgumentDecodePlan::JsonObjectText { .. } => text.push_str(" Send exactly the named wire property as a JSON string containing the entire canonical argument object. Preserve absent properties and explicit null; do not include system-owned fields."),
+                }
             }
             let digest = data_digest(&text);
             vec![ToolConstraintFragment {
@@ -304,7 +347,7 @@ impl CompiledToolContract {
             &mut enforcement,
         );
         let data = ContractData {
-            schema_version: "wickle.provider-tool-contract.v1".into(),
+            schema_version: schema_version.into(),
             tool: tool.descriptor().tool.clone(),
             canonical_name: tool.descriptor().name.clone(),
             descriptor_digest: tool.descriptor_digest().clone(),
@@ -359,6 +402,7 @@ impl CompiledToolContract {
                 decode_plan: saved.data.decode_plan.clone(),
             },
             limits,
+            &saved.data.schema_version,
         )?;
         if rebuilt.data != saved.data || rebuilt.digest != *expected {
             return Err(invalid("provider_tool.identity"));
@@ -376,8 +420,10 @@ impl CompiledToolContract {
         }
         let saved: Saved =
             serde_json::from_value(value).map_err(|_| invalid("provider_tool.record"))?;
-        if saved.data.schema_version != "wickle.provider-tool-contract.v1"
-            || data_digest(&saved.data) != saved.digest
+        if !matches!(
+            saved.data.schema_version.as_str(),
+            "wickle.provider-tool-contract.v1" | "wickle.provider-tool-contract.v2"
+        ) || data_digest(&saved.data) != saved.digest
         {
             return Err(invalid("provider_tool.identity"));
         }
