@@ -3,7 +3,8 @@
 Wickle provides profile validation, scoped state and policy contracts, and a
 bounded model-call boundary. The [agent runtime](agents.md) connects these
 contracts to Agent and RunHandle, including serial execution of registered tools.
-Dynamic runtime component assembly is still being implemented.
+Scoped runtime component assembly is available through the optional
+[adapter runtime](adapters.md).
 
 `AgentProfile` contains data and registered references. A `ProfileResolver` is
 Host code that supplies approved metadata for a scope. `ProfileValidator` checks
@@ -93,19 +94,23 @@ adapter version, and Host connection revision. Credentials remain in the adapter
 Host binding. `ModelRequest` contains an explicit model projection and finite
 input/response limits; execution context and system tool inputs are not copied in.
 
-`RunRequest.model_options` pins Host-authorized, request-specific options at
-admission. `RouteRequest.options` carries them as candidate constraints, and
-`ProjectionInput.options` becomes `ModelRequest.options` unchanged. Empty maps
+`RunRequest.model_options` pins Host-authorized, request-specific overrides at
+admission. Binding defaults are overridden by Profile and then Run options;
+`RouteRequest.options` carries the logical overrides as candidate constraints.
+The validated effective configuration becomes `ModelRequest.options`, with its
+origins saved in the prepared step. Verification and compaction use separate
+purpose-specific options. Empty maps
 remain omitted in saved JSON. Model options are included in request digests and
 byte limits; same-route retries preserve them. See the [context guide](context.md)
 for catalog validation and the explicit adapter-mapping boundary.
 
 `collect_model_response` accepts complete text and tool proposals only after the
 whole stream passes protocol validation. Missing completion, malformed or ambiguous
-JSON, duplicate call IDs, contradictory finish reasons, and exceeded limits return
+protocol envelopes, duplicate call IDs, contradictory finish reasons, and exceeded limits return
 `ModelProtocolError`. Failed responses expose bounded partial text, with no partial
 tool plan. Unknown tools and schema-invalid arguments remain explicit rejection
-states in `ProposedToolCall`; these proposals are not authorized executions.
+states in `ProposedToolCall`; complete invalid argument JSON is preserved for
+bounded repair. These proposals are not authorized executions.
 
 `OpaqueContinuation` is tied to the exact route digest, including model and
 connection versions. A different route must receive a valid fresh projection.

@@ -26,7 +26,7 @@ The Host controls configuration and credential refresh. [Environment examples](p
 
 Shared encoding does not imply identical service features. OpenAI/Azure use the original Responses mode; xAI adds separate reasoning identity and usage handling. Anthropic/Bedrock share Messages content while authentication, framing and metadata differ. Gemini/Vertex share content and SSE handling while their function schemas and output formats differ.
 
-For example, direct Gemini API v1 cannot represent closed Tool input objects in OpenAPI parameters; its v1beta JSON Schema path can. Vertex v1 supports JSON Schema function declarations. Mantle Messages rejects native JSON-schema output. Bedrock inference profile identity is distinct from the underlying model release and request origin region.
+For example, direct Gemini API v1 cannot express object closure in OpenAPI parameters. Its compiler preserves that rule in canonical context and core validation; v1beta can also express it in its native JSON Schema declaration. Vertex v1 supports JSON Schema function declarations. Mantle Messages rejects native JSON-schema output. Bedrock inference profile identity is distinct from the underlying model release and request origin region.
 
 All adapters enforce scope/target/API matching, finite deadlines, bounded streams and no hidden transport retries. Provider-native tools, implicit server conversation state and automatic truncation are not substitutes for the core loop. Consult each guide for supported options and explicit limitations.
 
@@ -37,3 +37,7 @@ The independent package check runs each provider's HTTP/SSE consumer and a commo
 These checks establish library and transport-contract behavior. They do not establish every model version's live availability, account permissions or production support. Actual model/account verification and support promotion require separate evidence; missing metadata remains unknown.
 
 See the [model-version evidence matrix](model-support.md) for selected release identities and the distinction between local contract checks and live smoke results.
+
+Tool schema compilation and saved argument decoding are described in
+[provider Tool contracts](provider-tool-schemas.md). Unsupported schema keywords
+are retained as canonical constraints rather than causing a Tool to disappear.

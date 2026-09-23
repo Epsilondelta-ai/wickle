@@ -11,8 +11,9 @@ authorized lookup. `get_run` reads current metadata without expiring or cancelli
 work. Its `deadline_expired` flag observes the original Run deadline for nonterminal
 runs using the injected clock, without acquiring a lease or updating stored usage.
 A clock earlier than the stored high-water time returns `ClockRegression`.
-Terminal views report false. `RunHandle::cancel(command_id, context)` accepts the
-caller’s stable retry key.
+Terminal views report false. `RunHandle::cancel(reason, context)` generates a
+fresh command ID. Use `submit_control_command` with an explicit `ControlCommand`
+when the caller needs a stable retry key.
 
 The owning driver checks pending commands at dispatch boundaries and during its
 heartbeat. It saves the outcome and command consumption in one fenced commit.

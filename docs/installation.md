@@ -24,7 +24,8 @@ server process is required. See [running an agent](agents.md). Credentials,
 connection permissions and configuration loading belong to your Host; the library
 does not load `.env` files.
 
-To verify a source checkout, run:
+Start with [the runnable Host tutorial](quickstart.md) to select one packaged
+consumer. To verify a source checkout in full, run:
 
 ```sh
 cargo test --workspace --locked

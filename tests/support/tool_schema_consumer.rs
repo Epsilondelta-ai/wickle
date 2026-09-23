@@ -159,6 +159,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     compiled.validate_model_inputs(&decoded)?;
     assert_eq!(decoded, model_inputs);
     assert_eq!(reopened.canonical_name(), &id("search_reports"));
+    let strict_target = ProviderToolTarget {
+        model: Some(reference("example-model")),
+        provider: id("openai"),
+        api_contract: ApiContract { operation: id("responses"), version: id("v1") },
+        capability_revision: id("strict-capabilities"),
+    };
+    let strict = CompiledToolContract::compile(&compiled, strict_target.clone(), &wickle_model_responses::ResponsesToolSchemaCompiler, limits)?;
+    let wire = strict.encode_arguments(&model_inputs)?;
+    assert_eq!(wire["limit"]["present"], false);
+    let restored_strict = CompiledToolContract::restore(&serde_json::to_string(&strict)?, &compiled, &strict_target, strict.digest(), limits)?;
+    let canonical = restored_strict.decode_arguments(&serde_json::to_string(&wire)?, limits)?;
+    assert_eq!(canonical, model_inputs);
+    let normalized = compiled.normalize_model_inputs(&canonical)?;
+    assert_eq!(normalized["limit"], json!(10));
+    let mut forged = wire;
+    forged.insert("workspace_id".into(), json!("f7fba7f5-f8e7-4f44-b885-45d0688e9f33"));
+    assert!(restored_strict.decode_arguments(&serde_json::to_string(&forged)?, limits).is_err());
     let request = model_request(compiled.to_model_tool());
     assert_eq!(
         propose(&request, &model_inputs).await?.tool_calls[0].validation,
@@ -184,7 +201,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .is_err()
     );
     println!(
-        "tool schema consumer: query/limit exposed; hidden schema omitted; hidden input rejected by the model boundary; full UUID schema checked; compiled identity preserved and changed registry rejected"
+        "tool schema consumer: query/limit exposed; hidden schema omitted; hidden input rejected by the model boundary; full UUID schema checked; native and strict provider contracts restored with omission/default semantics; compiled identity preserved and changed registry rejected"
     );
     Ok(())
 }

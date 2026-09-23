@@ -31,6 +31,11 @@ def source_digest(directory):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--allow-dirty", action="store_true")
+    runnable = sorted(path.stem.removesuffix("_consumer")
+                      for path in (ROOT / "tests/support").glob("*_consumer.rs")
+                      if path.name not in {"gather_consumer.rs", "report_process_consumer.rs"})
+    parser.add_argument("--consumer", choices=runnable,
+                        help="Run base package checks and one consumer; omit for the full suite")
     args = parser.parse_args()
     toolchain = subprocess.check_output(
         ["rustup", "show", "active-toolchain"], cwd=ROOT, text=True
@@ -166,12 +171,17 @@ def main():
         subprocess.run(["cargo", "run", "--locked", "--offline", "--bin", "wickle-package-consumer"],
                        cwd=consumer, env=env, check=True)
         for example in examples:
+            if args.consumer and example.stem != f"{args.consumer}_consumer":
+                continue
             subprocess.run(["cargo", "run", "--locked", "--offline", "--bin", example.stem],
                            cwd=consumer, env=env, check=True)
         # Two independent application manifests consume the same immutable core
         # archive. Their own business code and selected adapter sets differ.
         if source_digest(package_paths["wickle"]) != core_source_digest:
             raise RuntimeError("Package verification modified the extracted core")
+        if args.consumer:
+            print(f"Selected packaged consumer: {args.consumer} passed (base contracts and immutable package source verified)", flush=True)
+            return
         for scenario, entry, helper, selected in [
             ("gather", "gather_consumer.rs", "source_consumer.rs",
              ["wickle", "wickle-model-router", "wickle-state-sqlite"]),

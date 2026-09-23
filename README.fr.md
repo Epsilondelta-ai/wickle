@@ -46,6 +46,8 @@ pub async fn run_once(
 
 `start` renvoie un handle d’exécution et `outcome` le résultat enregistré. `Guarded::ApprovalRequired` demande une approbation dans l’application. Les composants de cet exemple sont configurés par l’application ; consultez le guide des agents.
 
+Essayez un exemple sans identifiants de modèle avec `python3 scripts/check-package.py --consumer agent` depuis une copie des sources. Consultez le [démarrage rapide](docs/quickstart.md).
+
 ## Fonctionnalités
 
 - **Entrées séparées :** seuls les arguments du modèle sont exposés ; les identifiants fiables proviennent des entrées système.
@@ -54,6 +56,10 @@ pub async fn run_once(
 - **Limites :** appels de modèles, tentatives d’outils, corrections et durée.
 - **Autorisations :** politiques du Host et isolation des organisations et espaces de travail.
 - **Contexte et sorties :** artefacts, preuves, compression et validation des résultats.
+
+- **Adaptation des schémas :** conserve les contraintes originales lors de la traduction des schémas et arguments pour chaque fournisseur.
+- **Options explicites :** Profile puis Run remplacent les valeurs de la liaison ; l’origine de chaque option est conservée.
+- **Interruption et inspection :** associe un état applicatif aux arrêts récupérables et permet d’inspecter les étapes enregistrées en masquant les valeurs sensibles.
 
 ## Modèles et adaptateurs
 
@@ -72,6 +78,12 @@ Connectez ces services avec des crates facultatifs. Les versions, déploiements,
 Utilisez `wickle-state-sqlite` pour la persistance locale et `wickle-adapter-runtime` pour composer les extensions. La mémoire et les graphes se connectent comme ContextSource ou outils ; les écritures après exécution appartiennent à un consommateur externe.
 
 ## Documentation
+
+- [Démarrage rapide](docs/quickstart.md)
+- [Migration vers v0.2.0](docs/migration-v0.2.md)
+- [Contrats d’outils par fournisseur](docs/provider-tool-schemas.md)
+- [Politiques d’interruption](docs/interruption-policy.md)
+- [Inspection des étapes enregistrées](docs/step-inspection.md)
 
 - [Installation](docs/installation.md)
 - [Agents, requêtes et résultats](docs/agents.md)
