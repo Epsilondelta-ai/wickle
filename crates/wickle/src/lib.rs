@@ -217,7 +217,7 @@ pub use provider_tool_schema::{
     ArgumentDecodePlan, ArgumentFieldMapping, ArgumentValueEncoding, CompiledToolContract,
     NativeToolSchemaCompiler, ProviderToolProjection, ProviderToolSchemaCompiler,
     ProviderToolSchemaLimits, ProviderToolTarget, ToolConstraintEnforcement,
-    ToolConstraintFragment,
+    ToolConstraintFragment, parse_provider_arguments,
 };
 
 mod context_fragment;

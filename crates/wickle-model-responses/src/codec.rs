@@ -85,9 +85,16 @@ fn encode(request: &ModelRequest, xai: bool) -> Result<Value, ContractError> {
             for ((call_id, name, arguments), original) in calls.iter().zip(&decoded.calls) {
                 if *call_id != original.call_id
                     || *name != original.name
-                    || serde_json::to_value(arguments)
-                        .map_err(|_| failure(ErrorCode::InvalidContract))?
-                        != parse_json(&original.arguments)?
+                    || match parse_provider_arguments(
+                        &original.arguments,
+                        request.limits.max_input_bytes,
+                    ) {
+                        Ok(original) => **arguments != original,
+                        // The core retains an empty canonical placeholder for an
+                        // unparseable proposal. Replay the original opaque text so
+                        // its paired Tool error can reach the next model turn.
+                        Err(_) => !arguments.is_empty(),
+                    }
                 {
                     return Err(failure(ErrorCode::ModelContextIncompatible));
                 }
@@ -138,7 +145,7 @@ fn encode(request: &ModelRequest, xai: bool) -> Result<Value, ContractError> {
         }
         append_text(&mut input, role, &mut parts);
     }
-    let tools: Vec<_> = request.tools.iter().map(|tool| json!({"type":"function","name":tool.name,"description":tool.description,"parameters":tool.model_input_schema,"strict":false})).collect();
+    let tools: Vec<_> = request.tools.iter().map(|tool| json!({"type":"function","name":tool.name,"description":tool.description,"parameters":tool.model_input_schema,"strict":!xai && request.route.provider.as_str() == "openai" && crate::schema::strict_schema_supported(&tool.model_input_schema, request.route.model_id.as_str().starts_with("ft:"))})).collect();
     let mut payload = json!({"model":request.route.model_id,"input":input,"max_output_tokens":request.max_output_tokens.get(),"store":false,"stream":true,"truncation":"disabled","include":["reasoning.encrypted_content"]});
     if !tools.is_empty() {
         payload["tools"] = json!(tools);
@@ -311,10 +318,11 @@ pub(crate) fn inspect_output_items(
                         .bytes()
                         .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
                     || !call_ids.insert(call_id)
-                    || !parse_json(arguments)?.is_object()
                 {
                     return Err(failure(ErrorCode::InvalidContract));
                 }
+                // The provider envelope is valid even when proposed arguments are not.
+                // Keep their exact bytes for the core's validation/repair loop.
                 output.calls.push(OutputCall {
                     index: index
                         .try_into()

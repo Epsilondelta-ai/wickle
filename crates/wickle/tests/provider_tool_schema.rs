@@ -12,6 +12,7 @@ fn reference(s: &str) -> VersionedRef {
 }
 fn target() -> ProviderToolTarget {
     ProviderToolTarget {
+        model: None,
         provider: id("example"),
         api_contract: ApiContract {
             operation: id("messages"),
@@ -275,4 +276,116 @@ fn codecs_never_silently_round_numeric_arguments() {
             .unwrap();
         tool.validate_model_inputs(&decoded).unwrap();
     }
+}
+
+struct JsonTextCompiler;
+impl ProviderToolSchemaCompiler for JsonTextCompiler {
+    fn reference(&self) -> VersionedRef {
+        reference("json-text")
+    }
+    fn compile(
+        &self,
+        tool: &ModelTool,
+        _: &ProviderToolTarget,
+    ) -> Result<ProviderToolProjection, ContractError> {
+        Ok(ProviderToolProjection {
+            wire_tool: ModelTool {
+                name: tool.name.clone(),
+                description: tool.description.clone(),
+                model_input_schema: json!({"type":"object","properties":{"query":{"type":"string"},"note":{"type":"string"}},"required":["query","note"],"additionalProperties":false}),
+            },
+            decode_plan: ArgumentDecodePlan::Fields {
+                fields: vec![
+                    ArgumentFieldMapping {
+                        wire_name: "query".into(),
+                        canonical_name: "query".into(),
+                        encoding: ArgumentValueEncoding::JsonText { optional: false },
+                    },
+                    ArgumentFieldMapping {
+                        wire_name: "note".into(),
+                        canonical_name: "note".into(),
+                        encoding: ArgumentValueEncoding::JsonText { optional: true },
+                    },
+                ],
+            },
+        })
+    }
+}
+#[test]
+fn json_text_values_preserve_omission_null_and_numeric_precision() {
+    let tool = tool();
+    let limits = ProviderToolSchemaLimits::default();
+    let contract =
+        CompiledToolContract::compile(&tool, target(), &JsonTextCompiler, limits).unwrap();
+    let missing = JsonObject::from([("query".into(), json!("facts"))]);
+    let encoded = contract.encode_arguments(&missing).unwrap();
+    assert_eq!(encoded["note"], json!("[]"));
+    assert_eq!(
+        contract
+            .decode_arguments(&serde_json::to_string(&encoded).unwrap(), limits)
+            .unwrap(),
+        missing
+    );
+    let supplied = JsonObject::from([
+        ("query".into(), json!("facts")),
+        ("note".into(), Value::Null),
+    ]);
+    let encoded = contract.encode_arguments(&supplied).unwrap();
+    assert_eq!(encoded["note"], json!("[null]"));
+    assert_eq!(
+        contract
+            .decode_arguments(&serde_json::to_string(&encoded).unwrap(), limits)
+            .unwrap(),
+        supplied
+    );
+    for value in ["null", "[null,null]", "[", "[1.000000000000000001]"] {
+        let raw = json!({"query":"\"facts\"","note":value}).to_string();
+        assert_eq!(
+            contract.decode_arguments(&raw, limits).unwrap_err().code,
+            ErrorCode::InvalidArguments
+        );
+    }
+    let record = serde_json::to_string(&contract).unwrap();
+    let restored =
+        CompiledToolContract::restore(&record, &tool, &target(), contract.digest(), limits)
+            .unwrap();
+    assert_eq!(
+        restored
+            .decode_arguments(&serde_json::to_string(&encoded).unwrap(), limits)
+            .unwrap(),
+        supplied
+    );
+}
+#[test]
+fn qualified_models_are_pinned_without_rewriting_an_older_unqualified_contract() {
+    let tool = tool();
+    let limits = ProviderToolSchemaLimits::default();
+    let legacy =
+        CompiledToolContract::compile(&tool, target(), &NativeToolSchemaCompiler, limits).unwrap();
+    let mut current = target();
+    current.model = Some(reference("model-snapshot"));
+    let restored = CompiledToolContract::restore(
+        &serde_json::to_string(&legacy).unwrap(),
+        &tool,
+        &current,
+        legacy.digest(),
+        limits,
+    )
+    .unwrap();
+    assert!(restored.target().model.is_none());
+    assert_eq!(restored.digest(), legacy.digest());
+    let modern =
+        CompiledToolContract::compile(&tool, current.clone(), &NativeToolSchemaCompiler, limits)
+            .unwrap();
+    current.model.as_mut().unwrap().version = id("different-release");
+    assert!(
+        CompiledToolContract::restore(
+            &serde_json::to_string(&modern).unwrap(),
+            &tool,
+            &current,
+            modern.digest(),
+            limits
+        )
+        .is_err()
+    );
 }

@@ -28,7 +28,7 @@ through the canonical model schema for protocols that support it.
 Whenever schema or argument representation changes, the core generates a trusted
 explanation containing the complete canonical model schema and the codec rules.
 The ordered fragments carry content digests. The contract records original Tool
-identity, descriptor/schema digests, provider protocol, capability and compiler
+identity, descriptor/schema digests, provider protocol, selected model/release, capability and compiler
 revisions, wire schema, decoding rules and enforcement locations. Size and nesting
 bounds apply before model invocation. A request that exceeds those bounds must
 fail explicitly rather than omit constraints.
@@ -42,6 +42,13 @@ value, a missing required member, duplicate input keys, or
 unknown mapped fields is an argument error. The codec never guesses that null
 means omitted and never supplies a system-owned value.
 
+`ArgumentValueEncoding::JsonText` carries shapes that a provider cannot represent
+natively. A required field contains a JSON-encoded value. An optional field
+contains `[]` for omission or `[value]` for presence, preserving explicit null.
+Invalid JSON, duplicate keys, and precision-losing numbers are argument errors.
+The OpenAI adapter selects this representation for nested optional/open objects
+and provider schema limits; the original validator remains authoritative.
+
 After decoding, apply the canonical model defaults and validation, run the
 before-tool transformation and revalidation, bind system inputs, and validate the
 full original execution schema. This contract does not execute or authorize a
@@ -52,7 +59,8 @@ the model projection; hidden branch data is not added to the model explanation.
 Persist the entire `CompiledToolContract` only in protected storage. Restore it
 with the original `CompiledTool`, the pinned target, and an independently trusted
 expected digest. Restoration uses the saved codec and does not run a newer
-compiler. Send only `wire_tool()` and `constraint_fragments()` to the model.
+compiler. Legacy contracts without model identity keep their original digest;
+newly prepared contracts pin the model identity as well. Send only `wire_tool()` and `constraint_fragments()` to the model.
 
 The Agent obtains the compiler through `ModelPort::tool_schema_compiler` and
 stores its output in an immutable [prepared model step](prepared-model-steps.md).

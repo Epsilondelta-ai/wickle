@@ -11,12 +11,38 @@ use std::{collections::BTreeSet, fmt};
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProviderToolTarget {
+    /// Exact model/release, absent only in older or manually unqualified contracts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<VersionedRef>,
     /// Provider namespace, including deployment-specific provider adapters.
     pub provider: Id,
     /// Exact operation and API version.
     pub api_contract: ApiContract,
     /// Pinned target capability revision.
     pub capability_revision: Id,
+}
+impl ProviderToolTarget {
+    /// Capture the selected route without connection metadata or credentials.
+    pub fn for_route(route: &crate::ResolvedModelRoute) -> Self {
+        Self {
+            model: Some(VersionedRef {
+                id: route.model_id.clone(),
+                version: route.model_version.clone(),
+            }),
+            provider: route.provider.clone(),
+            api_contract: route.api_contract.clone(),
+            capability_revision: route.capability_revision.clone(),
+        }
+    }
+    fn matches_saved(&self, saved: &Self) -> bool {
+        self.provider == saved.provider
+            && self.api_contract == saved.api_contract
+            && self.capability_revision == saved.capability_revision
+            && saved
+                .model
+                .as_ref()
+                .is_none_or(|model| self.model.as_ref() == Some(model))
+    }
 }
 /// Finite bounds on compilation, persisted projection and incoming arguments.
 #[derive(Debug, Clone, Copy)]
@@ -46,6 +72,12 @@ impl Default for ProviderToolSchemaLimits {
 pub enum ArgumentValueEncoding {
     /// Preserve the JSON value, including explicit null.
     Identity {},
+    /// A JSON document encoded as a string. Optional values use [] for omission
+    /// and `[value]` for a supplied value, keeping explicit null distinct.
+    JsonText {
+        /// Whether the string represents an optional zero-or-one value array.
+        optional: bool,
+    },
     /// Encode omission separately from null using an object envelope.
     Presence {
         /// Boolean discriminator: false means omitted, true means supplied.
@@ -227,7 +259,7 @@ impl CompiledToolContract {
         let identity = matches!(projection.decode_plan, ArgumentDecodePlan::Identity {});
         let explained = schema != tool.model_input_schema() || !identity;
         let fragments = if explained {
-            let text = format!(
+            let mut text = format!(
                 "Tool {}: arguments must satisfy this canonical JSON Schema after decoding: {}\nDecode representation: {}. Field mappings restore wire_name to canonical_name. For a presence envelope, both members are required: true marks a supplied value (including explicit null); false with a null value placeholder means omission. Preserve omission and explicit null as distinct values.",
                 projection.wire_tool.name,
                 serde_json::to_string(tool.model_input_schema())
@@ -235,6 +267,10 @@ impl CompiledToolContract {
                 serde_json::to_string(&projection.decode_plan)
                     .map_err(|_| invalid("provider_tool.codec"))?
             );
+            if matches!(&projection.decode_plan, ArgumentDecodePlan::Fields { fields } if fields.iter().any(|field| matches!(field.encoding, ArgumentValueEncoding::JsonText { .. })))
+            {
+                text.push_str(" For json_text, the wire value is a JSON string parsed by the core. With optional=false it encodes the canonical value itself. With optional=true it must encode [] for omission or [value] for a supplied value, including [null] for explicit null. Nested optional properties remain absent inside that JSON document; do not replace absence with null.");
+            }
             let digest = data_digest(&text);
             vec![ToolConstraintFragment {
                 id: Id::new(format!(
@@ -299,13 +335,13 @@ impl CompiledToolContract {
             .map_err(|_| invalid("provider_tool.record"))?;
         if &saved.digest != expected
             || data_digest(&saved.data) != *expected
-            || &saved.data.target != target
+            || !target.matches_saved(&saved.data.target)
         {
             return Err(invalid("provider_tool.identity"));
         }
         let rebuilt = Self::build(
             tool,
-            target.clone(),
+            saved.data.target.clone(),
             saved.data.compiler.clone(),
             ProviderToolProjection {
                 wire_tool: saved.data.wire_tool.clone(),
@@ -400,6 +436,17 @@ impl CompiledToolContract {
                                 output.insert(field.wire_name.clone(), value.clone());
                             }
                         }
+                        ArgumentValueEncoding::JsonText { optional } => {
+                            if *optional || value.is_some() {
+                                let encoded = if *optional {
+                                    serde_json::to_string(&value.into_iter().collect::<Vec<_>>())
+                                } else {
+                                    serde_json::to_string(value.expect("present value"))
+                                }
+                                .map_err(|_| arguments())?;
+                                output.insert(field.wire_name.clone(), Value::String(encoded));
+                            }
+                        }
                         ArgumentValueEncoding::Presence {
                             present_key,
                             value_key,
@@ -436,6 +483,20 @@ impl CompiledToolContract {
                         .ok_or_else(arguments)?;
                     let restored = match &mapping.encoding {
                         ArgumentValueEncoding::Identity {} => Some(value.clone()),
+                        ArgumentValueEncoding::JsonText { optional } => {
+                            let text = value.as_str().ok_or_else(arguments)?;
+                            let parsed = parse_provider_value(text, limits.max_argument_bytes)?;
+                            if *optional {
+                                let values = parsed.as_array().ok_or_else(arguments)?;
+                                match values.len() {
+                                    0 => None,
+                                    1 => Some(values[0].clone()),
+                                    _ => return Err(arguments()),
+                                }
+                            } else {
+                                Some(parsed)
+                            }
+                        }
                         ArgumentValueEncoding::Presence {
                             present_key,
                             value_key,
@@ -702,10 +763,16 @@ fn normalized_decimal(text: &str) -> Option<(bool, String, i128)> {
     Some((negative, trimmed.into(), exponent))
 }
 
-pub(crate) fn parse_provider_arguments(
-    raw: &str,
-    max_bytes: usize,
-) -> Result<JsonObject, ContractError> {
+/// Parse model-owned provider arguments without silently rounding number tokens.
+pub fn parse_provider_arguments(raw: &str, max_bytes: usize) -> Result<JsonObject, ContractError> {
+    Ok(parse_provider_value(raw, max_bytes)?
+        .as_object()
+        .ok_or_else(arguments)?
+        .clone()
+        .into_iter()
+        .collect())
+}
+fn parse_provider_value(raw: &str, max_bytes: usize) -> Result<Value, ContractError> {
     if raw.len() > max_bytes {
         return Err(arguments());
     }
@@ -718,10 +785,5 @@ pub(crate) fn parse_provider_arguments(
             "provider_tool.numeric_precision",
         ));
     }
-    Ok(value
-        .as_object()
-        .ok_or_else(arguments)?
-        .clone()
-        .into_iter()
-        .collect())
+    Ok(value)
 }

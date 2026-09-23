@@ -140,11 +140,7 @@ impl Agent {
             if tool_set.entries.len() != root.compiled_tools.len() {
                 return Err(fail(ErrorCode::InvalidSnapshot, "agent.prepared_tool_set"));
             }
-            let target = ProviderToolTarget {
-                provider: invocation.route.provider.clone(),
-                api_contract: invocation.route.api_contract.clone(),
-                capability_revision: invocation.route.capability_revision.clone(),
-            };
+            let target = ProviderToolTarget::for_route(&invocation.route);
             for (entry, reference) in tool_set.entries.into_iter().zip(root.compiled_tools) {
                 if !prompt.tools().contains(&entry.manifest) {
                     return Err(fail(ErrorCode::InvalidSnapshot, "agent.prepared_manifest"));

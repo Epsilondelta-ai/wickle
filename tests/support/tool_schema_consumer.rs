@@ -146,6 +146,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     assert!(compiled.validate_execution_inputs(&invalid_full).is_err());
     assert!(compiled.validate_execution_inputs(&model_inputs).is_err());
     let target = ProviderToolTarget {
+        model: None,
         provider: id("example-provider"),
         api_contract: ApiContract { operation: id("messages"), version: id("1") },
         capability_revision: id("capabilities"),
