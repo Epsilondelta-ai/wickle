@@ -478,6 +478,7 @@ mod host {
             create_agent(
                 profile,
                 AgentBindings {
+                    interruption_policy: None,
                     scope: self.scope.clone(),
                     state: self.store.clone(),
                     policy: policy.clone(),

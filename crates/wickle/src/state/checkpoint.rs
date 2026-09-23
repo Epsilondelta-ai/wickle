@@ -551,6 +551,19 @@ fn validate_history(
                     return Err(invalid("checkpoint.run_started"));
                 }
             }
+            RunEventPayload::RunInterrupted {
+                outcome_ref,
+                decision_ref,
+            } => {
+                let outcome: RunOutcome = event_record(state, &empty, outcome_ref)?;
+                interruption_state::validate_event(
+                    state,
+                    &empty,
+                    &run.snapshot,
+                    &outcome,
+                    decision_ref,
+                )?;
+            }
             RunEventPayload::RunFinished { outcome_ref } => {
                 finished += 1;
                 let outcome: RunOutcome = event_record(state, &empty, outcome_ref)?;
@@ -720,6 +733,7 @@ fn validate_history(
     {
         return Err(invalid("checkpoint.events"));
     }
+    interruption_state::validate_history_events(state, &empty, &run.snapshot, &run.events)?;
     let events: Vec<_> = run.events.iter().collect();
     let messages: Vec<_> = state
         .sessions

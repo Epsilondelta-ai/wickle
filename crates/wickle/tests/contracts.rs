@@ -730,6 +730,9 @@ async fn checkpoint() -> RunSnapshot {
         expires_at_ms: Some(100000),
     };
     RunSnapshot {
+        interruption_plan_ref: None,
+        interruption_records: vec![],
+        app_state: None,
         model_step_inputs: vec![],
         prepared_steps: vec![],
         active_prepared_step: None,
@@ -1016,6 +1019,7 @@ async fn success_requires_a_matching_completion_basis_and_verified_success_requi
     snapshot.phase = RunPhase::Finish;
     snapshot.wait = None;
     snapshot.outcome = Some(RunOutcome {
+        app_state: None,
         result: OutcomeResult::Succeeded {
             completion_basis: CompletionBasis::TurnEnded,
         },

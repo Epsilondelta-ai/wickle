@@ -546,3 +546,49 @@ async fn a_custom_runtime_cannot_replace_the_pinned_contract_and_its_resources_a
             == 1
     }));
 }
+
+#[tokio::test(start_paused = true)]
+async fn cleanup_releases_the_lease_before_bounded_adapter_close_and_preserves_the_outcome() {
+    let fixture = AgentFixture::new();
+    fixture.adapters.factories[2]
+        .close_behavior
+        .store(2, Ordering::SeqCst);
+    let mut bindings = fixture.bindings();
+    bindings.components = Some(Arc::new(
+        fixture
+            .adapters
+            .runtime(fixture.registry.clone())
+            .with_settings(AdapterRuntimeSettings {
+                close_timeout_ms: 30_000,
+                ..Default::default()
+            })
+            .unwrap(),
+    ));
+    let agent = create_agent(fixture.profile.clone(), bindings).unwrap();
+    let handle = fixture.start(&agent).await;
+    let result = fixture.outcome(&handle).await;
+    assert_eq!(result.result.status(), RunStatus::Succeeded);
+    let instance = fixture.adapters.factories[2].instances.lock().unwrap()[0].clone();
+    tokio::time::timeout(Duration::from_secs(1), instance.close_entered.notified())
+        .await
+        .unwrap();
+    let image =
+        serde_json::to_value(fixture.adapters.store.export_checkpoint(&scope()).unwrap()).unwrap();
+    assert!(image["runs"][0]["lease"].is_null());
+    tokio::time::advance(Duration::from_millis(5001)).await;
+    let release = released(&handle).await;
+    assert!(
+        release
+            .local_error
+            .as_ref()
+            .is_some_and(|error| error.code == ErrorCode::DeadlineExceeded)
+            || release
+                .report
+                .as_ref()
+                .is_some_and(|report| !report.failures.is_empty()),
+        "cleanup report: {release:?}"
+    );
+    assert_eq!(fixture.outcome(&handle).await, result);
+    assert_eq!(fixture.model.calls.load(Ordering::SeqCst), 2);
+    assert_eq!(instance.close_calls.load(Ordering::SeqCst), 1);
+}

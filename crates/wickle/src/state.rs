@@ -12,6 +12,7 @@ mod checkpoint;
 mod context_state;
 mod execution;
 mod hook_state;
+mod interruption_state;
 mod prepared_state;
 mod reconciliation_state;
 mod recovery_state;
@@ -252,6 +253,7 @@ pub trait StateStore: crate::ExecutionTransactions + Send + Sync {
         now_ms: i64,
     ) -> PortFuture<'a, ()>;
     /// Validate and commit state, transcript, records and events atomically.
+    /// A terminal commit also releases the current lease in the same transaction.
     fn commit<'a>(
         &'a self,
         scope: &'a Scope,
@@ -889,6 +891,7 @@ fn validate_snapshot_refs(
 ) -> Result<(), ContractError> {
     recovery_state::validate(state, additions, snapshot)?;
     prepared_state::validate(state, additions, snapshot)?;
+    interruption_state::validate(state, additions, snapshot)?;
     validate_source_snapshot(state, additions, snapshot)?;
     skill_state::validate_skill_snapshot(state, additions, snapshot)?;
     context_state::validate_snapshot(state, additions, snapshot)?;
@@ -1374,6 +1377,7 @@ fn validate_events(
     let mut seen = BTreeSet::new();
     let mut started = 0;
     let mut finished = 0;
+    let mut interrupted = 0;
     let mut resumed = 0;
     let reconciled = reconciliation_state::corrections(
         state,
@@ -1452,6 +1456,26 @@ fn validate_events(
                     return Err(error(ErrorCode::InvalidEvent, "events.run_started"));
                 }
                 request_ref
+            }
+            RunEventPayload::RunInterrupted {
+                outcome_ref,
+                decision_ref,
+            } => {
+                interrupted += 1;
+                let outcome: crate::RunOutcome = event_record(state, additions, outcome_ref)?;
+                interruption_state::validate_event(
+                    state,
+                    additions,
+                    snapshot,
+                    &outcome,
+                    decision_ref,
+                )?;
+                if snapshot.outcome.as_ref() != Some(&outcome)
+                    || snapshot.status != RunStatus::Interrupted
+                {
+                    return Err(error(ErrorCode::InvalidEvent, "events.run_interrupted"));
+                }
+                outcome_ref
             }
             RunEventPayload::RunFinished { outcome_ref } => {
                 finished += 1;
@@ -1584,6 +1608,7 @@ fn validate_events(
     if sequence != snapshot.last_event_seq
         || (admission && (started != 1 || events.len() != 1))
         || (snapshot.status.is_terminal() && finished != 1)
+        || (snapshot.status == RunStatus::Interrupted && interrupted != 1)
         || (!admission
             && resumed
                 != snapshot.resume_receipts.len().saturating_sub(
@@ -1597,6 +1622,16 @@ fn validate_events(
                 ))
     {
         return Err(error(ErrorCode::InvalidEvent, "events"));
+    }
+    if !admission {
+        let mut history_events = state
+            .runs
+            .get(&snapshot.run_id)
+            .ok_or_else(not_found)?
+            .events
+            .clone();
+        history_events.extend_from_slice(events);
+        interruption_state::validate_history_events(state, additions, snapshot, &history_events)?;
     }
     if !admission {
         let previous = &state
@@ -1961,6 +1996,26 @@ fn validate_transition(previous: &RunSnapshot, next: &RunSnapshot) -> Result<(),
     next.validate()?;
     validate_hook_transition(previous, next)?;
     validate_source_transition(previous, next)?;
+    if previous.interruption_plan_ref != next.interruption_plan_ref
+        || !next
+            .interruption_records
+            .starts_with(&previous.interruption_records)
+        || next.interruption_records.len() > previous.interruption_records.len() + 1
+        || (previous.app_state != next.app_state
+            && next.interruption_records.len() == previous.interruption_records.len())
+    {
+        return Err(error(ErrorCode::InvalidTransition, "interruption.history"));
+    }
+    let new_interruption =
+        next.interruption_records.len() == previous.interruption_records.len() + 1;
+    if (next.status == RunStatus::Interrupted && !new_interruption)
+        || (new_interruption && next.outcome.is_none())
+    {
+        return Err(error(
+            ErrorCode::InvalidTransition,
+            "interruption.settlement",
+        ));
+    }
     if !next
         .model_step_inputs
         .starts_with(&previous.model_step_inputs)
@@ -1980,6 +2035,15 @@ fn validate_transition(previous: &RunSnapshot, next: &RunSnapshot) -> Result<(),
         return Err(error(ErrorCode::InvalidTransition, "resume_receipts"));
     }
     let resumed = next.resume_receipts.len() != previous.resume_receipts.len();
+    if previous.status == RunStatus::Interrupted
+        && next.status == RunStatus::Running
+        && next.recovery_receipts.len() != previous.recovery_receipts.len() + 1
+    {
+        return Err(error(
+            ErrorCode::InvalidTransition,
+            "interruption.explicit_recovery",
+        ));
+    }
     if resumed {
         let receipt = next.resume_receipts.last().expect("new receipt");
         if previous.status != RunStatus::Waiting

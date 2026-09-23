@@ -102,6 +102,9 @@ pub async fn admission(
         json!({"instructions":"Use evidence"}),
     );
     let snapshot = RunSnapshot {
+        interruption_plan_ref: None,
+        interruption_records: vec![],
+        app_state: None,
         model_step_inputs: vec![],
         prepared_steps: vec![],
         active_prepared_step: None,
@@ -198,6 +201,7 @@ pub fn finished(snapshot: &RunSnapshot, lease: RunLease, now: i64) -> CommitInpu
     next.status = RunStatus::Succeeded;
     next.phase = RunPhase::Finish;
     let outcome = RunOutcome {
+        app_state: None,
         result: OutcomeResult::Succeeded {
             completion_basis: CompletionBasis::TurnEnded,
         },

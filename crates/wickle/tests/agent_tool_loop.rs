@@ -2577,3 +2577,57 @@ async fn ready_only_execution_yields_to_lease_renewal_between_guarded_operations
             > 300
     );
 }
+
+#[tokio::test]
+async fn execution_stop_preserves_an_uncertain_write_and_the_unstarted_remainder() {
+    let f = Fixture::new(
+        vec![
+            ("write", object(json!({"query":"apply"}))),
+            ("read", object(json!({"query":"inspect"}))),
+        ],
+        Behavior::Pending,
+    );
+    let agent = f.agent();
+    let handle = f.start(&agent).await;
+    tokio::time::timeout(Duration::from_secs(5), f.tools[1].entered.notified())
+        .await
+        .unwrap();
+    assert_eq!(
+        completed(
+            handle
+                .stop_execution(InterruptionCause::HostShutdown, &context())
+                .await
+                .unwrap()
+        ),
+        ExecutionStopReceipt::Requested
+    );
+    let outcome = f.outcome(&handle).await;
+    assert_eq!(outcome.result.status(), RunStatus::Interrupted);
+    assert_eq!(outcome.unresolved_effects.len(), 1);
+    assert_eq!(f.tools[1].applied.load(Ordering::SeqCst), 1);
+    assert_eq!(f.tools[0].calls.load(Ordering::SeqCst), 0);
+    let saved = f.base.store.load(&scope(), handle.run_id()).await.unwrap();
+    assert!(matches!(
+        saved.snapshot.tool_ledger[0].state,
+        ToolCallState::Unknown { .. }
+    ));
+    assert!(matches!(
+        saved.snapshot.tool_ledger[1].state,
+        ToolCallState::Planned { .. }
+    ));
+    let checkpoint = f.base.store.export_checkpoint(&scope()).unwrap();
+    StateStoreCheckpoint::from_json(
+        &serde_json::to_string(&checkpoint).unwrap(),
+        &scope(),
+        &checkpoint.digest(),
+    )
+    .unwrap();
+    let mut image = serde_json::to_value(&checkpoint).unwrap();
+    let old = serde_json::to_value(&outcome.unresolved_effects).unwrap();
+    replace_checkpoint_reference(&mut image, &old, &json!([]));
+    rehash_checkpoint(&mut image);
+    assert!(
+        StateStoreCheckpoint::from_json(&image.to_string(), &scope(), &canonical_digest(&image))
+            .is_err()
+    );
+}

@@ -142,6 +142,11 @@ pub enum PolicyAction {
     },
     /// Request cancellation.
     CancelRun {},
+    /// Stop one execution interval without granting authority to cancel the Run.
+    StopExecution {
+        /// Host shutdown or explicit segment stop; protected causes are core-owned.
+        cause: crate::InterruptionCause,
+    },
     /// Read artifact data/metadata.
     ReadArtifact {},
     /// Write an artifact in the owning scope.

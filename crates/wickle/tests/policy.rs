@@ -698,6 +698,9 @@ async fn snapshot() -> RunSnapshot {
         ..BudgetUsage::default()
     };
     RunSnapshot {
+        interruption_plan_ref: None,
+        interruption_records: vec![],
+        app_state: None,
         model_step_inputs: vec![],
         prepared_steps: vec![],
         active_prepared_step: None,
@@ -737,6 +740,7 @@ async fn snapshot() -> RunSnapshot {
         system_inputs,
         wait: None,
         outcome: Some(RunOutcome {
+            app_state: None,
             result: OutcomeResult::Failed {
                 failure: Failure {
                     code: id("provider_unavailable"),

@@ -65,7 +65,7 @@ mod host {
         let scope = Scope { tenant_id: id("tenant"), workspace_id: id("workspace"), user_id: None };
         let store = Arc::new(SqliteStateStore::open(directory.join("state.sqlite"))?);
         let routing = routing_snapshot(&scope)?;
-        let model = Arc::new(ProcessModel { inner: ExampleModel { route: routing.route_for_binding(&reference("first"))?, calls: AtomicUsize::new(0), fail: false }, directory: directory.to_owned(), interrupt });
+        let model = Arc::new(ProcessModel { inner: ExampleModel { hold: AtomicBool::new(false), entered: tokio::sync::Notify::new(), route: routing.route_for_binding(&reference("first"))?, calls: AtomicUsize::new(0), fail: false }, directory: directory.to_owned(), interrupt });
         let policy = Arc::new(PolicyGate::new(Arc::new(ExamplePolicy), Duration::from_secs(1))?);
         let profile = AgentProfile::from_json(r#"{
             "schema_version":"wickle.agent-profile.v1","agent_id":"assistant","version":"1.0.0",
@@ -77,6 +77,7 @@ mod host {
         let mut settings = AgentSettings { require_durable: true, max_output_tokens: 128.try_into()?, ..AgentSettings::default() };
         if interrupt { settings.lease_ttl_ms = 1000; settings.heartbeat_interval_ms = 100; }
         let agent = create_agent(profile, AgentBindings {
+            interruption_policy: None,
             scope: scope.clone(), state: store.clone(), policy: policy.clone(), profile_resolver: Arc::new(Catalog),
             model_exchange: Arc::new(ModelExchange::new(model, policy).with_route_inspector(Arc::new(ExampleInspector), Duration::from_secs(1))?),
             router: Arc::new(PolicyModelRouter::new(routing)?), host_instructions: vec!["Preserve the requested output.".into()],

@@ -391,6 +391,11 @@ pub struct VerificationSummary {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
 pub enum OutcomeResult {
+    /// Execution interval stopped with a saved checkpoint; the Run is not terminal.
+    Interrupted {
+        /// Core-issued cause, checkpoint and unresolved-effect evidence.
+        interruption: crate::InterruptionRecord,
+    },
     /// Saved waiting outcome for the current execution segment.
     Waiting {
         /// Wait data.
@@ -422,6 +427,7 @@ impl OutcomeResult {
     /// Public status of this outcome.
     pub fn status(&self) -> RunStatus {
         match self {
+            Self::Interrupted { .. } => RunStatus::Interrupted,
             Self::Waiting { .. } => RunStatus::Waiting,
             Self::Succeeded { .. } => RunStatus::Succeeded,
             Self::Failed { .. } => RunStatus::Failed,
@@ -435,6 +441,9 @@ impl OutcomeResult {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RunOutcome {
+    /// Host-schema-validated business state, separate from the core result.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_state: Option<crate::AppState>,
     /// Outcome classification and required status-specific data.
     pub result: OutcomeResult,
     /// Final or partial output.
@@ -459,6 +468,22 @@ pub struct RunOutcome {
 impl RunOutcome {
     /// Check required evidence for a verified success.
     pub fn validate(&self) -> Result<(), ContractError> {
+        if let OutcomeResult::Interrupted { interruption } = &self.result {
+            if !interruption.recoverable
+                || interruption.checkpoint_revision >= self.checkpoint_revision
+                || !matches!(
+                    interruption.cause,
+                    crate::InterruptionCause::HostShutdown
+                        | crate::InterruptionCause::SegmentStopped
+                )
+                || interruption.unresolved_effects != self.unresolved_effects
+            {
+                return Err(ContractError::new(
+                    ErrorCode::InvalidContract,
+                    "outcome.interruption",
+                ));
+            }
+        }
         if matches!(self.result, OutcomeResult::Succeeded { .. })
             && !self.unresolved_effects.is_empty()
         {
@@ -626,6 +651,19 @@ pub struct SourceExecutionState {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RunSnapshot {
+    /// Admission-pinned interruption policy/configuration and app-state schema.
+    #[serde(
+        default,
+        deserialize_with = "optional",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub interruption_plan_ref: Option<RecordRef>,
+    /// Append-only protected stop decisions, including callback fallback diagnostics.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub interruption_records: Vec<RecordRef>,
+    /// Current Host-defined business state; never interpreted as core status.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_state: Option<crate::AppState>,
     /// Immutable logical-step submissions and their transcript boundaries.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub model_step_inputs: Vec<RecordRef>,
@@ -794,10 +832,17 @@ impl RunSnapshot {
     /// Check static checkpoint invariants without performing recovery or authorization.
     pub fn validate(&self) -> Result<(), ContractError> {
         let invalid = |path| ContractError::new(ErrorCode::InvalidSnapshot, path);
-        // Version-one checkpoints lack the required interruption/segment record.
-        // Never accept a fabricated interrupted state via the legacy decoder.
-        if self.status == RunStatus::Interrupted {
-            return Err(invalid("interrupted.requires_execution_checkpoint"));
+        if self.status == RunStatus::Interrupted
+            && (self.interruption_plan_ref.is_none()
+                || self.interruption_records.is_empty()
+                || self.wait.is_some()
+                || matches!(self.phase, RunPhase::Waiting | RunPhase::Finish)
+                || !matches!(
+                    self.outcome.as_ref().map(|outcome| &outcome.result),
+                    Some(OutcomeResult::Interrupted { .. })
+                ))
+        {
+            return Err(invalid("interrupted.evidence"));
         }
         crate::budget::validate_budget(self)?;
         if &self.scope != self.profile.scope()
@@ -840,6 +885,7 @@ impl RunSnapshot {
             if outcome.result.status() != self.status
                 || outcome.checkpoint_revision != self.revision
                 || outcome.usage != self.usage
+                || outcome.app_state != self.app_state
             {
                 return Err(invalid("outcome"));
             }
@@ -1000,6 +1046,14 @@ impl RunSnapshot {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", deny_unknown_fields)]
 pub enum RunEventPayload {
+    /// Confirmed nonterminal stop, committed with its decision and outcome.
+    #[serde(rename = "run.interrupted")]
+    RunInterrupted {
+        /// Saved interval outcome.
+        outcome_ref: RecordRef,
+        /// Protected policy/default decision and safe callback diagnostics.
+        decision_ref: RecordRef,
+    },
     /// A separately stored context view was adopted; original messages were not changed.
     ContextRewritten {
         /// Exact protected cumulative revision.

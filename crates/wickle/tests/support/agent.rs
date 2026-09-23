@@ -448,6 +448,7 @@ pub enum FinalCommitMode {
     LoseRecoveryAcknowledgement,
     RejectCandidate,
     OmitVerificationEvent,
+    OmitInterruptionEvent,
     RejectVerification,
     LoseVerificationAcknowledgement,
     PassThrough,
@@ -464,6 +465,7 @@ pub struct FinalCommitStore {
     pub final_entered: Notify,
     pub release: Semaphore,
     pub final_attempts: AtomicUsize,
+    pub release_calls: AtomicUsize,
     pub context_attempts: AtomicUsize,
     pub empty_page_entered: Notify,
     pub empty_page_release: Semaphore,
@@ -479,6 +481,7 @@ impl FinalCommitStore {
             final_entered: Notify::new(),
             release: Semaphore::new(0),
             final_attempts: AtomicUsize::new(0),
+            release_calls: AtomicUsize::new(0),
             context_attempts: AtomicUsize::new(0),
             empty_page_entered: Notify::new(),
             empty_page_release: Semaphore::new(0),
@@ -580,6 +583,7 @@ impl StateStore for FinalCommitStore {
         l: &'a RunLease,
         n: i64,
     ) -> PortFuture<'a, ()> {
+        self.release_calls.fetch_add(1, Ordering::SeqCst);
         self.inner.release_lease(s, r, l, n)
     }
     fn read_events<'a>(
@@ -624,6 +628,14 @@ impl StateStore for FinalCommitStore {
     ) -> PortFuture<'a, StoredRun> {
         Box::pin(async move {
             let mut input = input;
+            if matches!(self.mode, FinalCommitMode::OmitInterruptionEvent)
+                && input.snapshot.status == RunStatus::Interrupted
+            {
+                input.events.retain(|event| {
+                    !matches!(event.payload, RunEventPayload::RunInterrupted { .. })
+                });
+                input.snapshot.last_event_seq -= 1;
+            }
             if matches!(self.mode, FinalCommitMode::RejectRecoveryAcceptance)
                 && input
                     .events
@@ -712,7 +724,9 @@ impl StateStore for FinalCommitStore {
                     "verification.commit",
                 ));
             }
-            if !input.snapshot.status.is_terminal() {
+            if !input.snapshot.status.is_terminal()
+                && input.snapshot.status != RunStatus::Interrupted
+            {
                 return self.inner.commit(s, r, input).await;
             }
             self.final_attempts.fetch_add(1, Ordering::SeqCst);
@@ -740,6 +754,7 @@ impl StateStore for FinalCommitStore {
                 | FinalCommitMode::RejectModelResult
                 | FinalCommitMode::RejectCandidate
                 | FinalCommitMode::OmitVerificationEvent
+                | FinalCommitMode::OmitInterruptionEvent
                 | FinalCommitMode::RejectVerification
                 | FinalCommitMode::LoseVerificationAcknowledgement
                 | FinalCommitMode::PassThrough
@@ -773,6 +788,7 @@ impl Fixture {
     pub fn bindings(&self) -> AgentBindings {
         let gate = Arc::new(PolicyGate::new(self.policy.clone(), Duration::from_secs(1)).unwrap());
         AgentBindings {
+            interruption_policy: None,
             scope: scope(),
             state: self.store.clone(),
             policy: gate.clone(),

@@ -142,6 +142,7 @@ impl PolicyGate {
                 RunEventPayload::ToolUnresolved { .. } => "tool.unresolved",
                 RunEventPayload::VerificationCompleted { .. } => "verification.completed",
                 RunEventPayload::RunWaiting { .. } => "run.waiting",
+                RunEventPayload::RunInterrupted { .. } => "run.interrupted",
                 RunEventPayload::RunResumed { .. } => "run.resumed",
                 RunEventPayload::RunRecovered { .. } => "run.recovered",
                 RunEventPayload::RunFinished { .. } => "run.finished",

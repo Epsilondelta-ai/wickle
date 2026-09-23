@@ -34,7 +34,7 @@ impl RunSnapshot {
     /// authoritative state under a new lease and stores it with acceptance.
     pub fn recovery_record(&self, record_id: Id) -> Result<ProtectedRecord, ContractError> {
         self.validate()?;
-        if self.status != RunStatus::Running {
+        if !matches!(self.status, RunStatus::Running | RunStatus::Interrupted) {
             return Err(ContractError::new(
                 ErrorCode::InvalidTransition,
                 "recovery.source_status",

@@ -285,6 +285,7 @@ fn make_agent(
     create_agent(
         profile,
         AgentBindings {
+            interruption_policy: None,
             scope: context.data.scope.clone(),
             state: store,
             policy: policy.clone(),

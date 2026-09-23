@@ -506,8 +506,21 @@ impl Agent {
                 ))
             })
             .transpose()?;
+        let interruption_plan = InterruptionPlan::capture(
+            bindings.interruption_policy.as_ref(),
+            bindings.settings.interruption_timeout_ms,
+        )?;
+        let interruption_record = ProtectedRecord::new(
+            bindings.ids.next_id()?,
+            1,
+            serde_json::to_value(interruption_plan)
+                .map_err(|_| fail(ErrorCode::InvalidJson, "agent.interruption_plan"))?,
+        );
         let now = bindings.clock.now()?.utc_ms;
         let snapshot = RunSnapshot {
+            interruption_plan_ref: Some(interruption_record.reference().clone()),
+            interruption_records: vec![],
+            app_state: None,
             model_step_inputs: vec![],
             prepared_steps: vec![],
             active_prepared_step: None,
@@ -595,7 +608,13 @@ impl Agent {
                 messages: vec![message],
                 events: vec![event],
                 records: [
-                    vec![request_record, prompt_record, inputs_record, routing_record],
+                    vec![
+                        request_record,
+                        prompt_record,
+                        inputs_record,
+                        routing_record,
+                        interruption_record,
+                    ],
                     hook_record.into_iter().collect(),
                     assembly_record.into_iter().collect(),
                     source_record.into_iter().collect(),

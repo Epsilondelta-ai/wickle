@@ -6,7 +6,7 @@ use std::collections::BTreeSet;
 use std::{
     sync::{
         Arc,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::Duration,
 };
@@ -192,6 +192,8 @@ impl ModelRouteInspector for ExampleInspector {
     }
 }
 struct ExampleModel {
+    hold: AtomicBool,
+    entered: tokio::sync::Notify,
     route: ResolvedModelRoute,
     calls: AtomicUsize,
     fail: bool,
@@ -215,6 +217,10 @@ impl ModelPort for ExampleModel {
         );
         assert_eq!(request.route, self.route);
         self.calls.fetch_add(1, Ordering::SeqCst);
+        if self.hold.load(Ordering::SeqCst) {
+            self.entered.notify_one();
+            return Box::pin(stream::pending());
+        }
         let events = if self.fail {
             vec![Ok(ModelEvent::ResponseError {
                 kind: ModelFailureKind::RateLimited,
@@ -266,11 +272,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let store = Arc::new(SqliteStateStore::open(&database)?);
     let snapshot = routing_snapshot(&scope)?;
     let first = Arc::new(ExampleModel {
+        hold: AtomicBool::new(false),
+        entered: tokio::sync::Notify::new(),
         route: snapshot.route_for_binding(&reference("first"))?,
         calls: AtomicUsize::new(0),
         fail: true,
     });
     let second = Arc::new(ExampleModel {
+        hold: AtomicBool::new(false),
+        entered: tokio::sync::Notify::new(),
         route: snapshot.route_for_binding(&reference("second"))?,
         calls: AtomicUsize::new(0),
         fail: false,
@@ -307,6 +317,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let agent = create_agent(
         profile,
         AgentBindings {
+            interruption_policy: None,
             scope: scope.clone(),
             state: store.clone(),
             policy,
@@ -377,7 +388,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(completed(replay.outcome(&context).await?)?, outcome);
     let submitted = store.read_execution(&scope, &run_id).await?.submitted.ok_or("submitted identity missing")?;
     submitted.validate(JsonTextLimits::default())?;
-    let mut changed = request;
+    let mut changed = request.clone();
     changed.model_options.insert("reasoning_effort".into(), json!("changed"));
     assert_eq!(agent.start(changed, context.clone()).await.unwrap_err().code, ErrorCode::RequestConflict);
     assert_eq!(store.read_execution(&scope, &run_id).await?.submitted.as_ref().map(|s|s.digest()), Some(submitted.digest()));
@@ -400,8 +411,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
     assert_eq!(restored.snapshot.outcome, Some(outcome));
     assert!(restored.session.active_run_id.is_none());
+    // Exercise a cooperative stop against the packaged library and SQLite store.
+    first.hold.store(true, Ordering::SeqCst);
+    let stopped_request = RunRequest {
+        request_id: id("maintenance-request"),
+        session_id: id("maintenance-session"),
+        ..request
+    };
+    let stopped = completed(agent.start(stopped_request.clone(), context.clone()).await?)?;
+    tokio::time::timeout(Duration::from_secs(5), first.entered.notified()).await?;
+    assert_eq!(completed(stopped.stop_execution(InterruptionCause::HostShutdown, &context).await?)?, ExecutionStopReceipt::Requested);
+    let stopped_outcome = completed(tokio::time::timeout(Duration::from_secs(5), stopped.outcome(&context)).await??)?;
+    assert!(matches!(&stopped_outcome.result, OutcomeResult::Interrupted { interruption }
+        if interruption.cause == InterruptionCause::HostShutdown && interruption.recoverable));
+    let reopened = SqliteStateStore::open(&database)?;
+    let saved = reopened.load(&scope, stopped.run_id()).await?;
+    assert_eq!(saved.snapshot.outcome, Some(stopped_outcome.clone()));
+    assert_eq!(saved.session.active_run_id.as_ref(), Some(stopped.run_id()));
+    let replay = completed(agent.start(stopped_request, context.clone()).await?)?;
+    assert_eq!(completed(replay.outcome(&context).await?)?, stopped_outcome);
+    assert_eq!(first.calls.load(Ordering::SeqCst), 2);
     println!(
-        "agent consumer: pure construction, detached execution after observer drop, fallback under shared budgets, stored outcome and event replay, duplicate request without new model calls, SQLite reopen"
+        "agent consumer: pure construction, detached execution after observer drop, fallback under shared budgets, stored outcome and event replay, duplicate request without new model calls, SQLite reopen, recoverable host stop and durable replay"
     );
     Ok(())
 }

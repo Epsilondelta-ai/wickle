@@ -413,6 +413,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         create_agent(
             profile.clone(),
             AgentBindings {
+                interruption_policy: None,
                 scope: scope.clone(),
                 state: store,
                 policy: policy.clone(),

@@ -109,6 +109,7 @@ pub(super) fn advance_history(
         .segments
         .last_mut()
         .ok_or_else(|| invalid("execution.segment"))?;
+    current.app_state = next.app_state.clone();
     if let Some(outcome) = &next.outcome {
         current.outcome = Some(SegmentOutcome::Settled {
             outcome: Box::new(outcome.clone()),
@@ -160,12 +161,27 @@ pub(super) fn validate_history(
         {
             return Err(invalid("execution.history"));
         }
+        if let Some(next) = history.segments.get(i + 1) {
+            let settled_at = match &segment.outcome {
+                Some(SegmentOutcome::Settled { outcome }) => outcome.checkpoint_revision,
+                Some(SegmentOutcome::Interrupted { interruption }) => {
+                    interruption.checkpoint_revision
+                }
+                None => return Err(invalid("execution.unsettled_history")),
+            };
+            if settled_at >= next.accepted_revision {
+                return Err(invalid("execution.interval_overlap"));
+            }
+        }
         revision = segment.accepted_revision;
     }
     let current = history
         .segments
         .last()
         .ok_or_else(|| invalid("execution.segment"))?;
+    if current.app_state != snapshot.app_state {
+        return Err(invalid("execution.app_state"));
+    }
     match (&snapshot.outcome, &current.outcome) {
         (Some(expected), Some(SegmentOutcome::Settled { outcome }))
             if expected == outcome.as_ref() => {}
