@@ -9,6 +9,10 @@ With no `AgentBindings.context_runtime`, the Agent uses bounded selection and
 previews when an `ArtifactRuntime` is available. It does not call a compressor.
 Configure a model-backed compressor explicitly:
 
+The `instructions` field in these examples is an unreleased source change. When
+using the published `v0.2.0` tag, omit that field; custom summary instructions are
+not available in that release.
+
 ```rust
 bindings.context_runtime = Some(std::sync::Arc::new(wickle::ContextRuntime::new(
     bindings.scope.clone(),
@@ -52,7 +56,8 @@ plan. Its digest covers all three; changing the text without changing the asset
 version still changes the plan identity. Existing revised sessions reject the
 changed plan. Recreate the same configuration to resume; start a new session to
 use different instructions. The core does not fetch assets or execute template
-code. Instruction data is not included in `Debug` output.
+code. Instruction text is not included in `Debug` output; its asset identity and
+version remain visible.
 
 An empty/whitespace-only instruction or text larger than
 `ContextRewriteLimits.max_compactor_input_bytes` is rejected at construction and
