@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Configure model-based context compaction with exact-version summary instructions.
+  The protected plan pins their content; default records retain their existing identity.
+  Rust `ModelCompactorConfig` literals now require `instructions: None` or a custom asset.
+  See [context compaction](docs/context-compaction.md#pin-custom-summary-instructions).
+
 ## 0.2.0
 
 Agent runs now preserve submitted request identity, prepared model steps and

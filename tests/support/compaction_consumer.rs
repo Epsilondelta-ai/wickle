@@ -204,6 +204,7 @@ impl ProfileResolver for Metadata {
 struct Model {
     agent: AtomicUsize,
     compaction: AtomicUsize,
+    instructions: Option<InstructionAssetContent>,
 }
 impl ModelPort for Model {
     fn binding(&self) -> ModelPortBinding {
@@ -220,6 +221,13 @@ impl ModelPort for Model {
     ) -> PortStream<'a, ModelEvent> {
         let events = if request.purpose == ModelPurpose::Compaction {
             self.compaction.fetch_add(1, Ordering::SeqCst);
+            if let Some(instructions) = &self.instructions {
+                assert_eq!(request.messages[0], ModelMessage {
+                    role: ModelRole::System,
+                    content: vec![ModelContent::Text { text: instructions.text.clone() }],
+                });
+            }
+            assert!(request.tools.is_empty());
             vec![ModelEvent::TextDelta{text:"Earlier complete record reads are summarized; original records remain in storage.".into()},ModelEvent::ResponseCompleted{finish:ModelFinish::Stop,metadata:Default::default(),continuation:vec![]}]
         } else {
             let index = self.agent.fetch_add(1, Ordering::SeqCst);
@@ -279,6 +287,7 @@ fn make_agent(
             model_binding: id("primary"),
             options: None,
             max_output_tokens: 128.try_into().unwrap(),
+            instructions: model.instructions.clone(),
         })),
         ContextRewriteLimits::default(),
     )?);
@@ -330,8 +339,7 @@ fn make_agent(
         },
     )
 }
-#[tokio::main(flavor = "current_thread")]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn exercise(instructions: Option<InstructionAssetContent>) -> Result<(), Box<dyn std::error::Error>> {
     let scope = Scope {
         tenant_id: id("example"),
         workspace_id: id("workspace"),
@@ -360,6 +368,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let model = Arc::new(Model {
         agent: AtomicUsize::new(0),
         compaction: AtomicUsize::new(0),
+        instructions,
     });
     let agent = make_agent(
         profile.clone(),
@@ -412,6 +421,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         &saved.messages,
     )?;
     assert!(revision.summary().is_some());
+    let plan_data = serde_json::to_value(&plan)?;
+    if let Some(instructions) = &model.instructions {
+        assert_eq!(plan_data["compactor"]["config"]["instructions"], json!(instructions));
+    } else {
+        // The old JSON has no instructions key; do not add null and change its digest.
+        assert!(plan_data["compactor"]["config"].get("instructions").is_none());
+    }
     assert!(!revision.covered_message_ids().is_empty());
     let events: Vec<_> = handle.events(0, context.clone()).try_collect().await?;
     assert!(
@@ -449,5 +465,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!(
         "compaction consumer: complete past rounds summarized; latest round and original transcript retained; auxiliary model calls charged; real SQLite revision/event restoration; fresh Host replay made no additional calls (synthetic model, no network)"
     );
+    Ok(())
+}
+
+#[tokio::main(flavor = "current_thread")]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    exercise(None).await?;
+    exercise(Some(InstructionAssetContent {
+        asset: reference("record-summary"),
+        text: "Summarize older record reads, keeping exact record identifiers and completed decisions.".into(),
+    })).await?;
+    println!("Default and custom versioned instructions: actual compaction requests and SQLite replay verified");
     Ok(())
 }
