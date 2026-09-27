@@ -400,6 +400,7 @@ async fn a_missing_compaction_route_is_rejected_before_agent_execution() {
                 model_binding: id("primary"),
                 options: None,
                 max_output_tokens: 128.try_into().unwrap(),
+                instructions: None,
             })),
             ContextRewriteLimits::default(),
         )
@@ -765,6 +766,7 @@ async fn model_compaction_uses_the_run_budget_without_replacing_the_agent_step_o
                 model_binding: id("primary"),
                 options: None,
                 max_output_tokens: 128.try_into().unwrap(),
+                instructions: None,
             })),
             ContextRewriteLimits::default(),
         )
@@ -894,6 +896,7 @@ async fn exhausted_model_capacity_does_not_start_an_auxiliary_compaction() {
                 model_binding: id("primary"),
                 options: None,
                 max_output_tokens: 128.try_into().unwrap(),
+                instructions: None,
             })),
             ContextRewriteLimits::default(),
         )
@@ -2786,5 +2789,165 @@ async fn search_observation_drives_a_later_read_call_before_the_final_answer() {
     assert_ne!(
         saved.snapshot.tool_ledger[0].call.model_request_id,
         saved.snapshot.tool_ledger[1].call.model_request_id
+    );
+}
+
+#[test]
+fn legacy_model_compactor_json_is_stable_and_custom_instructions_are_bounded() {
+    let legacy = json!({"model_binding":"primary","options":null,"max_output_tokens":128});
+    let config: ModelCompactorConfig = serde_json::from_value(legacy.clone()).unwrap();
+    assert!(config.instructions.is_none());
+    assert_eq!(serde_json::to_value(&config).unwrap(), legacy);
+    let mut explicit_null = legacy;
+    explicit_null["instructions"] = Value::Null;
+    assert!(serde_json::from_value::<ModelCompactorConfig>(explicit_null).is_err());
+    for text in [
+        " \n ".into(),
+        "x".repeat(ContextRewriteLimits::default().max_compactor_input_bytes + 1),
+    ] {
+        let mut custom = config.clone();
+        custom.instructions = Some(InstructionAssetContent {
+            asset: reference("summary-rules"),
+            text,
+        });
+        let error = ContextRuntime::new(
+            scope(),
+            Arc::new(BoundedContextStrategy),
+            Some(ContextCompactor::Model(custom)),
+            ContextRewriteLimits::default(),
+        )
+        .err()
+        .unwrap();
+        assert_eq!(error.code, ErrorCode::InvalidConfiguration);
+    }
+}
+
+#[tokio::test]
+async fn custom_compaction_instructions_reach_model_and_pin_session_identity() {
+    let mut f = Fixture::new(
+        vec![("read", object(json!({"query":"chunk"})))],
+        Behavior::Success,
+    );
+    f.model.rounds.store(3, Ordering::SeqCst);
+    f.profile.limits.max_model_calls = 8.try_into().unwrap();
+    let instructions = InstructionAssetContent {
+        asset: reference("summary-rules"),
+        text: "Summarize completed record reads and preserve their exact identifiers.".into(),
+    };
+    let config = ModelCompactorConfig {
+        model_binding: id("primary"),
+        options: None,
+        max_output_tokens: 128.try_into().unwrap(),
+        instructions: Some(instructions.clone()),
+    };
+    let (mut bindings, reader) = long_bindings(&f, 3500);
+    compaction_router(&mut bindings);
+    bindings.context_runtime = Some(Arc::new(
+        ContextRuntime::new(
+            scope(),
+            Arc::new(BoundedContextStrategy),
+            Some(ContextCompactor::Model(config.clone())),
+            ContextRewriteLimits::default(),
+        )
+        .unwrap(),
+    ));
+    let agent = create_agent(f.profile.clone(), bindings).unwrap();
+    let handle = f.start(&agent).await;
+    assert_eq!(
+        f.outcome(&handle).await.result.status(),
+        RunStatus::Succeeded
+    );
+    assert_eq!(reader.calls.load(Ordering::SeqCst), 3);
+    {
+        let requests = f.model.requests.lock().unwrap();
+        let summaries: Vec<_> = requests
+            .iter()
+            .filter(|r| r.purpose == ModelPurpose::Compaction)
+            .collect();
+        assert!(!summaries.is_empty());
+        for summary in summaries {
+            assert_eq!(
+                summary.messages[0],
+                ModelMessage {
+                    role: ModelRole::System,
+                    content: vec![ModelContent::Text {
+                        text: instructions.text.clone()
+                    }]
+                }
+            );
+            assert!(summary.tools.is_empty());
+        }
+    }
+    let saved = f.base.store.load(&scope(), handle.run_id()).await.unwrap();
+    assert_eq!(saved.messages.len(), 8);
+    assert_eq!(
+        saved.snapshot.usage.model_calls,
+        f.model.calls.load(Ordering::SeqCst) as u64
+    );
+    let record = f
+        .base
+        .store
+        .read_record(&scope(), saved.snapshot.context_plan_ref.as_ref().unwrap())
+        .await
+        .unwrap();
+    let plan = ContextPlan::restore(&record, &saved.snapshot.profile).unwrap();
+    assert_eq!(
+        record.value()["compactor"]["config"]["instructions"],
+        json!(instructions)
+    );
+    for (index, mut changed) in [config.clone(), config.clone()].into_iter().enumerate() {
+        let instruction = changed.instructions.as_mut().unwrap();
+        if index == 0 {
+            instruction.asset.version = id("2");
+        } else {
+            instruction.text = "A different summary contract, with the same asset version.".into();
+        }
+        let mut altered = record.value().clone();
+        altered["compactor"]["config"] = json!(changed);
+        let other = ProtectedRecord::new(
+            record.reference().record_id.clone(),
+            record.reference().revision,
+            altered,
+        );
+        assert_ne!(
+            ContextPlan::restore(&other, &saved.snapshot.profile)
+                .unwrap()
+                .digest(),
+            plan.digest()
+        );
+        let (mut next_bindings, _) = long_bindings(&f, 3500);
+        compaction_router(&mut next_bindings);
+        next_bindings.context_runtime = Some(Arc::new(
+            ContextRuntime::new(
+                scope(),
+                Arc::new(BoundedContextStrategy),
+                Some(ContextCompactor::Model(changed)),
+                ContextRewriteLimits::default(),
+            )
+            .unwrap(),
+        ));
+        let next_agent = create_agent(f.profile.clone(), next_bindings).unwrap();
+        let mut ctx = context();
+        ctx.data.system_inputs = Some(SystemInputs::new(object(json!({"workspace_id":WORKSPACE}))));
+        let before = f.model.calls.load(Ordering::SeqCst);
+        let error = next_agent
+            .start(request(&format!("changed-{index}")), ctx)
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::ContextMismatch);
+        assert_eq!(f.model.calls.load(Ordering::SeqCst), before);
+    }
+    let mut invalid = record.value().clone();
+    invalid["compactor"]["config"]["instructions"]["text"] = " ".into();
+    let invalid = ProtectedRecord::new(
+        record.reference().record_id.clone(),
+        record.reference().revision,
+        invalid,
+    );
+    assert_eq!(
+        ContextPlan::restore(&invalid, &saved.snapshot.profile)
+            .unwrap_err()
+            .code,
+        ErrorCode::InvalidConfiguration
     );
 }

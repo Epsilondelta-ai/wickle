@@ -84,6 +84,9 @@ impl ContextRuntime {
         limits: ContextRewriteLimits,
     ) -> Result<Self, ContractError> {
         limits.validate()?;
+        if let Some(ContextCompactor::Model(config)) = &compactor {
+            config.validate_instructions(limits)?;
+        }
         let definition = std::panic::catch_unwind(AssertUnwindSafe(|| strategy.definition()))
             .map_err(|_| context_error(ErrorCode::InvalidConfiguration, "context.strategy"))?;
         crate::tool_schema::compile_validator(&definition.config_schema)?;
@@ -158,6 +161,9 @@ impl ContextPlan {
     }
     pub(super) fn validate(&self, profile: &AgentProfile) -> Result<(), ContractError> {
         self.limits.validate()?;
+        if let Some(CompactorIdentity::Model { config }) = &self.compactor {
+            config.validate_instructions(self.limits)?;
+        }
         if self.schema_version != "wickle.context-plan.v1"
             || self.policy != profile.context_policy
             || self.policy.strategy != self.strategy.strategy.id
@@ -221,5 +227,20 @@ impl ContextPlan {
             }
         }
         Ok(plan)
+    }
+}
+
+impl ModelCompactorConfig {
+    fn validate_instructions(&self, limits: ContextRewriteLimits) -> Result<(), ContractError> {
+        if self.instructions.as_ref().is_some_and(|instructions| {
+            instructions.text.trim().is_empty()
+                || instructions.text.len() > limits.max_compactor_input_bytes
+        }) {
+            return Err(context_error(
+                ErrorCode::InvalidConfiguration,
+                "context.compaction_instructions",
+            ));
+        }
+        Ok(())
     }
 }

@@ -152,6 +152,14 @@ pub struct ModelCompactorConfig {
     pub options: Option<JsonObject>,
     /// Reserved output tokens for the summary.
     pub max_output_tokens: std::num::NonZeroU64,
+    /// Host-authorized, exact-version summary instructions pinned in the ContextPlan.
+    /// None retains the original v1 instructions and serialized plan identity.
+    #[serde(
+        default,
+        deserialize_with = "crate::serialization::optional",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub instructions: Option<InstructionAssetContent>,
 }
 /// An approved model route or pure Host compressor, never an arbitrary executable path.
 #[derive(Clone)]

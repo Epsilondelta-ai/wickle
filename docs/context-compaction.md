@@ -9,6 +9,10 @@ With no `AgentBindings.context_runtime`, the Agent uses bounded selection and
 previews when an `ArtifactRuntime` is available. It does not call a compressor.
 Configure a model-backed compressor explicitly:
 
+The `instructions` field in these examples is an unreleased source change. When
+using the published `v0.2.0` tag, omit that field; custom summary instructions are
+not available in that release.
+
 ```rust
 bindings.context_runtime = Some(std::sync::Arc::new(wickle::ContextRuntime::new(
     bindings.scope.clone(),
@@ -17,6 +21,7 @@ bindings.context_runtime = Some(std::sync::Arc::new(wickle::ContextRuntime::new(
         model_binding: wickle::Id::new("primary")?,
         options: None,
         max_output_tokens: 2048.try_into()?,
+        instructions: None,
     })),
     wickle::ContextRewriteLimits::default(),
 )?));
@@ -30,6 +35,45 @@ an explicit map supplies purpose-specific overrides subject to both target schem
 Agent Profile and Run options are never inherited by compaction.
 Compaction calls do not replace the Agent's current step, invoke Agent context
 Hooks, or become the final user response.
+
+## Pin custom summary instructions
+
+Set `ModelCompactorConfig.instructions` to already-resolved, Host-authorized
+`InstructionAssetContent` to replace the built-in summary System message:
+
+```rust
+instructions: Some(wickle::InstructionAssetContent {
+    asset: wickle::VersionedRef {
+        id: wickle::Id::new("record-summary")?,
+        version: wickle::Id::new("1")?,
+    },
+    text: "Summarize older record reads; preserve exact identifiers and completed decisions.".into(),
+}),
+```
+
+The asset identity, version and exact text are stored in the protected context
+plan. Its digest covers all three; changing the text without changing the asset
+version still changes the plan identity. Existing revised sessions reject the
+changed plan. Recreate the same configuration to resume; start a new session to
+use different instructions. The core does not fetch assets or execute template
+code. Instruction text is not included in `Debug` output; its asset identity and
+version remain visible.
+
+An empty/whitespace-only instruction or text larger than
+`ContextRewriteLimits.max_compactor_input_bytes` is rejected at construction and
+plan restoration. The complete model request remains subject to the existing
+request-byte and model-token limits. A custom instruction cannot add Tools,
+bypass authorization, change the model purpose or avoid budget accounting.
+The Host owns summary semantics and should preserve historical facts, source
+boundaries and the distinction between older context and the current request.
+
+For Rust source migration, add `instructions: None` to existing struct literals.
+JSON records written before this field existed continue to deserialize and
+reserialize without the field, preserving the original protected-record digest
+and the original v1 summary instructions. Explicit `instructions: null` is
+rejected; omit it for the default. Old library versions cannot read a plan with
+custom instructions: finish its nonterminal Runs on the configured version
+before downgrading. Merely deleting the field is not a valid migration.
 
 For a non-model algorithm, implement `HostContextCompactor` and configure the Host
 variant with an exact implementation version. These callbacks must be read-only
@@ -87,7 +131,7 @@ new rewrite behavior during recovery.
 
 The [independent compaction consumer](../tests/support/compaction_consumer.rs)
 exercises model-budget accounting, complete-group summaries, SQLite restoration,
-and fresh Host replay using synthetic model ports.
+and fresh Host replay with both default and custom instructions using synthetic model ports. It checks request wiring and persistence, not the semantic quality of a live model summary.
 
 ## Recheck source access for derived data
 

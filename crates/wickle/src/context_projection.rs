@@ -23,7 +23,7 @@ pub const CONTEXT_ASSEMBLER_VERSION: &str = "wickle.context-assembler.v1";
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct InstructionAssetContent {
-    /// Exact instruction asset selected by the profile.
+    /// Exact instruction asset selected by the profile or model compactor.
     pub asset: VersionedRef,
     /// Complete text to pin; it is never silently truncated.
     pub text: String,
