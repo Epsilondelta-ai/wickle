@@ -353,6 +353,10 @@ exists. A control-only interval atomically acquires ownership and saves the
 cancellation. Unstarted calls become `NotApplied`; existing `Applied` and
 `Unknown` effects are retained. The old handle keeps its original interval's
 outcome. Read the latest Run or command receipt to observe cancellation.
+For a crashed Running interval, `process_control_command` can settle Cancel or
+elapsed Expire after its lease expires, without executing or reconciling Tools
+and without consuming recovery budget. A live lease remains protected; retry
+delivery when it expires. Dispatched effects with no saved result remain unknown.
 Remote Worker notification remains Host-owned. See [durable controls](run-controls.md).
 
 Success records `completion_basis=turn_ended` or `verified`, according to the

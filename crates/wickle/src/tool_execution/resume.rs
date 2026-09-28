@@ -45,18 +45,22 @@ impl SerialToolRound {
             .iter()
             .find(|entry| &entry.call.call_id == call_id)
             .ok_or_else(|| error(ErrorCode::InvalidReference, "tool.resume_call"))?;
-        if !matches!(
+        if !(matches!(
             saved.snapshot.status,
             RunStatus::Waiting | RunStatus::Interrupted
-        ) || !matches!(
-            status,
-            ToolResultStatus::Failed | ToolResultStatus::Denied | ToolResultStatus::Cancelled
-        ) || !matches!(
-            entry.state,
-            ToolCallState::Planned {}
-                | ToolCallState::ApprovalPending { .. }
-                | ToolCallState::InputPending { .. }
-        ) {
+        ) || (saved.snapshot.status == RunStatus::Running
+            && status == ToolResultStatus::Cancelled))
+            || !matches!(
+                status,
+                ToolResultStatus::Failed | ToolResultStatus::Denied | ToolResultStatus::Cancelled
+            )
+            || !matches!(
+                entry.state,
+                ToolCallState::Planned {}
+                    | ToolCallState::ApprovalPending { .. }
+                    | ToolCallState::InputPending { .. }
+            )
+        {
             return Err(error(ErrorCode::InvalidTransition, "tool.unstarted"));
         }
         let result = ToolResult {

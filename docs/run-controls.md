@@ -19,13 +19,18 @@ The owning driver checks pending commands at dispatch boundaries and during its
 heartbeat. It saves the outcome and command consumption in one fenced commit.
 A Host may deliver the command ID to a Worker and call `process_control_command`;
 this requires `PolicyAction::ProcessControl` permission. Wickle does not provide
-a remote notification service. A crashed running interval still needs explicit
-recovery after lease expiry; a pending command does not steal its lease.
+a remote notification service. For a crashed Running interval, explicitly process
+Cancel or elapsed Expire after lease expiry. This uses a control-only interval,
+without model, Tool execution, reconciliation or a recovery-budget charge. A live
+lease returns `LeaseBusy`; the Host must retry delivery after expiry. Submission
+alone never steals ownership or starts this takeover.
 
 When a Run is waiting or interrupted, Cancel and elapsed Expire are handled by a
 control-only segment through `begin_segment`. This atomically acquires ownership,
 consumes the command and saves the terminal result. No model or Tool is executed.
-Existing application state and uncertain effects are retained. An early Expire
+Existing application state and uncertain effects are retained. A dispatched Tool
+whose result was not saved becomes `Unknown`, preserving its attempt and effect
+key; unstarted calls alone become cancelled with no applied effect. An early Expire
 stays pending until a Worker processes it after the deadline, or an active driver
 reaches that deadline. A Stop on an already settled interval is a no-op.
 
