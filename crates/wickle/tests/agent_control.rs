@@ -635,3 +635,186 @@ async fn interrupted_deadline_observation_is_read_only_at_the_original_deadline(
     );
     assert_eq!(fixture.model.calls.load(Ordering::SeqCst), 1);
 }
+
+#[tokio::test(start_paused = true)]
+async fn stale_running_cancel_finishes_without_model_or_recovery_and_preserves_live_lease() {
+    let fixture = agent_support::Fixture::new(agent_support::Response::Text, true);
+    let owner = fixture.agent();
+    let handle = fixture.started(&owner, "stale-model").await;
+    fixture.model.entered.notified().await;
+    let checkpoint = fixture.store.export_checkpoint(&scope()).unwrap();
+    let restored = std::sync::Arc::new(MemoryStateStore::from_checkpoint(checkpoint));
+    let mut bindings = fixture.bindings();
+    bindings.state = restored.clone();
+    bindings.settings.start_timeout_ms = 10;
+    let remote = create_agent(agent_support::profile(), bindings).unwrap();
+    let cancel = command(
+        "stale-cancel",
+        ControlAction::Cancel {
+            reason: id("shutdown"),
+        },
+    );
+    let receipt = completed(
+        remote
+            .submit_control_command(handle.run_id().clone(), cancel.clone(), context())
+            .await
+            .unwrap(),
+    );
+    assert!(receipt.processed_segment_id.is_none());
+    let before = restored
+        .export_checkpoint(&scope())
+        .unwrap()
+        .digest()
+        .clone();
+    assert_eq!(
+        remote
+            .process_control_command(
+                handle.run_id().clone(),
+                cancel.command_id.clone(),
+                context()
+            )
+            .await
+            .unwrap_err()
+            .code,
+        ErrorCode::LeaseBusy
+    );
+    assert_eq!(
+        restored.export_checkpoint(&scope()).unwrap().digest(),
+        before
+    );
+    tokio::time::advance(Duration::from_millis(1100)).await;
+    let calls = fixture.catalog.calls.load(Ordering::SeqCst);
+    let finished = completed(
+        remote
+            .process_control_command(
+                handle.run_id().clone(),
+                cancel.command_id.clone(),
+                context(),
+            )
+            .await
+            .unwrap(),
+    );
+    assert!(finished.processed_segment_id.is_some());
+    let saved = restored.load(&scope(), handle.run_id()).await.unwrap();
+    assert_eq!(saved.snapshot.status, RunStatus::Cancelled);
+    assert!(saved.session.active_run_id.is_none());
+    assert_eq!(saved.snapshot.usage.recovery_attempts, 0);
+    assert_eq!(fixture.model.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(fixture.catalog.calls.load(Ordering::SeqCst), calls);
+    let checkpoint = restored.export_checkpoint(&scope()).unwrap();
+    let digest = checkpoint.digest().clone();
+    StateStoreCheckpoint::from_json(
+        &serde_json::to_string(&checkpoint).unwrap(),
+        &scope(),
+        &digest,
+    )
+    .unwrap();
+    let repeated = completed(
+        remote
+            .process_control_command(handle.run_id().clone(), cancel.command_id, context())
+            .await
+            .unwrap(),
+    );
+    assert_eq!(finished, repeated);
+    assert_eq!(
+        restored.export_checkpoint(&scope()).unwrap().digest(),
+        digest
+    );
+}
+
+struct DispatchedGate {
+    entered: tokio::sync::Notify,
+    effects: std::sync::atomic::AtomicUsize,
+}
+impl ToolExecutor for DispatchedGate {
+    fn execute<'a>(
+        &'a self,
+        _: &'a JsonObject,
+        _: &'a ToolExecutionContext,
+    ) -> PortFuture<'a, ToolExecutionResult> {
+        Box::pin(async move {
+            self.effects.fetch_add(1, Ordering::SeqCst);
+            self.entered.notify_one();
+            std::future::pending().await
+        })
+    }
+}
+#[tokio::test(start_paused = true)]
+async fn stale_tool_cancel_preserves_unknown_effects_and_cancels_only_unstarted_calls() {
+    let fixture = Fixture::new(Mode::External);
+    let gate = std::sync::Arc::new(DispatchedGate {
+        entered: tokio::sync::Notify::new(),
+        effects: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let mut registrations = ["before", "target", "after"]
+        .into_iter()
+        .map(|name| fixture.registry.get(&id(name)).unwrap().clone())
+        .collect::<Vec<_>>();
+    registrations[1].executor = gate.clone();
+    let mut bindings = fixture.bindings();
+    bindings.tools = Some(std::sync::Arc::new(
+        ToolRegistry::new(scope(), registrations).unwrap(),
+    ));
+    let owner = create_agent(fixture.profile.clone(), bindings).unwrap();
+    let handle = fixture.started(&owner).await;
+    gate.entered.notified().await;
+    let restored = std::sync::Arc::new(MemoryStateStore::from_checkpoint(
+        fixture.base.store.export_checkpoint(&scope()).unwrap(),
+    ));
+    let mut bindings = fixture.bindings();
+    bindings.state = restored.clone();
+    bindings.settings.start_timeout_ms = 10;
+    let remote = create_agent(fixture.profile.clone(), bindings).unwrap();
+    let cancel = command(
+        "cancel-dispatched",
+        ControlAction::Cancel {
+            reason: id("shutdown"),
+        },
+    );
+    completed(
+        remote
+            .submit_control_command(handle.run_id().clone(), cancel.clone(), context())
+            .await
+            .unwrap(),
+    );
+    tokio::time::advance(Duration::from_millis(1100)).await;
+    completed(
+        remote
+            .process_control_command(handle.run_id().clone(), cancel.command_id, context())
+            .await
+            .unwrap(),
+    );
+    let saved = restored.load(&scope(), handle.run_id()).await.unwrap();
+    assert_eq!(saved.snapshot.status, RunStatus::Cancelled);
+    assert_eq!(
+        saved
+            .snapshot
+            .outcome
+            .as_ref()
+            .unwrap()
+            .unresolved_effects
+            .len(),
+        1
+    );
+    assert_eq!(saved.snapshot.usage.recovery_attempts, 0);
+    assert_eq!(gate.effects.load(Ordering::SeqCst), 1);
+    assert_eq!(fixture.tools[2].calls.load(Ordering::SeqCst), 0);
+    assert_eq!(fixture.model.calls.load(Ordering::SeqCst), 1);
+    assert!(matches!(
+        saved
+            .snapshot
+            .tool_ledger
+            .iter()
+            .find(|entry| entry.call.tool_name == id("target"))
+            .unwrap()
+            .state,
+        ToolCallState::Unknown { .. }
+    ));
+    let checkpoint = restored.export_checkpoint(&scope()).unwrap();
+    StateStoreCheckpoint::from_json(
+        &serde_json::to_string(&checkpoint).unwrap(),
+        &scope(),
+        &checkpoint.digest(),
+    )
+    .unwrap();
+}

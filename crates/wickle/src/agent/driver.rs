@@ -1189,7 +1189,7 @@ impl Agent {
         Ok(())
     }
 
-    async fn saved_partial_output(
+    pub(super) async fn saved_partial_output(
         &self,
         snapshot: &RunSnapshot,
     ) -> Result<Vec<InputContent>, ContractError> {
