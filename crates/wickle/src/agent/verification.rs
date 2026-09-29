@@ -76,18 +76,14 @@ impl Agent {
                 .ok_or_else(|| fail(ErrorCode::InvalidSnapshot, "verification.response"))?,
             through_sequence: saved.session.transcript_revision,
             evidence_message_ids: if plan.verifier.is_some() {
-                saved
-                    .messages
-                    .iter()
-                    .filter(|message| {
-                        message.run_id == saved.snapshot.run_id
-                            && message
-                                .content
-                                .iter()
-                                .any(|block| matches!(block, ContentBlock::ToolResult { .. }))
-                    })
-                    .map(|message| message.message_id.clone())
-                    .collect()
+                crate::verification::tool_evidence_sources(
+                    &saved.messages,
+                    &saved.snapshot.run_id,
+                    saved.session.transcript_revision,
+                )?
+                .into_iter()
+                .map(|(_, id)| id)
+                .collect()
             } else {
                 vec![]
             },
@@ -208,22 +204,10 @@ impl Agent {
                     candidate_ref: candidate_ref.clone(),
                     candidate: candidate.clone(),
                     request: saved.snapshot.request.input.clone(),
-                    evidence: saved
-                        .messages
-                        .iter()
-                        .filter(|message| {
-                            candidate.evidence_message_ids.contains(&message.message_id)
-                        })
-                        .flat_map(|message| &message.content)
-                        .filter_map(|block| {
-                            if let ContentBlock::ToolResult { result } = block {
-                                Some(result.content.clone())
-                            } else {
-                                None
-                            }
-                        })
-                        .flatten()
-                        .collect(),
+                    evidence: crate::verification::candidate_tool_evidence(
+                        &saved.messages,
+                        &candidate,
+                    )?,
                 };
                 let size = serde_json::to_vec(&serde_json::json!([
                     input.candidate,
@@ -776,20 +760,8 @@ impl ModelRequestProjector for ReviewProjector<'_> {
                 .await?;
             }
             if let Some(artifacts) = &self.bindings.artifacts {
-                let evidence: Vec<_> = saved
-                    .messages
-                    .iter()
-                    .filter(|message| candidate.evidence_message_ids.contains(&message.message_id))
-                    .flat_map(|message| &message.content)
-                    .filter_map(|block| {
-                        if let ContentBlock::ToolResult { result } = block {
-                            Some(result.content.clone())
-                        } else {
-                            None
-                        }
-                    })
-                    .flatten()
-                    .collect();
+                let evidence =
+                    crate::verification::candidate_tool_evidence(&saved.messages, &candidate)?;
                 artifacts
                     .validate_content(&evidence, &current, Some(context.deadline))
                     .await?;

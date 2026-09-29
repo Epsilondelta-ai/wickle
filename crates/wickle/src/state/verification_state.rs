@@ -47,22 +47,10 @@ fn candidate(
     if history.last().map(|message| message.sequence.get()) != Some(candidate.through_sequence) {
         return Err(invalid());
     }
-    let evidence: Vec<_> = if plan.verifier.is_some() {
-        history
-            .iter()
-            .filter(|message| {
-                message.run_id == snapshot.run_id
-                    && message
-                        .content
-                        .iter()
-                        .any(|block| matches!(block, ContentBlock::ToolResult { .. }))
-            })
-            .map(|message| message.message_id.clone())
-            .collect()
-    } else {
-        vec![]
-    };
-    if candidate.evidence_message_ids != evidence {
+    if plan.verifier.is_some() {
+        crate::verification::candidate_evidence_ids(&session.messages, &candidate)
+            .map_err(|_| invalid())?;
+    } else if !candidate.evidence_message_ids.is_empty() {
         return Err(invalid());
     }
     let invocation = snapshot

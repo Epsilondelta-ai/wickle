@@ -5,6 +5,78 @@ use serde_json::Value;
 use std::{fmt, sync::Arc};
 use tokio_util::sync::CancellationToken;
 
+/// Original and effective source IDs for logical Tool observations in a frozen prefix.
+/// Corrections are validated before filtering the current Run, just as model projection does.
+pub(crate) fn tool_evidence_sources(
+    messages: &[Message],
+    run_id: &Id,
+    through_sequence: u64,
+) -> Result<Vec<(Id, Id)>, ContractError> {
+    let prefix =
+        &messages[..messages.partition_point(|message| message.sequence.get() <= through_sequence)];
+    let corrections = crate::message::tool_corrections(prefix)?;
+    Ok(prefix
+        .iter()
+        .filter(|message| {
+            &message.run_id == run_id
+                && message
+                    .content
+                    .iter()
+                    .any(|block| matches!(block, ContentBlock::ToolResult { .. }))
+        })
+        .map(|message| {
+            (
+                message.message_id.clone(),
+                corrections
+                    .get(&message.message_id)
+                    .map_or_else(|| message.message_id.clone(), |(source, _)| source.clone()),
+            )
+        })
+        .collect())
+}
+pub(crate) fn candidate_evidence_ids(
+    messages: &[Message],
+    candidate: &VerificationCandidate,
+) -> Result<Vec<Id>, ContractError> {
+    let sources = tool_evidence_sources(messages, &candidate.run_id, candidate.through_sequence)?;
+    let effective = sources.iter().map(|(_, id)| id.clone()).collect::<Vec<_>>();
+    // Older checkpoints stored the original Unknown observation IDs. Accept only
+    // that exact legacy list; both forms always resolve to the corrected evidence.
+    let legacy = sources.into_iter().map(|(id, _)| id).collect::<Vec<_>>();
+    if candidate.evidence_message_ids != effective && candidate.evidence_message_ids != legacy {
+        return Err(ContractError::new(
+            ErrorCode::InvalidSnapshot,
+            "verification.evidence",
+        ));
+    }
+    Ok(effective)
+}
+pub(crate) fn candidate_tool_evidence(
+    messages: &[Message],
+    candidate: &VerificationCandidate,
+) -> Result<Vec<InputContent>, ContractError> {
+    let sources = candidate_evidence_ids(messages, candidate)?;
+    let mut evidence = vec![];
+    for source in sources {
+        let message = messages
+            .iter()
+            .find(|message| message.message_id == source)
+            .ok_or_else(|| {
+                ContractError::new(ErrorCode::InvalidSnapshot, "verification.evidence")
+            })?;
+        for block in &message.content {
+            match block {
+                ContentBlock::ToolResult { result }
+                | ContentBlock::ToolResultCorrection { result, .. } => {
+                    evidence.extend(result.content.clone())
+                }
+                _ => {}
+            }
+        }
+    }
+    Ok(evidence)
+}
+
 /// A complete immutable output schema supplied by the Host.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -43,6 +115,8 @@ pub struct VerificationCandidate {
     /// Transcript boundary observed when the candidate was saved.
     pub through_sequence: u64,
     /// Immutable Tool observations supplied as evidence to this check.
+    /// New candidates name effective correction records. Legacy original IDs are
+    /// resolved through validated corrections within the frozen transcript prefix.
     pub evidence_message_ids: Vec<Id>,
     /// Parsed output; invalid structured candidates retain their original text.
     pub output: Vec<InputContent>,
@@ -480,5 +554,129 @@ impl VerificationLimits {
             ));
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod evidence_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn id(value: &str) -> Id {
+        Id::new(value).unwrap()
+    }
+    fn result(value: &str, unknown: bool) -> ToolResult {
+        serde_json::from_value(json!({
+            "call_id": "call", "call_message_id": "call-message",
+            "status": if unknown { "unknown" } else { "succeeded" },
+            "effect": if unknown { "unknown" } else { "applied" },
+            "content": [{"type": "text", "text": value}]
+        }))
+        .unwrap()
+    }
+    fn message(name: &str, sequence: u64, block: ContentBlock) -> Message {
+        Message {
+            source_model_request_id: None,
+            message_id: id(name),
+            run_id: id("run"),
+            sequence: sequence.try_into().unwrap(),
+            role: MessageRole::Tool,
+            origin: MessageOrigin::Tool,
+            visibility: Visibility::UserAndModel,
+            content: vec![block],
+        }
+    }
+    fn pair(name: &str, sequence: u64) -> [Message; 2] {
+        let mut original = result("unconfirmed", true);
+        original.call_id = id(&format!("{name}-call"));
+        original.call_message_id = id(&format!("{name}-call-message"));
+        let mut corrected = result(name, false);
+        corrected.call_id = original.call_id.clone();
+        corrected.call_message_id = original.call_message_id.clone();
+        let correction = ContentBlock::ToolResultCorrection {
+            previous_message_id: id(name),
+            previous_result_digest: canonical_digest(&serde_json::to_value(&original).unwrap()),
+            result: corrected,
+        };
+        [
+            message(
+                name,
+                sequence,
+                ContentBlock::ToolResult { result: original },
+            ),
+            message(&format!("{name}-corrected"), sequence + 1, correction),
+        ]
+    }
+    fn candidate(through_sequence: u64, evidence: &[&str]) -> VerificationCandidate {
+        VerificationCandidate {
+            scope: Scope {
+                tenant_id: id("tenant"),
+                workspace_id: id("workspace"),
+                user_id: None,
+            },
+            run_id: id("run"),
+            model_step_id: id("step"),
+            response_ref: RecordRef {
+                record_id: id("response"),
+                revision: 1,
+                digest: canonical_digest(&json!({})),
+            },
+            through_sequence,
+            evidence_message_ids: evidence.iter().map(|v| id(v)).collect(),
+            output: vec![],
+            format_error: None,
+        }
+    }
+    #[test]
+    fn legacy_evidence_resolves_corrections_and_preserves_run_and_prefix_boundaries() {
+        let mut messages = pair("first", 1)
+            .into_iter()
+            .chain(pair("second", 3))
+            .collect::<Vec<_>>();
+        let mut other = message(
+            "other",
+            5,
+            ContentBlock::ToolResult {
+                result: result("private", false),
+            },
+        );
+        other.run_id = id("other-run");
+        messages.push(other);
+        let expected = vec![
+            InputContent::Text {
+                text: "first".into(),
+            },
+            InputContent::Text {
+                text: "second".into(),
+            },
+        ];
+        for ids in [["first", "second"], ["first-corrected", "second-corrected"]] {
+            assert_eq!(
+                candidate_tool_evidence(&messages, &candidate(5, &ids)).unwrap(),
+                expected
+            );
+        }
+        assert_eq!(
+            candidate_tool_evidence(&messages, &candidate(1, &["first"])).unwrap(),
+            vec![InputContent::Text {
+                text: "unconfirmed".into()
+            }]
+        );
+        assert!(candidate_tool_evidence(&messages, &candidate(1, &["first-corrected"])).is_err());
+        for ids in [
+            vec!["first", "second-corrected"],
+            vec!["first-corrected"],
+            vec!["first", "second", "other"],
+        ] {
+            assert!(candidate_tool_evidence(&messages, &candidate(5, &ids)).is_err());
+        }
+        if let ContentBlock::ToolResultCorrection {
+            previous_result_digest,
+            ..
+        } = &mut messages[1].content[0]
+        {
+            *previous_result_digest = canonical_digest(&json!("forged"));
+        }
+        assert!(candidate_tool_evidence(&messages, &candidate(5, &["first", "second"])).is_err());
     }
 }
