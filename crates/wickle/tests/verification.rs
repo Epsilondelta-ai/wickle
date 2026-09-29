@@ -1087,3 +1087,293 @@ async fn repaired_text_keeps_its_original_source_attempt_after_later_inference()
             .any(|check| check.derived && check.batch_ref == saved.snapshot.context_batches[1])
     );
 }
+
+#[derive(Default)]
+struct CapturedEvidence {
+    seen: Mutex<Vec<VerificationInput>>,
+    revoke_before_review: Option<Arc<std::sync::atomic::AtomicBool>>,
+}
+impl Verifier for CapturedEvidence {
+    fn definition(&self) -> VerifierDefinition {
+        VerifierDefinition {
+            verifier_ref: reference("capture-evidence"),
+            criteria_ref: reference("evidence"),
+            criteria: "Record the observations supplied to the final check.".into(),
+            configuration: Default::default(),
+        }
+    }
+    fn verify<'a>(
+        &'a self,
+        input: &'a VerificationInput,
+        context: &'a VerifierContext<'a>,
+    ) -> PortFuture<'a, VerificationDecision> {
+        Box::pin(async move {
+            self.seen.lock().unwrap().push(input.clone());
+            if let Some(revoked) = &self.revoke_before_review {
+                revoked.store(true, Ordering::SeqCst);
+                context
+                    .models
+                    .generate(VerificationModelRequest {
+                        stage: id("artifact-review"),
+                        model_binding: id("primary"),
+                        messages: vec![ModelMessage {
+                            role: ModelRole::User,
+                            content: vec![ModelContent::Text {
+                                text: "Review the recorded observation.".into(),
+                            }],
+                        }],
+                        options: None,
+                        max_output_tokens: 128.try_into().unwrap(),
+                    })
+                    .await?;
+            }
+            Ok(VerificationDecision::Pass {})
+        })
+    }
+}
+fn capture_verification(
+    bindings: &mut AgentBindings,
+    profile: &mut AgentProfile,
+    check: Arc<CapturedEvidence>,
+) {
+    profile.completion_policy = CompletionPolicy::Verified {
+        verifier_ref: check.definition().verifier_ref,
+    };
+    bindings.verification = Some(Arc::new(
+        VerificationRuntime::new(scope(), vec![], vec![check], VerificationLimits::default())
+            .unwrap(),
+    ));
+}
+async fn resume_corrected(
+    fixture: &resume_support::Fixture,
+    agent: &Agent,
+    handle: &RunHandle,
+) -> RunHandle {
+    let saved = fixture.saved(handle).await;
+    let wait = saved.snapshot.wait.unwrap();
+    assert!(matches!(wait.target, WaitTarget::External { .. }));
+    completed(
+        agent
+            .resume(
+                ResumeCommand {
+                    run_id: handle.run_id().clone(),
+                    expected_revision: saved.snapshot.revision,
+                    command_id: id("correct-effect"),
+                    action: ResumeAction::External {
+                        wait_id: wait.wait_id,
+                        receipt_ref: fixture.store.proof.reference().clone(),
+                    },
+                },
+                context(),
+            )
+            .await
+            .unwrap(),
+    )
+}
+#[tokio::test]
+async fn corrected_tool_observation_reaches_final_verifier_and_legacy_candidates_restore() {
+    let fixture = resume_support::Fixture::new(resume_support::Mode::External);
+    let check = Arc::new(CapturedEvidence::default());
+    let mut bindings = fixture.bindings();
+    let mut profile = fixture.profile.clone();
+    capture_verification(&mut bindings, &mut profile, check.clone());
+    let agent = create_agent(profile, bindings).unwrap();
+    let initial = fixture.started(&agent).await;
+    assert_eq!(
+        fixture.outcome(&initial).await.result.status(),
+        RunStatus::Waiting
+    );
+    let resumed = resume_corrected(&fixture, &agent, &initial).await;
+    assert_eq!(
+        fixture.outcome(&resumed).await.result.status(),
+        RunStatus::Succeeded
+    );
+    assert_eq!(fixture.tools[1].calls.load(Ordering::SeqCst), 1);
+    assert_eq!(fixture.tools[1].applied.load(Ordering::SeqCst), 1);
+    assert_eq!(fixture.model.calls.load(Ordering::SeqCst), 2);
+    let candidate = {
+        let seen = check.seen.lock().unwrap();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(
+            seen[0].evidence,
+            ["before", "verified target", "after"]
+                .into_iter()
+                .map(|value| InputContent::Json {
+                    value: json!(value)
+                })
+                .collect::<Vec<_>>()
+        );
+        seen[0].candidate.clone()
+    };
+    let saved = fixture.saved(&resumed).await;
+    let (correction, original) = saved
+        .messages
+        .iter()
+        .find_map(|message| {
+            message.content.iter().find_map(|block| match block {
+                ContentBlock::ToolResultCorrection {
+                    previous_message_id,
+                    ..
+                } => Some((message.message_id.clone(), previous_message_id.clone())),
+                _ => None,
+            })
+        })
+        .unwrap();
+    assert!(candidate.evidence_message_ids.contains(&correction));
+    assert!(!candidate.evidence_message_ids.contains(&original));
+    let checkpoint = fixture.store.inner.export_checkpoint(&scope()).unwrap();
+    let mut image = serde_json::to_value(checkpoint).unwrap();
+    StateStoreCheckpoint::from_json(&image.to_string(), &scope(), &canonical_digest(&image))
+        .unwrap();
+    let candidate_id = saved.snapshot.candidate_ref.unwrap().record_id;
+    let legacy_ids = candidate
+        .evidence_message_ids
+        .iter()
+        .map(|id| {
+            if id == &correction {
+                original.clone()
+            } else {
+                id.clone()
+            }
+        })
+        .collect::<Vec<_>>();
+    image["records"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|record| record["reference"]["record_id"] == json!(candidate_id))
+        .unwrap()["value"]["evidence_message_ids"] = json!(legacy_ids);
+    rehash_records(&mut image);
+    StateStoreCheckpoint::from_json(&image.to_string(), &scope(), &canonical_digest(&image))
+        .expect("exact legacy evidence IDs remain restorable");
+    image["records"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|record| record["reference"]["record_id"] == json!(candidate_id))
+        .unwrap()["value"]["evidence_message_ids"] = json!([correction]);
+    rehash_records(&mut image);
+    assert!(
+        StateStoreCheckpoint::from_json(&image.to_string(), &scope(), &canonical_digest(&image))
+            .is_err(),
+        "a forged subset cannot omit evidence"
+    );
+}
+struct RevokeCorrectedArtifact {
+    inner: Arc<resume_support::Policy>,
+    revoked: Arc<std::sync::atomic::AtomicBool>,
+    at_candidate: bool,
+}
+impl PolicyPort for RevokeCorrectedArtifact {
+    fn authorize<'a>(
+        &'a self,
+        request: &'a PolicyRequest,
+        context: PolicyContext<'a>,
+    ) -> PortFuture<'a, PolicyDecision> {
+        Box::pin(async move {
+            if self.at_candidate && matches!(request.action, PolicyAction::VerifyCandidate { .. }) {
+                self.revoked.store(true, Ordering::SeqCst);
+            }
+            if self.revoked.load(Ordering::SeqCst)
+                && matches!(request.action, PolicyAction::ReadArtifact {})
+            {
+                return Ok(PolicyDecision::Deny {
+                    reason: id("artifact_revoked"),
+                });
+            }
+            self.inner.authorize(request, context).await
+        })
+    }
+}
+struct CorrectedArtifact {
+    inner: Arc<resume_support::Verifier>,
+    reference: ArtifactRef,
+}
+impl ExternalReceiptVerifier for CorrectedArtifact {
+    fn verify<'a>(
+        &'a self,
+        request: &'a ExternalReceiptRequest,
+        context: &'a ExternalReceiptContext,
+    ) -> PortFuture<'a, ToolExecutionResult> {
+        Box::pin(async move {
+            let mut result = self.inner.verify(request, context).await?;
+            result.outcome = ToolExecutionOutcome::SucceededWithContent {
+                value: json!("verified target"),
+                content: vec![InputContent::Artifact {
+                    reference: self.reference.clone(),
+                }],
+            };
+            Ok(result)
+        })
+    }
+}
+#[tokio::test]
+async fn corrected_artifacts_are_reauthorized_before_verifier_and_model_review() {
+    for at_candidate in [true, false] {
+        let fixture = resume_support::Fixture::new(resume_support::Mode::External);
+        let revoked = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut bindings = fixture.bindings();
+        let mut profile = fixture.profile.clone();
+        bindings.policy = Arc::new(
+            PolicyGate::new(
+                Arc::new(RevokeCorrectedArtifact {
+                    inner: fixture.policy.clone(),
+                    revoked: revoked.clone(),
+                    at_candidate,
+                }),
+                Duration::from_secs(5),
+            )
+            .unwrap(),
+        );
+        let artifacts = Arc::new(
+            ArtifactRuntime::new(
+                Arc::new(MemoryArtifactStore::default()),
+                bindings.policy.clone(),
+                bindings.ids.clone(),
+                ArtifactLimits::default(),
+            )
+            .unwrap(),
+        );
+        let stored = artifacts
+            .put(
+                ArtifactInput {
+                    media_type: id("text/plain"),
+                    bytes: b"corrected private evidence".to_vec(),
+                    source: None,
+                },
+                &context(),
+                None,
+            )
+            .await
+            .unwrap();
+        bindings.artifacts = Some(artifacts);
+        bindings.external_receipt_verifier = Some(Arc::new(CorrectedArtifact {
+            inner: fixture.verifier.clone(),
+            reference: stored.reference,
+        }));
+        configure_router(&mut bindings, false, true);
+        let check = Arc::new(CapturedEvidence {
+            seen: Mutex::new(vec![]),
+            revoke_before_review: (!at_candidate).then_some(revoked),
+        });
+        capture_verification(&mut bindings, &mut profile, check.clone());
+        let agent = create_agent(profile, bindings).unwrap();
+        let initial = fixture.started(&agent).await;
+        assert_eq!(
+            fixture.outcome(&initial).await.result.status(),
+            RunStatus::Waiting
+        );
+        let resumed = resume_corrected(&fixture, &agent, &initial).await;
+        assert_ne!(
+            fixture.outcome(&resumed).await.result.status(),
+            RunStatus::Succeeded
+        );
+        assert_eq!(check.seen.lock().unwrap().len(), usize::from(!at_candidate));
+        assert_eq!(
+            fixture.model.calls.load(Ordering::SeqCst),
+            2,
+            "a revoked corrected artifact must not reach a review model"
+        );
+        assert_eq!(fixture.tools[1].calls.load(Ordering::SeqCst), 1);
+    }
+}

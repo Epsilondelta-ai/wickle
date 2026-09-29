@@ -35,7 +35,12 @@ The core stores the candidate and its original model response before invoking a
 verifier. Evidence identifies immutable Tool observation messages at the
 candidate's transcript boundary. The callback receives model-visible output,
 the original request, and those observations; it does not receive tool receipts
-or execution arguments through the evidence channel.
+or execution arguments through the evidence channel. Validated Tool result
+corrections replace the earlier unknown observation within that frozen prefix,
+so verification sees the same recovered result as the Agent. Legacy candidates
+that reference the original observations resolve through the same corrections;
+later corrections and observations from other Runs are excluded. Corrected
+artifact references remain subject to current permission checks.
 
 Verifiers are read-only. They must not execute business tools or hide model
 calls. Use `VerifierContext.models.generate` for model-based checks. Each review

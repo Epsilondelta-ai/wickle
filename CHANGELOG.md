@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Use reconciled Tool observations in final verification and artifact permission checks.
+  Existing candidates with original observation IDs remain restorable.
+
 - Configure model-based context compaction with exact-version summary instructions.
   The protected plan pins their content; default records retain their existing identity.
   Rust `ModelCompactorConfig` literals now require `instructions: None` or a custom asset.
