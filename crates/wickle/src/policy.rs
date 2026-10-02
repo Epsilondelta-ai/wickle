@@ -443,6 +443,13 @@ impl PolicyGate {
             .checked_add(self.timeout)
             .ok_or_else(|| ContractError::new(ErrorCode::InvalidContract, "policy.timeout"))?;
         let effective = deadline.map_or(policy_deadline, |d| d.min(policy_deadline));
+        // A Host policy evaluation timeout is not exhaustion of the caller's
+        // execution budget. Both fail closed, but only the caller deadline stops it.
+        let timeout_code = if deadline.is_some_and(|d| d <= policy_deadline) {
+            ErrorCode::DeadlineExceeded
+        } else {
+            ErrorCode::PolicyUnavailable
+        };
         if effective <= now {
             return Err(ContractError::new(ErrorCode::DeadlineExceeded, "policy"));
         }
@@ -450,7 +457,7 @@ impl PolicyGate {
             tokio::select! {
                 biased;
                 _ = context.cancellation.cancelled() => Err(ContractError::new(ErrorCode::Cancelled, "policy")),
-                _ = tokio::time::sleep_until(effective) => Err(ContractError::new(ErrorCode::DeadlineExceeded, "policy")),
+                _ = tokio::time::sleep_until(effective) => Err(ContractError::new(timeout_code, "policy")),
                 result = self.policy.authorize(request, PolicyContext {
                     scope: &context.data.scope, principal_ref: &context.data.principal_ref,
                     capability_grant_ref: &context.data.capability_grant_ref,
@@ -462,7 +469,7 @@ impl PolicyGate {
             return Err(ContractError::new(ErrorCode::Cancelled, "policy"));
         }
         if Instant::now() >= effective {
-            return Err(ContractError::new(ErrorCode::DeadlineExceeded, "policy"));
+            return Err(ContractError::new(timeout_code, "policy"));
         }
         Ok(match restriction {
             Some(other) => decision.restrict(other),

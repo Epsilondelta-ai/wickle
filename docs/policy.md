@@ -33,7 +33,15 @@ tool inputs. It is not a cached permission token. Every later operation must
 recheck current policy, including after a grant is revoked or an approver changes.
 
 The gate requires a Host Tokio runtime and a positive policy timeout. An optional
-run deadline shortens that timeout. The gate bounds policy evaluation; the actual
+caller deadline shortens that timeout. If the configured policy timeout expires
+first, the gate returns `PolicyUnavailable`: authorization remains unknown, so
+the operation is neither constructed nor executed. A caller deadline that expires
+first or equals the policy deadline returns `DeadlineExceeded`; cancellation
+remains `Cancelled`. An internal policy timeout does not exhaust the Run's elapsed
+budget. In the agent Tool loop, the unavailable result returns to the model for
+another turn or retry; execution still requires a fresh allow decision.
+
+The gate bounds policy evaluation; the actual
 operation owns its I/O timeout/cancellation and external-effect reconciliation.
 Dropping a future does not prove that a remote write was undone.
 

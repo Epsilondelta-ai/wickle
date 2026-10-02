@@ -247,7 +247,7 @@ async fn denial_errors_panics_timeout_and_cancellation_do_not_construct_operatio
         (Behavior::Error, ErrorCode::PolicyUnavailable),
         (Behavior::PanicBeforeFuture, ErrorCode::PolicyUnavailable),
         (Behavior::PanicInFuture, ErrorCode::PolicyUnavailable),
-        (Behavior::Pending, ErrorCode::DeadlineExceeded),
+        (Behavior::Pending, ErrorCode::PolicyUnavailable),
         (Behavior::CancelThenAllow, ErrorCode::Cancelled),
     ];
     for (behavior, expected) in cases {

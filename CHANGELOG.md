@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Return `PolicyUnavailable` when the Host policy timeout expires before the caller
+  deadline, allowing the agent to inspect the failed authorization and retry
+  without exhausting the Run. Operations still require a fresh allow decision;
+  caller deadline expiry remains `DeadlineExceeded` and cancellation `Cancelled`.
+  See [scoped authorization](docs/policy.md#decisions-and-execution).
+
 - Use reconciled Tool observations in final verification and artifact permission checks.
   Existing candidates with original observation IDs remain restorable.
 

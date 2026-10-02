@@ -174,7 +174,23 @@ impl SerialToolRound {
                     binding_digest: bound.input.binding_digest().clone(),
                 });
             }
-            match self.authorize(&bound.input, context, budget).await? {
+            let decision = match self.authorize(&bound.input, context, budget).await {
+                Ok(decision) => decision,
+                Err(error) if control_or_storage(error.code) => return Err(error),
+                Err(error) => {
+                    self.reject(
+                        &call,
+                        call_message_id,
+                        ToolResultStatus::Failed,
+                        &code_name(error.code),
+                        budget,
+                        context,
+                    )
+                    .await?;
+                    continue;
+                }
+            };
+            match decision {
                 PolicyDecision::RequireApproval { reason } => {
                     return Ok(ToolRoundOutcome::ApprovalRequired {
                         call_id,

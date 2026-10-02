@@ -108,6 +108,8 @@ impl PolicyPort for Policy {
                             reason: id("late_review"),
                         });
                     }
+                    6 if check == 2 => return std::future::pending().await,
+                    7 if check == 3 => return std::future::pending().await,
                     _ => {}
                 }
             }
@@ -1720,6 +1722,64 @@ async fn unknown_invalid_and_denied_calls_return_errors_to_the_model_without_exe
         assert_ne!(results[0].1["status"], json!("succeeded"));
         assert_eq!(results[0].1["effect"], json!("not_applied"));
         assert!(results[0].1.get("error").is_some());
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn internal_policy_timeout_returns_to_the_model_without_exhausting_the_run() {
+    // Both the authorization before reservation and the final dispatch gate
+    // must report unavailable policy without performing an unauthorized write.
+    for (mode, charged_attempts) in [(6, 1), (7, 2)] {
+        let fixture = Fixture::new(
+            vec![(
+                "write",
+                object(json!({"query":"retry after policy returns"})),
+            )],
+            Behavior::Success,
+        );
+        fixture.policy.mode.store(mode, Ordering::SeqCst);
+        fixture.model.rounds.store(2, Ordering::SeqCst);
+        let mut bindings = fixture.bindings();
+        let gate =
+            Arc::new(PolicyGate::new(fixture.policy.clone(), Duration::from_millis(5)).unwrap());
+        bindings.policy = gate.clone();
+        bindings.model_exchange = Arc::new(
+            ModelExchange::new(fixture.model.clone(), gate)
+                .with_route_inspector(fixture.base.inspector.clone(), Duration::from_secs(1))
+                .unwrap(),
+        );
+        let agent = create_agent(fixture.profile.clone(), bindings).unwrap();
+        let handle = fixture.start(&agent).await;
+        let outcome = fixture.outcome(&handle).await;
+        assert_eq!(
+            outcome.result.status(),
+            RunStatus::Succeeded,
+            "{:?}",
+            outcome.result
+        );
+        assert_eq!(outcome.usage.tool_attempts, charged_attempts);
+        assert_eq!(fixture.model.calls.load(Ordering::SeqCst), 3);
+        assert_eq!(fixture.tools[1].calls.load(Ordering::SeqCst), 1);
+        assert_eq!(fixture.tools[1].applied.load(Ordering::SeqCst), 1);
+        let saved = fixture
+            .base
+            .store
+            .load(&scope(), handle.run_id())
+            .await
+            .unwrap();
+        let ToolCallState::Settled { result } = &saved.snapshot.tool_ledger[0].state else {
+            panic!("policy timeout observation missing")
+        };
+        assert_eq!(result.effect, ToolEffect::NotApplied);
+        assert_eq!(
+            result.error.as_ref().unwrap().code,
+            id("policy_unavailable")
+        );
+        let requests = fixture.model.requests.lock().unwrap();
+        let observed = observations(&requests[1]);
+        assert_eq!(observed.len(), 1);
+        assert_eq!(observed[0].1["error"]["code"], json!("policy_unavailable"));
+        assert_eq!(observed[0].1["effect"], json!("not_applied"));
     }
 }
 
