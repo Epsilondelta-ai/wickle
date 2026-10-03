@@ -778,18 +778,11 @@ impl Agent {
         segment: &SegmentBindings,
         local: &Arc<LocalRun>,
     ) -> Result<(), ContractError> {
-        let deadline = self.cleanup_deadline(local)?;
-        tokio::time::timeout_at(
-            deadline,
-            crate::future::boxed(|| self.finish_inner(run_id, candidate, budget, segment, local)),
-        )
-        .await
-        .map_err(|_| {
-            fail(
-                ErrorCode::PersistenceUnavailable,
-                "agent.finalization_timeout",
-            )
-        })?
+        // Normal outcome persistence is still execution work. The enclosing
+        // drive_leased select enforces the Run deadline/cancellation and then
+        // bounds stop cleanup; do not start its cleanup clock before a normal
+        // Waiting or terminal commit has completed.
+        crate::future::boxed(|| self.finish_inner(run_id, candidate, budget, segment, local)).await
     }
     async fn finish_inner(
         &self,

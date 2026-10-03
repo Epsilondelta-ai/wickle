@@ -447,6 +447,7 @@ pub struct Fixture {
 
 #[derive(Clone, Copy)]
 pub enum FinalCommitMode {
+    DelayNormalFinalization,
     RejectModelResult,
     RejectRecoveryLease,
     RejectRecoveryAcceptance,
@@ -654,6 +655,15 @@ impl StateStore for FinalCommitStore {
     ) -> PortFuture<'a, StoredRun> {
         Box::pin(async move {
             let mut input = input;
+            if matches!(self.mode, FinalCommitMode::DelayNormalFinalization)
+                && (input.snapshot.status.is_terminal()
+                    || input.snapshot.status == RunStatus::Waiting)
+            {
+                self.final_attempts.fetch_add(1, Ordering::SeqCst);
+                self.final_entered.notify_one();
+                tokio::time::sleep(Duration::from_secs(6)).await;
+                return self.inner.commit(s, r, input).await;
+            }
             if matches!(self.mode, FinalCommitMode::OmitInterruptionEvent)
                 && input.snapshot.status == RunStatus::Interrupted
             {
@@ -750,6 +760,7 @@ impl StateStore for FinalCommitStore {
                     self.inner.commit(s, r, input).await
                 }
                 FinalCommitMode::PauseEmptyEventPage
+                | FinalCommitMode::DelayNormalFinalization
                 | FinalCommitMode::LoseRecoveryAcknowledgement
                 | FinalCommitMode::RejectRecoveryLease
                 | FinalCommitMode::RejectRecoveryAcceptance
