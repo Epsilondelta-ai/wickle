@@ -447,6 +447,8 @@ pub struct Fixture {
 
 #[derive(Clone, Copy)]
 pub enum FinalCommitMode {
+    DelayInitialLeaseReturn,
+    DelayRenewedLeaseReturn,
     DelayNormalFinalization,
     RejectModelResult,
     RejectRecoveryLease,
@@ -480,6 +482,9 @@ pub struct FinalCommitStore {
     pub read_entered: Notify,
     pub record_fault: Mutex<Option<(Id, ErrorCode)>>,
     pub load_calls: AtomicUsize,
+    delayed_attach: AtomicBool,
+    pub renewal_calls: AtomicUsize,
+    pub returned_renewals: AtomicUsize,
 }
 impl FinalCommitStore {
     pub fn new(inner: Arc<MemoryStateStore>, mode: FinalCommitMode) -> Self {
@@ -498,6 +503,9 @@ impl FinalCommitStore {
             read_entered: Notify::new(),
             record_fault: Mutex::new(None),
             load_calls: AtomicUsize::new(0),
+            delayed_attach: AtomicBool::new(false),
+            renewal_calls: AtomicUsize::new(0),
+            returned_renewals: AtomicUsize::new(0),
         }
     }
 }
@@ -529,6 +537,9 @@ impl StateStore for FinalCommitStore {
     fn load<'a>(&'a self, s: &'a Scope, r: &'a Id) -> PortFuture<'a, StoredRun> {
         Box::pin(async move {
             self.load_calls.fetch_add(1, Ordering::SeqCst);
+            if self.delayed_attach.swap(false, Ordering::SeqCst) {
+                tokio::time::sleep(Duration::from_millis(270)).await;
+            }
             if self.block_read.load(Ordering::SeqCst) == 4 {
                 return Err(ContractError::new(
                     ErrorCode::PersistenceUnavailable,
@@ -575,7 +586,14 @@ impl StateStore for FinalCommitStore {
                 ))
             });
         }
-        self.inner.acquire_lease(s, r, o, n, t)
+        Box::pin(async move {
+            let lease = self.inner.acquire_lease(s, r, o, n, t).await?;
+            if matches!(self.mode, FinalCommitMode::DelayInitialLeaseReturn) {
+                tokio::time::sleep(Duration::from_millis(650)).await;
+                self.delayed_attach.store(true, Ordering::SeqCst);
+            }
+            Ok(lease)
+        })
     }
     fn renew_lease<'a>(
         &'a self,
@@ -585,7 +603,25 @@ impl StateStore for FinalCommitStore {
         n: i64,
         t: u64,
     ) -> PortFuture<'a, RunLease> {
-        self.inner.renew_lease(s, r, l, n, t)
+        Box::pin(async move {
+            let lease = self.inner.renew_lease(s, r, l, n, t).await?;
+            let attempt = self.renewal_calls.fetch_add(1, Ordering::SeqCst);
+            let delay = if matches!(self.mode, FinalCommitMode::DelayRenewedLeaseReturn)
+                && attempt == 0
+            {
+                850
+            } else if matches!(
+                self.mode,
+                FinalCommitMode::DelayInitialLeaseReturn | FinalCommitMode::DelayRenewedLeaseReturn
+            ) {
+                60
+            } else {
+                0
+            };
+            tokio::time::sleep(Duration::from_millis(delay)).await;
+            self.returned_renewals.fetch_add(1, Ordering::SeqCst);
+            Ok(lease)
+        })
     }
     fn release_lease<'a>(
         &'a self,
@@ -744,6 +780,8 @@ impl StateStore for FinalCommitStore {
             self.final_attempts.fetch_add(1, Ordering::SeqCst);
             self.final_entered.notify_one();
             match self.mode {
+                FinalCommitMode::DelayInitialLeaseReturn
+                | FinalCommitMode::DelayRenewedLeaseReturn => self.inner.commit(s, r, input).await,
                 FinalCommitMode::Reject => Err(ContractError::new(
                     ErrorCode::PersistenceUnavailable,
                     "final.commit",

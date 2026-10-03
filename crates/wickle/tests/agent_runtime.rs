@@ -621,6 +621,65 @@ async fn heartbeat_keeps_a_long_running_model_attempt_owned_beyond_the_original_
 }
 
 #[tokio::test(start_paused = true)]
+async fn delayed_initial_lease_return_renews_before_the_remaining_lease_expires() {
+    delayed_lease_return_completes(FinalCommitMode::DelayInitialLeaseReturn).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn delayed_renewed_lease_return_renews_without_waiting_another_full_interval() {
+    delayed_lease_return_completes(FinalCommitMode::DelayRenewedLeaseReturn).await;
+}
+
+async fn delayed_lease_return_completes(mode: FinalCommitMode) {
+    let fixture = Fixture::new(Response::Text, true);
+    let store = std::sync::Arc::new(FinalCommitStore::new(fixture.store.clone(), mode));
+    let mut bindings = fixture.bindings();
+    assert_eq!(bindings.settings.lease_ttl_ms, 1000);
+    assert_eq!(bindings.settings.heartbeat_interval_ms, 100);
+    bindings.state = store.clone();
+    let agent = create_agent(profile(), bindings).unwrap();
+    let handle = fixture.started(&agent, "delayed-lease-return").await;
+    fixture.model.entered.notified().await;
+    // Keep the actual model attempt open while two real renewals cross the
+    // delayed-return boundary; observers must not consume the attach load.
+    for _ in 0..200 {
+        tokio::time::advance(std::time::Duration::from_millis(10)).await;
+        tokio::task::yield_now().await;
+        if store.returned_renewals.load(Ordering::SeqCst) >= 2 {
+            break;
+        }
+    }
+    let returned = store.returned_renewals.load(Ordering::SeqCst);
+    if returned < 2 {
+        let observed = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            handle.outcome(&context()),
+        )
+        .await;
+        panic!("only {returned} renewals returned; original handle: {observed:?}");
+    }
+    let now = fixture.clock.now().unwrap().utc_ms;
+    assert_eq!(
+        fixture
+            .store
+            .acquire_lease(&scope(), handle.run_id(), &id("competitor"), now, 1000)
+            .await
+            .unwrap_err()
+            .code,
+        ErrorCode::LeaseBusy
+    );
+    fixture.model.release.add_permits(1);
+    let outcome = completed(handle.outcome(&context()).await.unwrap());
+    assert_eq!(outcome.result.status(), RunStatus::Succeeded);
+    assert_eq!(outcome.usage.model_calls, 1);
+    assert_eq!(outcome.usage.recovery_attempts, 0);
+    assert_eq!(fixture.model.calls.load(Ordering::SeqCst), 1);
+    let saved = fixture.store.load(&scope(), handle.run_id()).await.unwrap();
+    assert_eq!(saved.snapshot.status, RunStatus::Succeeded);
+    assert_eq!(saved.snapshot.outcome, Some(outcome));
+}
+
+#[tokio::test(start_paused = true)]
 async fn deadline_exhaustion_stops_an_incomplete_stream_and_preserves_the_attempt() {
     let fixture = Fixture::new(Response::WaitAfterText, false);
     let agent = fixture.agent();

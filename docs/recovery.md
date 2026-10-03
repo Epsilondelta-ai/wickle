@@ -62,6 +62,10 @@ limit outcome. Expired recovery closes the run without new model or Tool dispatc
 Use lease and heartbeat settings suitable for the storage backend. The defaults
 are a 30-second lease and a 5-second heartbeat interval. Fencing still rejects a
 previous owner's late commit after another owner acquires the run.
+Renewal uses the remaining lease lifetime, so time spent returning a persisted
+lease or reading controls does not add another full heartbeat interval. Storage
+work must still finish before the lease expires; this does not extend its TTL or
+allow an expired owner to continue.
 
 ## Persistent storage failure
 

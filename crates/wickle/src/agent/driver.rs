@@ -296,10 +296,25 @@ impl Agent {
     ) -> Result<(), ContractError> {
         let bindings = &self.inner.bindings;
         loop {
+            let (_, observed_now) = budget.settlement_time(0)?;
+            let remaining = lease
+                .expires_at_ms
+                .checked_sub(observed_now)
+                .and_then(|value| u64::try_from(value).ok())
+                .filter(|value| *value > 0)
+                .ok_or_else(|| fail(ErrorCode::LeaseLost, "agent.heartbeat"))?;
+            // The Host establishes expiry before persistence returns. Slow
+            // acquisition, renewal or control reads must not add a full new
+            // interval after the lease's scheduled renewal time has passed.
+            let wait_ms = remaining
+                .saturating_sub(
+                    bindings.settings.lease_ttl_ms - bindings.settings.heartbeat_interval_ms,
+                )
+                .min(bindings.settings.heartbeat_interval_ms);
             let reading = bindings.clock.now()?;
             let next = reading
                 .monotonic_ms
-                .checked_add(bindings.settings.heartbeat_interval_ms)
+                .checked_add(wait_ms)
                 .ok_or_else(|| fail(ErrorCode::ClockUnavailable, "agent.heartbeat"))?;
             tokio::select! { biased;
                 _ = stop.cancelled() => return Ok(()),
