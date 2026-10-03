@@ -67,7 +67,8 @@ async fn normal_input_wait_persists_after_stop_cleanup_window_without_reexecutin
     assert_eq!(outcome.result.status(), RunStatus::Waiting);
     assert!(started.elapsed() >= std::time::Duration::from_secs(6));
     assert_eq!(store.final_attempts.load(Ordering::SeqCst), 1);
-    assert_eq!(fixture.tools[0].calls.load(Ordering::SeqCst), 1);
+    assert_eq!(fixture.tools[1].calls.load(Ordering::SeqCst), 1);
+    assert_eq!(fixture.tools[2].calls.load(Ordering::SeqCst), 0);
     let saved = fixture
         .base
         .store
