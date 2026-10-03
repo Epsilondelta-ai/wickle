@@ -1,12 +1,124 @@
 //! Agent lifecycle, saved outcomes, request identity, and detached execution.
 
+#[path = "support/agent_resume.rs"]
+#[allow(dead_code)]
+mod resume_support;
 #[path = "support/agent.rs"]
 #[allow(dead_code)]
 mod support;
 use futures_util::StreamExt;
 use std::sync::atomic::Ordering;
+use support as agent_support;
 use support::*;
 use wickle::*;
+
+#[tokio::test]
+async fn normal_finalization_uses_run_budget_not_stop_cleanup_timeout() {
+    let fixture = Fixture::new(Response::Text, false);
+    let store = std::sync::Arc::new(FinalCommitStore::new(
+        fixture.store.clone(),
+        FinalCommitMode::DelayNormalFinalization,
+    ));
+    let mut bindings = fixture.bindings();
+    assert_eq!(bindings.settings.cleanup_timeout_ms, 5000);
+    bindings.state = store.clone();
+    let agent = create_agent(profile(), bindings).unwrap();
+    let started = std::time::Instant::now();
+    let handle = fixture.started(&agent, "delayed-normal-finish").await;
+    let outcome = tokio::time::timeout(
+        std::time::Duration::from_secs(9),
+        handle.outcome(&context()),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let outcome = completed(outcome);
+    assert_eq!(outcome.result.status(), RunStatus::Succeeded);
+    assert!(started.elapsed() >= std::time::Duration::from_secs(6));
+    assert_eq!(store.final_attempts.load(Ordering::SeqCst), 1);
+    let saved = fixture.store.load(&scope(), handle.run_id()).await.unwrap();
+    assert_eq!(saved.snapshot.status, RunStatus::Succeeded);
+    assert_eq!(saved.snapshot.outcome, Some(outcome));
+    assert!(saved.session.active_run_id.is_none());
+}
+
+#[tokio::test]
+async fn normal_input_wait_persists_after_stop_cleanup_window_without_reexecuting_tool() {
+    let fixture = resume_support::Fixture::new(resume_support::Mode::Input);
+    let store = std::sync::Arc::new(FinalCommitStore::new(
+        fixture.base.store.clone(),
+        FinalCommitMode::DelayNormalFinalization,
+    ));
+    let mut bindings = fixture.bindings();
+    assert_eq!(bindings.settings.cleanup_timeout_ms, 5000);
+    bindings.state = store.clone();
+    let agent = create_agent(fixture.profile.clone(), bindings).unwrap();
+    let started = std::time::Instant::now();
+    let handle = fixture.started(&agent).await;
+    let outcome = completed(
+        tokio::time::timeout(
+            std::time::Duration::from_secs(9),
+            handle.outcome(&context()),
+        )
+        .await
+        .unwrap()
+        .unwrap(),
+    );
+    assert_eq!(outcome.result.status(), RunStatus::Waiting);
+    assert!(started.elapsed() >= std::time::Duration::from_secs(6));
+    assert_eq!(store.final_attempts.load(Ordering::SeqCst), 1);
+    assert_eq!(fixture.tools[0].calls.load(Ordering::SeqCst), 1);
+    let saved = fixture
+        .base
+        .store
+        .load(&scope(), handle.run_id())
+        .await
+        .unwrap();
+    assert_eq!(saved.snapshot.status, RunStatus::Waiting);
+    assert!(saved.snapshot.wait.is_some());
+    assert_eq!(saved.snapshot.outcome, Some(outcome));
+    assert!(
+        saved
+            .snapshot
+            .tool_ledger
+            .iter()
+            .any(|entry| matches!(entry.state, ToolCallState::InputPending { .. }))
+    );
+}
+
+#[tokio::test]
+async fn cancelling_a_blocked_normal_finalization_still_bounds_stop_cleanup() {
+    let fixture = Fixture::new(Response::Text, false);
+    let store = std::sync::Arc::new(FinalCommitStore::new(
+        fixture.store.clone(),
+        FinalCommitMode::Pause,
+    ));
+    let mut bindings = fixture.bindings();
+    bindings.state = store.clone();
+    let agent = create_agent(profile(), bindings).unwrap();
+    let handle = fixture.started(&agent, "cancel-blocked-finish").await;
+    store.final_entered.notified().await;
+    let started = std::time::Instant::now();
+    completed(
+        handle
+            .cancel(id("cancel-blocked-finalization"), &context())
+            .await
+            .unwrap(),
+    );
+    let error = tokio::time::timeout(
+        std::time::Duration::from_secs(7),
+        handle.outcome(&context()),
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(error.code, ErrorCode::PersistenceUnavailable);
+    assert!(started.elapsed() >= std::time::Duration::from_secs(5));
+    assert_eq!(store.release.available_permits(), 0);
+    let saved = fixture.store.load(&scope(), handle.run_id()).await.unwrap();
+    assert_eq!(saved.snapshot.status, RunStatus::Running);
+    assert!(saved.snapshot.outcome.is_none());
+}
 
 #[test]
 fn starting_without_a_tokio_runtime_returns_a_typed_error_before_callbacks() {

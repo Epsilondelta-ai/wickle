@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Keep normal Waiting and terminal outcome persistence inside the execution
+  deadline instead of imposing the stop-cleanup timeout. Actual cancellation
+  and deadline cleanup remain bounded by the existing Host setting.
+
 - Return `PolicyUnavailable` when the Host policy timeout expires before the caller
   deadline, allowing the agent to inspect the failed authorization and retry
   without exhausting the Run. Operations still require a fresh allow decision;

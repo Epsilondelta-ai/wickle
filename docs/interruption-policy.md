@@ -53,7 +53,9 @@ default and leave a safe diagnostic in the protected interruption record.
 
 `AgentSettings::cleanup_timeout_ms` defaults to 5,000 ms and may be explicitly
 changed by the Host. Stop settlement and resource cleanup share this finite
-window; it does not extend the run's model or tool budget. After persistence,
+window; it does not extend the run's model or tool budget. Normal Waiting and
+terminal persistence remain governed by the run deadline and cancellation,
+rather than starting this stop-cleanup window. After persistence,
 the owned lease is released before adapter cleanup. Terminal commits release
 it atomically. Known ownership loss prevents the former owner from committing
 or releasing the lease.
