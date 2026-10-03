@@ -15,7 +15,7 @@ use wickle::*;
 use wickle_model_gemini::*;
 const WORKSPACE: &str = "11111111-1111-4111-8111-111111111111";
 
-struct Catalog(core_host::Catalog);
+struct Catalog(core_host::Catalog, Option<Arc<SkillRuntime>>);
 impl ProfileResolver for Catalog {
     fn resolve<'a>(
         &'a self,
@@ -23,6 +23,13 @@ impl ProfileResolver for Catalog {
         scope: &'a Scope,
     ) -> PortFuture<'a, ComponentMetadata> {
         Box::pin(async move {
+            if let Some(metadata) = self
+                .1
+                .as_ref()
+                .and_then(|s| s.component_metadata(reference))
+            {
+                return Ok(metadata);
+            }
             let mut metadata = self.0.resolve(reference, scope).await?;
             if reference.kind == ComponentKind::Tool {
                 metadata.model_name = Some(reference.id.clone());
@@ -32,6 +39,24 @@ impl ProfileResolver for Catalog {
             }
             Ok(metadata)
         })
+    }
+}
+struct ListedSkill;
+impl SkillResolver for ListedSkill {
+    fn load<'a>(
+        &'a self,
+        _: &'a SkillRef,
+        _: &'a SkillDefinition,
+        _: &'a SkillCallContext,
+    ) -> PortFuture<'a, String> {
+        Box::pin(async { Ok("Read-only skill instructions".into()) })
+    }
+    fn authorize_use<'a>(
+        &'a self,
+        _: &'a LoadedSkill,
+        _: &'a SkillCallContext,
+    ) -> PortFuture<'a, ()> {
+        Box::pin(async { Ok(()) })
     }
 }
 struct Inspector;
@@ -89,10 +114,11 @@ fn call_reply(index: usize, arguments: &str) -> support::Reply {
 #[tokio::test]
 async fn stable_and_beta_compile_and_repair_before_one_scoped_tool_execution() {
     for version in ["v1", "v1beta"] {
-        exercise(version).await;
+        exercise(version, false).await;
+        exercise(version, true).await;
     }
 }
-async fn exercise(version: &str) {
+async fn exercise(version: &str, with_skill: bool) {
     let invalid_constraint =
         json!({"query":"latest","limit":7,"note":null,"filter":{"category":"finance"}}).to_string();
     let invalid_json =
@@ -143,7 +169,7 @@ async fn exercise(version: &str) {
         .unwrap();
     let snapshot = RoutingSnapshot::new(catalog, fixture.router.snapshot.policy().clone()).unwrap();
     let mut bindings = fixture.bindings();
-    bindings.profile_resolver = Arc::new(Catalog(core_host::Catalog::default()));
+    bindings.profile_resolver = Arc::new(Catalog(core_host::Catalog::default(), None));
     bindings.router = Arc::new(core_host::Router {
         snapshot,
         queries: AtomicUsize::new(0),
@@ -176,17 +202,50 @@ async fn exercise(version: &str) {
     }, &bindings.system_inputs).unwrap();
     let wire_definition = tool.to_model_tool();
     let capture = Arc::new(Capture(Mutex::new(vec![])));
-    bindings.tools = Some(Arc::new(
-        ToolRegistry::new(
-            scope(),
-            vec![ToolRegistration {
-                compiled: tool,
-                executor: capture.clone(),
-            }],
-        )
-        .unwrap(),
-    ));
+    let mut registrations = vec![ToolRegistration {
+        compiled: tool,
+        executor: capture.clone(),
+    }];
     let mut profile = core_host::profile();
+    if with_skill {
+        let body = "Read-only skill instructions";
+        let definition = SkillDefinition {
+            skill: reference("listed-skill"),
+            name: "Listed skill".into(),
+            description: "Read-only guidance".into(),
+            body_hash: SkillDefinition::hash_body(body).unwrap(),
+            body_bytes: body.len() as u64,
+            assets: vec![],
+            required_tool_capabilities: Default::default(),
+            config_schema: json!({"type":"object","additionalProperties":false}),
+        };
+        let skills = Arc::new(
+            SkillRuntime::new(
+                SkillBindings {
+                    scope: scope(),
+                    state: fixture.store.clone(),
+                    policy: bindings.policy.clone(),
+                    resolver: Arc::new(ListedSkill),
+                    artifacts: None,
+                },
+                vec![definition],
+                SkillRuntime::catalog_loader(),
+                SkillLimits::default(),
+            )
+            .unwrap(),
+        );
+        profile.skills.push(SkillRef {
+            skill_id: id("listed-skill"),
+            version: id("1"),
+            config: None,
+        });
+        profile.tools.push(SkillRuntime::catalog_loader());
+        registrations.push(skills.loader_tool());
+        bindings.profile_resolver =
+            Arc::new(Catalog(core_host::Catalog::default(), Some(skills.clone())));
+        bindings.skills = Some(skills);
+    }
+    bindings.tools = Some(Arc::new(ToolRegistry::new(scope(), registrations).unwrap()));
     profile.limits.max_model_calls = 7.try_into().unwrap();
     profile.limits.max_tool_attempts = 2;
     profile.limits.max_repair_attempts = 4;
@@ -234,7 +293,33 @@ async fn exercise(version: &str) {
     let requests = server.requests.lock().unwrap();
     assert_eq!(requests.len(), 6);
     for request in requests.iter() {
-        let declaration = &request.body["tools"][0]["functionDeclarations"][0];
+        if with_skill {
+            let contents = request.body["contents"].as_array().unwrap();
+            let listing = contents
+                .iter()
+                .flat_map(|m| m["parts"].as_array().unwrap())
+                .filter_map(|p| p["text"].as_str())
+                .filter_map(|s| serde_json::from_str::<Value>(s).ok())
+                .find(|v| v["kind"] == "available_skills")
+                .unwrap();
+            assert_eq!(listing["skills"][0]["skill"]["id"], "listed-skill");
+            assert_eq!(contents[0]["role"], "user");
+            assert!(
+                request.body["systemInstruction"]["parts"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter_map(|p| p["text"].as_str())
+                    .filter_map(|s| serde_json::from_str::<Value>(s).ok())
+                    .all(|v| v["kind"] != "available_skills")
+            );
+        }
+        let declaration = request.body["tools"][0]["functionDeclarations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|d| d["name"] == "lookup")
+            .unwrap();
         let schema = &declaration[if version == "v1" {
             "parameters"
         } else {
