@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Schedule lease renewal against its remaining lifetime, including time spent
+  returning persisted leases and reading controls. Expired leases and storage
+  fencing retain their existing failure behavior.
+
 - Keep normal Waiting and terminal outcome persistence inside the execution
   deadline instead of imposing the stop-cleanup timeout. Actual cancellation
   and deadline cleanup remain bounded by the existing Host setting.
