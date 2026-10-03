@@ -723,14 +723,23 @@ impl ContextAssembler {
         let make_request = |selected_groups: &BTreeSet<usize>,
                             selected_context: &BTreeSet<usize>| {
             let mut messages = snapshot.prefix();
+            // Keep trusted constraints in the system prefix; Skill listings remain user data.
+            let mut system_end = messages
+                .iter()
+                .position(|message| message.role != ModelRole::System)
+                .unwrap_or(messages.len());
             for contract in input.tool_contracts {
                 for fragment in contract.constraint_fragments() {
-                    messages.push(ModelMessage {
-                        role: ModelRole::System,
-                        content: vec![ModelContent::Text {
-                            text: fragment.text.clone(),
-                        }],
-                    });
+                    messages.insert(
+                        system_end,
+                        ModelMessage {
+                            role: ModelRole::System,
+                            content: vec![ModelContent::Text {
+                                text: fragment.text.clone(),
+                            }],
+                        },
+                    );
+                    system_end += 1;
                 }
             }
             // Historical summaries precede the retained conversation and current request.
