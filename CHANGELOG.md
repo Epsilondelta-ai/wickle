@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Separate immutable protected records from a validated checkpoint with the
+  opt-in `split_records` API, then restore its exact full graph and digest.
+  See [checkpoint record partitioning](docs/state.md#protected-records-and-replay).
+
 - Preserve shorter positive renewal TTLs when hydrating an authoritative lease
   expiry; ownership and complete-set validation remain unchanged.
 

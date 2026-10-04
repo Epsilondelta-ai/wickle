@@ -142,6 +142,140 @@ struct RecordData {
     reference: RecordRef,
     value: Value,
 }
+
+const RECORD_INDEX_VERSION: &str = "wickle.state-store-record-index.v1";
+
+#[derive(Serialize)]
+struct RecordIndexView<'a> {
+    schema_version: &'static str,
+    checkpoint: &'a StateStoreCheckpoint,
+    records: &'a [RecordRef],
+    complete_digest: &'a JsonDigest,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RecordIndexData {
+    schema_version: String,
+    checkpoint: CheckpointData,
+    records: Vec<RecordRef>,
+    complete_digest: JsonDigest,
+}
+
+/// Privileged checkpoint metadata with exact references to external records.
+///
+/// Metadata still contains protected sessions, messages and execution state.
+/// It is not a public projection or an authorization grant. A Host must store
+/// new records atomically with this index and verify every referenced value.
+pub struct CheckpointRecordIndex {
+    json: String,
+    digest: JsonDigest,
+    data: RecordIndexData,
+}
+
+impl fmt::Debug for CheckpointRecordIndex {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CheckpointRecordIndex")
+            .field("record_count", &self.data.records.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl CheckpointRecordIndex {
+    /// Exact privileged metadata bytes for persistence, never public logging.
+    pub fn as_json(&self) -> &str {
+        &self.json
+    }
+
+    /// Canonical identity of this metadata and its complete record manifest.
+    pub fn digest(&self) -> &JsonDigest {
+        &self.digest
+    }
+
+    /// Complete immutable record identities, in stable key order.
+    pub fn record_refs(&self) -> &[RecordRef] {
+        &self.data.records
+    }
+
+    /// Original full checkpoint identity, retained across storage partitioning.
+    pub fn complete_digest(&self) -> &JsonDigest {
+        &self.data.complete_digest
+    }
+
+    /// Parse storage metadata against its trusted scope and canonical digest.
+    /// Full graph validity is established only by `restore`, with all records.
+    pub fn from_json(
+        input: &str,
+        scope: &Scope,
+        digest: &JsonDigest,
+    ) -> Result<Self, ContractError> {
+        let value = crate::parse_json(input)?;
+        if canonical_digest(&value) != *digest {
+            return Err(invalid("record_index.digest"));
+        }
+        let data: RecordIndexData =
+            serde_json::from_value(value).map_err(|_| invalid("record_index"))?;
+        if data.schema_version != RECORD_INDEX_VERSION {
+            return Err(error(
+                ErrorCode::UnsupportedSchemaVersion,
+                "record_index.schema_version",
+            ));
+        }
+        if &data.checkpoint.scope != scope {
+            return Err(error(ErrorCode::AccessDenied, "record_index.scope"));
+        }
+        if !data.checkpoint.records.is_empty()
+            || data
+                .records
+                .windows(2)
+                .any(|pair| record_key(&pair[0]) >= record_key(&pair[1]))
+        {
+            return Err(invalid("record_index.records"));
+        }
+        Ok(Self {
+            json: input.to_owned(),
+            digest: digest.clone(),
+            data,
+        })
+    }
+
+    /// Restore the exact full graph from the complete immutable record set.
+    /// Missing, duplicate, extra or changed records cannot produce a checkpoint.
+    pub fn restore(
+        mut self,
+        records: Vec<ProtectedRecord>,
+    ) -> Result<StateStoreCheckpoint, ContractError> {
+        if records.len() != self.data.records.len() {
+            return Err(invalid("record_index.record_set"));
+        }
+        let mut by_key = BTreeMap::new();
+        for record in records {
+            if by_key
+                .insert(record_key(record.reference()), record)
+                .is_some()
+            {
+                return Err(invalid("record_index.duplicate_record"));
+            }
+        }
+        for reference in &self.data.records {
+            let record = by_key
+                .remove(&record_key(reference))
+                .ok_or_else(|| invalid("record_index.missing_record"))?;
+            if record.reference() != reference {
+                return Err(invalid("record_index.record_identity"));
+            }
+            self.data.checkpoint.records.push(RecordData {
+                reference: record.reference,
+                value: record.value,
+            });
+        }
+        let checkpoint = restore_graph(self.data.checkpoint)?;
+        if checkpoint.digest() != self.data.complete_digest {
+            return Err(invalid("record_index.complete_digest"));
+        }
+        Ok(checkpoint)
+    }
+}
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct LeaseData {
@@ -175,6 +309,31 @@ impl From<LeaseData> for RunLease {
 }
 
 impl StateStoreCheckpoint {
+    /// Separate immutable records from a validated checkpoint for a Host store.
+    /// Existing inline export/restore contracts and the full digest stay intact.
+    pub fn split_records(
+        mut self,
+    ) -> Result<(CheckpointRecordIndex, Vec<ProtectedRecord>), ContractError> {
+        let complete_digest = self.digest();
+        let records: Vec<_> = std::mem::take(&mut self.state.records)
+            .into_values()
+            .collect();
+        let references: Vec<_> = records
+            .iter()
+            .map(|record| record.reference().clone())
+            .collect();
+        let json = serde_json::to_string(&RecordIndexView {
+            schema_version: RECORD_INDEX_VERSION,
+            checkpoint: &self,
+            records: &references,
+            complete_digest: &complete_digest,
+        })
+        .map_err(|_| invalid("record_index.serialization"))?;
+        let digest = canonical_digest(&crate::parse_json(&json)?);
+        let index = CheckpointRecordIndex::from_json(&json, &self.scope, &digest)?;
+        Ok((index, records))
+    }
+
     /// Exact namespace covered by the protected checkpoint.
     pub fn scope(&self) -> &Scope {
         &self.scope

@@ -20,7 +20,7 @@ mod recovery_state;
 mod skill_state;
 mod source_state;
 mod verification_state;
-pub use checkpoint::{STATE_STORE_CHECKPOINT_VERSION, StateStoreCheckpoint};
+pub use checkpoint::{CheckpointRecordIndex, STATE_STORE_CHECKPOINT_VERSION, StateStoreCheckpoint};
 use hook_state::{validate_hook_observation, validate_hook_snapshot, validate_hook_transition};
 pub use lease_state::RunLeaseState;
 use source_state::{validate_source_snapshot, validate_source_transition};
