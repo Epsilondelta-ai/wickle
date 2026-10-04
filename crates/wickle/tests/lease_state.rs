@@ -63,6 +63,61 @@ async fn expiry_hydration_preserves_business_state_and_current_fencing() {
 }
 
 #[tokio::test]
+async fn authoritative_shorter_renewal_survives_checkpoint_reopening() {
+    let source = MemoryStateStore::new();
+    source
+        .admit(
+            &scope(),
+            admission("run", "request", "session", "data", "1").await,
+        )
+        .await
+        .unwrap();
+    let lease = source
+        .acquire_lease(&scope(), &id("run"), &id("owner"), 1000, 1000)
+        .await
+        .unwrap();
+    let original = source.load(&scope(), &id("run")).await.unwrap();
+    let mut copy = MemoryStateStore::from_checkpoint(source.export_checkpoint(&scope()).unwrap());
+    let renewed = source
+        .renew_lease(&scope(), &id("run"), &lease, 1050, 100)
+        .await
+        .unwrap();
+    assert_eq!(renewed.expires_at_ms, 1150);
+    assert_eq!(
+        copy.check_lease(&scope(), &id("run"), &lease, 1500)
+            .await
+            .unwrap(),
+        lease
+    );
+    copy.hydrate_lease_states(&scope(), &source.export_lease_states(&scope()).unwrap())
+        .unwrap();
+    assert_eq!(copy.load(&scope(), &id("run")).await.unwrap(), original);
+    let checkpoint = copy.export_checkpoint(&scope()).unwrap();
+    let encoded = serde_json::to_string(&checkpoint).unwrap();
+    let reopened = MemoryStateStore::from_checkpoint(
+        StateStoreCheckpoint::from_json(&encoded, &scope(), &checkpoint.digest()).unwrap(),
+    );
+    assert_eq!(
+        reopened
+            .check_lease(&scope(), &id("run"), &lease, 1149)
+            .await
+            .unwrap(),
+        renewed
+    );
+    for now in [1150, 1500] {
+        assert_eq!(
+            reopened
+                .check_lease(&scope(), &id("run"), &lease, now)
+                .await
+                .unwrap_err()
+                .code,
+            ErrorCode::LeaseLost
+        );
+    }
+    assert_eq!(reopened.load(&scope(), &id("run")).await.unwrap(), original);
+}
+
+#[tokio::test]
 async fn terminal_checkpoint_cannot_receive_a_live_lease() {
     let mut store = MemoryStateStore::new();
     store
@@ -152,7 +207,7 @@ async fn invalid_lease_sets_are_rejected_before_any_expiry_is_applied() {
     let mut released = original.clone();
     released[1].lease = None;
     candidates.push(released);
-    for field in ["owner", "scope", "run", "generation", "expiry"] {
+    for field in ["owner", "scope", "run", "generation"] {
         let mut invalid = original.clone();
         let lease = invalid[1].lease.as_mut().unwrap();
         match field {
@@ -160,7 +215,6 @@ async fn invalid_lease_sets_are_rejected_before_any_expiry_is_applied() {
             "scope" => lease.scope.tenant_id = id("other-tenant"),
             "run" => lease.run_id = id("other-run"),
             "generation" => lease.fencing_token += 1,
-            "expiry" => lease.expires_at_ms -= 1,
             _ => unreachable!(),
         }
         candidates.push(invalid);

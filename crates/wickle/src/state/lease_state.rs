@@ -41,7 +41,7 @@ impl MemoryStateStore {
     ///
     /// Apply this only to a private working copy, never an immutable shared
     /// cache. The complete Run set, statuses and ownership generations must
-    /// match. Only same-owner expiry extension is allowed; this cannot acquire,
+    /// match. Apply the exact same-owner expiry, including a shorter TTL; this cannot acquire,
     /// release, take over or resurrect a lease. Validation precedes all changes.
     pub fn hydrate_lease_states(
         &mut self,
@@ -75,8 +75,7 @@ impl MemoryStateStore {
                         && incoming.run_id == entry.run_id
                         && incoming.owner == current.owner
                         && incoming.fencing_token == current.fencing_token
-                        && incoming.fencing_token == entry.last_fencing_token
-                        && incoming.expires_at_ms >= current.expires_at_ms => {}
+                        && incoming.fencing_token == entry.last_fencing_token => {}
                 _ => return Err(error(ErrorCode::InvalidSnapshot, "lease_states.ownership")),
             }
         }
