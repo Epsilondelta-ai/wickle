@@ -38,6 +38,16 @@ same generation is checked against the store's current expiry, not an untrusted
 expiry supplied by the caller. An expired or replaced generation cannot revive
 itself by renewing.
 
+Trusted external adapters can use `MemoryStateStore::export_lease_states` to read
+`RunLeaseState` metadata without transcripts, protected records or business
+snapshots. Use `hydrate_lease_states` only on a private working copy, never a shared
+immutable cache. The complete Run set, statuses, scopes, owners and fencing generations
+must match; validation precedes all changes and only same-owner expiry extension
+is allowed. Hydration cannot acquire, release, take over or resurrect ownership.
+This metadata grants no authorization. The Host must atomically persist ownership
+and status changes with the full checkpoint and use its current authoritative
+lease for fencing checks.
+
 `commit` requires the current lease and the expected checkpoint revision. The
 candidate revision must be exactly one greater. It validates the complete
 candidate, messages, records, and events before changing anything. A failure does

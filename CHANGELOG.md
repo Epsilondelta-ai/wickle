@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Export typed `RunLeaseState` metadata and hydrate renewed expiries into a
+  private store working copy without replacing business state or ownership.
+  See [state-store lease metadata](docs/state.md#leases-and-atomic-commits).
+
 - Schedule lease renewal against its remaining lifetime, including time spent
   returning persisted leases and reading controls. Expired leases and storage
   fencing retain their existing failure behavior.
