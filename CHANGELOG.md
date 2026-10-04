@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Preserve shorter positive renewal TTLs when hydrating an authoritative lease
+  expiry; ownership and complete-set validation remain unchanged.
+
 - Export typed `RunLeaseState` metadata and hydrate renewed expiries into a
   private store working copy without replacing business state or ownership.
   See [state-store lease metadata](docs/state.md#leases-and-atomic-commits).

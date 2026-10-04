@@ -42,8 +42,10 @@ Trusted external adapters can use `MemoryStateStore::export_lease_states` to rea
 `RunLeaseState` metadata without transcripts, protected records or business
 snapshots. Use `hydrate_lease_states` only on a private working copy, never a shared
 immutable cache. The complete Run set, statuses, scopes, owners and fencing generations
-must match; validation precedes all changes and only same-owner expiry extension
-is allowed. Hydration cannot acquire, release, take over or resurrect ownership.
+must match; validation precedes all changes and the exact authoritative expiry
+is applied, including a shorter positive TTL. Hydration cannot acquire, release,
+take over or resurrect ownership. A larger expiry is not proof of freshness;
+the adapter must read coherent, authoritative metadata.
 This metadata grants no authorization. The Host must atomically persist ownership
 and status changes with the full checkpoint and use its current authoritative
 lease for fencing checks.
