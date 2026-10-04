@@ -76,6 +76,26 @@ run in that scope. Explicit `read_record` access still requires the Host's separ
 protected-record permission. Debug output omits the value. External artifact and
 evidence references are resolved through their own storage/authorization ports.
 
+For an opt-in external storage representation, consume an owned, validated
+`StateStoreCheckpoint` with `split_records()` to obtain an opaque
+`CheckpointRecordIndex` and its `Vec<ProtectedRecord>`. The index exposes
+`as_json()`, `digest()`, ordered `record_refs()` and the original
+`complete_digest()`. Its metadata still contains private sessions, messages and
+execution state; treat its JSON as privileged data. Debug output shows only the
+record count. The existing inline checkpoint format remains available.
+
+`CheckpointRecordIndex::from_json` checks the trusted scope, index version,
+canonical index digest, strict reference order and absence of inline records.
+It does not validate the complete checkpoint graph. Consume the index with
+`restore(records)` to require exactly the referenced record IDs, revisions and
+digests, run the existing full graph validation and verify the original complete
+checkpoint digest. Missing, duplicate, extra or changed records are rejected.
+
+The Host must persist new immutable records and their index atomically while
+preserving its authoritative lease and revision fencing. This API supplies no
+database adapter or authorization grant; using it alone does not establish Host
+integration or improved storage performance.
+
 `read_events` uses an exclusive cursor and returns a bounded ordered page. Reading
 does not consume events. The memory store retains its full history while alive
 and reports the first/latest available sequence. Pages are limited to 1,000 events.

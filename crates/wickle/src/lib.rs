@@ -134,9 +134,10 @@ pub use skills::{
     SkillPlan, SkillResolver, SkillRuntime,
 };
 pub use state::{
-    AdmissionInput, AdmissionResult, CommitInput, EventPage, MAX_EVENT_PAGE_SIZE, MemoryStateStore,
-    ProtectedRecord, RunLease, RunLeaseState, STATE_STORE_CHECKPOINT_VERSION, StateStore,
-    StateStoreCapabilities, StateStoreCheckpoint, StoredRun,
+    AdmissionInput, AdmissionResult, CheckpointRecordIndex, CommitInput, EventPage,
+    MAX_EVENT_PAGE_SIZE, MemoryStateStore, ProtectedRecord, RunLease, RunLeaseState,
+    STATE_STORE_CHECKPOINT_VERSION, StateStore, StateStoreCapabilities, StateStoreCheckpoint,
+    StoredRun,
 };
 pub use tool_execution::{
     ExternalReceiptContext, ExternalReceiptRequest, ExternalReceiptVerifier,
