@@ -13,6 +13,7 @@ mod context_state;
 mod execution;
 mod hook_state;
 mod interruption_state;
+mod lease_state;
 mod prepared_state;
 mod reconciliation_state;
 mod recovery_state;
@@ -21,6 +22,7 @@ mod source_state;
 mod verification_state;
 pub use checkpoint::{STATE_STORE_CHECKPOINT_VERSION, StateStoreCheckpoint};
 use hook_state::{validate_hook_observation, validate_hook_snapshot, validate_hook_transition};
+pub use lease_state::RunLeaseState;
 use source_state::{validate_source_snapshot, validate_source_transition};
 
 use crate::{
