@@ -749,17 +749,26 @@ impl ContextAssembler {
                 }
             }
             for index in selected_groups {
+                if *index == current {
+                    // Supplemental data must not become a newer user request or
+                    // interrupt the current Run's Tool calls, results or steering.
+                    for context_index in selected_context {
+                        if input.context_items[*context_index].origin != ContextOrigin::Compaction {
+                            messages.push(
+                                context[*context_index]
+                                    .as_ref()
+                                    .expect("active context")
+                                    .clone(),
+                            );
+                        }
+                    }
+                }
                 messages.extend(
                     groups[*index]
                         .messages
                         .iter()
                         .map(|(_, message)| message.clone()),
                 );
-            }
-            for index in selected_context {
-                if input.context_items[*index].origin != ContextOrigin::Compaction {
-                    messages.push(context[*index].as_ref().expect("active context").clone());
-                }
             }
             ModelRequest {
                 request_id: input.request_id.clone(),
