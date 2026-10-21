@@ -216,6 +216,10 @@ impl ModelPort for ExampleModel {
             Some(&json!("high"))
         );
         assert_eq!(request.route, self.route);
+        assert!(request.messages.iter().any(|message| message.role == ModelRole::User
+            && message.content.iter().any(|content| matches!(content,
+                ModelContent::Json { value } if value == &json!({"rows":[{"amount":17},{"amount":25}],"note":null})
+            ))));
         self.calls.fetch_add(1, Ordering::SeqCst);
         if self.hold.load(Ordering::SeqCst) {
             self.entered.notify_one();
@@ -380,7 +384,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         session_id: id("session"),
         input: vec![InputContent::Text {
             text: "Retrieve the available result".into(),
-        }],
+        }, InputContent::Json { value: json!({"rows":[{"amount":17},{"amount":25}],"note":null}) }],
         trigger: RunTrigger::User {},
         model_options: JsonObject::from([("reasoning_effort".into(), json!("high"))]),
         max_output_tokens: None,
@@ -435,6 +439,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let restored = SqliteStateStore::open(&database)?
         .load(&scope, &run_id)
         .await?;
+    assert_eq!(restored.snapshot.request.input, request.input);
     assert_eq!(restored.snapshot.outcome, Some(outcome));
     assert!(restored.session.active_run_id.is_none());
     // Exercise a cooperative stop against the packaged library and SQLite store.
@@ -487,7 +492,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(second.calls.load(Ordering::SeqCst), 1);
     // Recover a separate cooperatively interrupted interval through the public
     // API. The synthetic primary becomes available after the stop.
-    let recover_request = RunRequest { request_id: id("recoverable-request"), session_id: id("recoverable-session"), input: vec![InputContent::Text { text: "Continue after maintenance".into() }], trigger: RunTrigger::User {}, model_options: JsonObject::from([("reasoning_effort".into(), json!("high"))]), max_output_tokens: None, output_contract: None };
+    let recover_request = RunRequest { request_id: id("recoverable-request"), session_id: id("recoverable-session"), input: vec![InputContent::Text { text: "Continue after maintenance".into() }, InputContent::Json { value: json!({"rows":[{"amount":17},{"amount":25}],"note":null}) }], trigger: RunTrigger::User {}, model_options: JsonObject::from([("reasoning_effort".into(), json!("high"))]), max_output_tokens: None, output_contract: None };
     let paused = completed(agent.start(recover_request.clone(), context.clone()).await?)?;
     tokio::time::timeout(Duration::from_secs(5), first.entered.notified()).await?;
     completed(paused.stop_execution(InterruptionCause::HostShutdown, &context).await?)?;
@@ -510,7 +515,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(first.calls.load(Ordering::SeqCst), 4);
     assert_eq!(second.calls.load(Ordering::SeqCst), 1);
     println!(
-        "agent consumer: pure construction, detached execution after observer drop, fallback under shared budgets, stored outcome and event replay, duplicate request without new model calls, SQLite reopen, custom interruption state and recovery, immutable prior outcomes, option provenance, durable replay and read-only stored composition inspection"
+        "agent consumer: structured user data through ModelPort, pure construction, detached execution after observer drop, fallback under shared budgets, stored outcome and event replay, duplicate request without new model calls, SQLite reopen, custom interruption state and recovery, immutable prior outcomes, option provenance, durable replay and read-only stored composition inspection"
     );
     Ok(())
 }
