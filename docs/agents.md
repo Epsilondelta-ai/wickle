@@ -4,7 +4,7 @@ For a runnable Host, begin with [the quickstart](quickstart.md). Existing
 applications can follow [the v0.2.0 migration guide](migration-v0.2.md).
 
 `create_agent` builds a scope-bound facade from an `AgentProfile` and existing
-Host components. The runtime executes text requests through admission, context
+Host components. The runtime executes text and structured JSON requests through admission, context
 preparation, model routing, and serial tool calls until a turn ends or execution
 stops. Outcomes, tool observations, and events are saved; callers can replay events
 and explicitly cancel execution.
@@ -26,7 +26,7 @@ pub async fn run_once(
 }
 ```
 
-The [text consumer](../tests/support/agent_consumer.rs) and
+The [structured-input consumer](../tests/support/agent_consumer.rs) and
 [tool-loop consumer](../tests/support/tool_loop_consumer.rs) configure the Host
 components, execute requests with synthetic models, reconnect to their events,
 and reopen SQLite state. The [resume consumer](../tests/support/resume_consumer.rs)
@@ -34,6 +34,41 @@ reopens a saved approval wait with new Host instances and a different reviewer,
 then completes the same Run using its frozen inputs. These consumers use real
 SQLite and synthetic ports; they make no provider network calls. Run them with
 `python3 scripts/check-package.py --allow-dirty`.
+
+## Supply structured user input
+
+`RunRequest.input` accepts an ordered list of `InputContent::Text` and
+`InputContent::Json`, including JSON-only requests, arrays, scalars and explicit
+`null`. For example:
+
+```rust
+use serde_json::json;
+use wickle::InputContent;
+
+let input = vec![
+    InputContent::Text { text: "Summarize these records.".into() },
+    InputContent::Json { value: json!({"rows": [{"amount": 17}, {"amount": 25}]}) },
+];
+```
+
+The Agent persists the submitted values and projects them as ordered user-role
+`ModelContent::Text` / `ModelContent::Json` blocks to the selected `ModelPort`.
+Provider adapters choose their API representation; this contract does not imply
+provider-native file uploads or automatic fetching of paths and URLs.
+The Host owns file storage, access checks, reference resolution and any product
+metadata or original-text presentation it needs separately.
+
+JSON remains user data even when it contains `role`, `tool_calls`, `scope` or
+`system_inputs` keys. It cannot grant Tool capabilities, select trusted Host
+instructions or populate execution-context system inputs. Current scope and
+policy checks, request byte bounds and JSON depth bounds still apply.
+`Artifact` and `Evidence` variants are not admitted as starting inputs and return
+`CapabilityUnsupported`; existing Tool/context artifact handling is unchanged.
+
+Reuse the same request ID and submitted content for retries. JSON object key
+order does not change identity; array order, changed values, explicit `null`
+versus omission, and the input block order do. Saved requests and their frozen
+inputs remain authoritative across replay and recovery.
 
 ## Supply Host components
 

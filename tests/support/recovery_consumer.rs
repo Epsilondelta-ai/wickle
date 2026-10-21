@@ -58,7 +58,7 @@ mod host {
         let attempts: Vec<_> = calls.lines().collect();
         assert_eq!(attempts.len(), 2);
         assert_ne!(attempts[0], attempts[1]);
-        println!("recovery consumer: abrupt Host exit, SQLite reopen under a new owner, original model step retained, two charged physical attempts, accepted command replay without another call (synthetic model, no provider network)");
+        println!("recovery consumer: structured input retained after abrupt Host exit, SQLite reopen under a new owner, original model step retained, two charged physical attempts, accepted command replay without another call (synthetic model, no provider network)");
         Ok(())
     }
     async fn child(directory: &std::path::Path, interrupt: bool) -> Result<(), Box<dyn std::error::Error>> {
@@ -88,7 +88,7 @@ mod host {
         })?;
         let context = ExecutionContext::new(ExecutionContextData { scope: scope.clone(), principal_ref: id("actor"), capability_grant_ref: id("grant"), trace_context: None, system_inputs: None }, Default::default());
         if interrupt {
-            let request = RunRequest { request_id: id("request"), session_id: id("session"), input: vec![InputContent::Text { text: "Retrieve the available result".into() }], trigger: RunTrigger::User {}, model_options: JsonObject::from([("reasoning_effort".into(), json!("high"))]), max_output_tokens:None,output_contract: None };
+            let request = RunRequest { request_id: id("request"), session_id: id("session"), input: vec![InputContent::Text { text: "Retrieve the available result".into() }, InputContent::Json { value: json!({"rows":[{"amount":17},{"amount":25}],"note":null}) }], trigger: RunTrigger::User {}, model_options: JsonObject::from([("reasoning_effort".into(), json!("high"))]), max_output_tokens:None,output_contract: None };
             let handle = completed(agent.start(request, context.clone()).await?)?;
             // Regression: wall-time delay exceeds the fixture's short lease.
             std::thread::sleep(Duration::from_millis(1200));
@@ -98,6 +98,7 @@ mod host {
         let run_id = id(&std::fs::read_to_string(directory.join("run"))?);
         assert_eq!(store.acquire_lease(&scope, &run_id, &id("too-early"), 1000, 1000).await.unwrap_err().code, ErrorCode::LeaseBusy);
         let before = completed(agent.get_run_details(&run_id, &context).await?)?;
+        assert_eq!(before.request.input, vec![InputContent::Text { text: "Retrieve the available result".into() }, InputContent::Json { value: json!({"rows":[{"amount":17},{"amount":25}],"note":null}) }]);
         let source = before.recovery_record(RandomIdSource.next_id()?)?;
         let command = ResumeCommand { run_id: run_id.clone(), expected_revision: before.revision, command_id: RandomIdSource.next_id()?, action: ResumeAction::Recover { recovery_ref: source.reference().clone() } };
         let handle = completed(agent.resume(command.clone(), context.clone()).await?)?;

@@ -71,7 +71,8 @@ pub struct RunRequest {
     pub request_id: Id,
     /// Session whose pinned profile will be used.
     pub session_id: Id,
-    /// User data, without injected tool calls or provider continuation state.
+    /// Ordered Text and Json user data, without injected tool calls or provider
+    /// continuation state. Agent admission rejects Artifact and Evidence inputs.
     pub input: Vec<InputContent>,
     /// Verified trigger provenance.
     pub trigger: RunTrigger,

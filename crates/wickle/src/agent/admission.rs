@@ -48,11 +48,12 @@ impl Agent {
         {
             return Err(fail(ErrorCode::InvalidContract, "agent.request_size"));
         }
-        if request
-            .input
-            .iter()
-            .any(|content| !matches!(content, InputContent::Text { .. }))
-        {
+        if request.input.iter().any(|content| {
+            !matches!(
+                content,
+                InputContent::Text { .. } | InputContent::Json { .. }
+            )
+        }) {
             return Err(fail(ErrorCode::CapabilityUnsupported, "agent.request"));
         }
         self.validate_new_configuration()?;
