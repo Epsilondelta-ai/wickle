@@ -175,6 +175,19 @@ fn project(
     stored: &StoredRun,
 ) -> Result<ContextProjection, ContractError> {
     let step = id(&format!("step-{}", stored.snapshot.run_id));
+    let context = [ContextItem::new(
+        id("retrieved-history"),
+        ContextOrigin::Retrieval,
+        reference("history-reader"),
+        stored.snapshot.scope.clone(),
+        vec![InputContent::Json {
+            value: json!({"archived_request":"Review earlier work"}),
+        }],
+        ContextLifetime::Run {
+            run_id: stored.snapshot.run_id.clone(),
+        },
+        ContextPriority::Required,
+    )];
     ContextAssembler::new().project(
         prompt,
         ProjectionInput {
@@ -186,7 +199,7 @@ fn project(
             current_request: &stored.snapshot.request,
             current_request_message_id: &id(&format!("user-{}", stored.snapshot.run_id)),
             transcript: &stored.messages,
-            context_items: &[],
+            context_items: &context,
             opaque_records: &[],
             expected_prompt_digest: &stored.session.prompt_snapshot.digest,
             request_id: step.clone(),
@@ -404,6 +417,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         1
     );
     assert_eq!(
+        second_projection.request.messages.last(),
+        Some(&ModelMessage {
+            role: ModelRole::User,
+            content: vec![ModelContent::Text {
+                text: "Now give a concise summary".into()
+            }],
+        })
+    );
+    assert_eq!(
+        second_projection.selected_context_ids,
+        vec![id("retrieved-history")]
+    );
+    let history = second_projection.request.messages.iter().find(|message| {
+        matches!(&message.content[..], [ModelContent::Json { value }] if value["kind"] == "context_data")
+    }).expect("retrieved history is retained");
+    assert_eq!(history.role, ModelRole::User);
+    assert!(
+        matches!(&history.content[..], [ModelContent::Json { value }]
+        if value["source_ref"]["id"] == "history-reader"
+        && value["content"][0]["value"]["archived_request"] == "Review earlier work")
+    );
+    assert_eq!(
         first_projection.prompt_digest,
         second_projection.prompt_digest
     );
@@ -423,7 +458,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         !serde_json::to_string(&second_projection.request)?.contains("host-only-database-value")
     );
     println!(
-        "context consumer: two stored runs share the pinned prompt/tool schema; changed prompt refused; current request appears once; internal execution data excluded"
+        "context consumer: two stored runs share the pinned prompt/tool schema; changed prompt refused; current request appears once after retrieved history; internal execution data excluded"
     );
     Ok(())
 }

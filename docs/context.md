@@ -80,7 +80,11 @@ It omits bound-input references, effect receipts, raw diagnostics, internal-only
 messages, and reference ownership scope. Artifact/evidence metadata is included
 only through the explicit public content mapping. Supplied `ContextItem` data
 retains its source, origin, and applicable session/Run/step lifetime; it cannot
-become System instructions.
+become System instructions. Historical summaries precede retained conversation.
+Other active context data follows retained earlier Runs and precedes the entire
+current Run. The current request and subsequent Tool rounds or user steering
+remain in transcript order, so supplemental data is not presented as a new user
+request after the current work or its latest Tool result.
 
 Opaque provider continuation requires a typed `ScopedOpaque` value with matching
 scope, record digest, provider, and exact route. A record reference alone does not

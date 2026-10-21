@@ -766,6 +766,107 @@ async fn data_context_never_adds_system_authority_or_replaces_the_pinned_prefix(
 }
 
 #[tokio::test]
+async fn supplemental_context_precedes_the_current_run_without_splitting_its_tool_round() {
+    let fixture = Fixture::new().await;
+    let mut transcript = vec![
+        message(
+            "previous-run",
+            1,
+            MessageRole::User,
+            MessageOrigin::User,
+            vec![text("Previous work")],
+        ),
+        fixture.current_message(2),
+    ];
+    transcript.extend(round(
+        "current-run",
+        3,
+        "call",
+        "fresh observation",
+        &fixture.tools[0],
+    ));
+    transcript.push(message(
+        "current-run",
+        5,
+        MessageRole::User,
+        MessageOrigin::User,
+        vec![text("Later steering")],
+    ));
+    let original = transcript.clone();
+    let baseline = ContextAssembler::new()
+        .project(&fixture.prompt, fixture.input(&transcript, &[], &[]))
+        .unwrap();
+    let items = vec![
+        fixture.item(
+            "history",
+            ContextOrigin::Retrieval,
+            ContextPriority::Required,
+        ),
+        fixture.item("memory", ContextOrigin::Memory, ContextPriority::Optional),
+        fixture.item(
+            "summary",
+            ContextOrigin::Compaction,
+            ContextPriority::Required,
+        ),
+    ];
+    let projected = ContextAssembler::new()
+        .project(&fixture.prompt, fixture.input(&transcript, &items, &[]))
+        .unwrap();
+    let messages = &projected.request.messages;
+    let current = messages
+        .iter()
+        .position(|message| {
+            message.content
+                == vec![ModelContent::Text {
+                    text: "Current requested work".into(),
+                }]
+        })
+        .unwrap();
+    let previous = messages
+        .iter()
+        .position(|message| {
+            message.content
+                == vec![ModelContent::Text {
+                    text: "Previous work".into(),
+                }]
+        })
+        .unwrap();
+    let context = messages
+        .iter()
+        .enumerate()
+        .filter_map(|(index, message)| match &message.content[..] {
+            [ModelContent::Json { value }] if value["kind"] == "context_data" => {
+                assert_eq!(message.role, ModelRole::User);
+                Some((index, value["item_id"].as_str().unwrap()))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        context.iter().map(|(_, name)| *name).collect::<Vec<_>>(),
+        vec!["summary", "history", "memory"]
+    );
+    assert!(context[0].0 < previous);
+    assert!(previous < context[1].0 && context[1].0 < current);
+    assert!(context[2].0 < current);
+    // The whole current Run remains the same suffix, including fresh Tool results and steering.
+    assert_eq!(
+        &messages[current..],
+        &baseline.request.messages[baseline.request.messages.len() - 4..]
+    );
+    assert_eq!(
+        projected.selected_message_ids,
+        baseline.selected_message_ids
+    );
+    assert_eq!(transcript, original);
+    projected.request.validate().unwrap();
+    let replay = ContextAssembler::new()
+        .project(&fixture.prompt, fixture.input(&transcript, &items, &[]))
+        .unwrap();
+    assert_eq!(replay.request, projected.request);
+}
+
+#[tokio::test]
 async fn context_items_validate_scope_and_digest_and_exclude_other_run_or_step_lifetimes() {
     let fixture = Fixture::new().await;
     let transcript = vec![fixture.current_message(1)];
